@@ -1,1 +1,14 @@
-BasedOnStyle: LLVM
+AlignAfterOpenBracket: AlwaysBreak
+AlignConsecutiveAssignments: AcrossComments
+AllowShortIfStatementsOnASingleLine: Always
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: False
+BinPackParameters: False
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+ColumnLimit: 100
+IndentWidth: 4
+PackConstructorInitializers: NextLine
+PointerAlignment: Left
+PenaltyReturnTypeOnItsOwnLine: 9999
