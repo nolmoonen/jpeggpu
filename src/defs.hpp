@@ -1,18 +1,30 @@
 #ifndef JPEGGPU_DEFS_HPP_
 #define JPEGGPU_DEFS_HPP_
 
+#include <cuda_runtime.h>
 #include <jpeggpu/jpeggpu.h>
 
 #include <array>
 #include <cstdio>
+#include <iostream>
 #include <stdint.h>
-
-namespace jpeggpu {
 
 // https://arxiv.org/abs/2111.09219
 // https://www.w3.org/Graphics/JPEG/itu-t81.pdf
 
+namespace jpeggpu {
+
 #define DBG_PRINT(...) printf(__VA_ARGS__);
+
+#define CHECK_CUDA(call)                                                                           \
+    do {                                                                                           \
+        cudaError_t err = call;                                                                    \
+        if (err != cudaSuccess) {                                                                  \
+            std::cerr << "CUDA error \"" << cudaGetErrorString(err) << "\" at: " __FILE__ ":"      \
+                      << __LINE__ << "\n";                                                         \
+            std::exit(EXIT_FAILURE);                                                               \
+        }                                                                                          \
+    } while (0)
 
 constexpr int block_size     = 8;
 /// components
