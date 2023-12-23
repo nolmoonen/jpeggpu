@@ -236,6 +236,8 @@ int decode_block(
     coder_state& state,
     int& dc)
 {
+    // FIXME simplify this code and use simplified Huffman table
+
     // Zero block output
     std::memset(dst, 0, sizeof(int16_t) * jpeggpu::block_size * jpeggpu::block_size);
 

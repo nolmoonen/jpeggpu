@@ -204,6 +204,7 @@ jpeggpu_status jpeggpu::reader::read_dht()
         }
         remaining -= count;
 
+        // FIXME remove this
         compute_huffman_table(table);
     }
 
