@@ -306,8 +306,8 @@ inline jpeggpu_status process_scan_legacy(jpeggpu::reader& reader)
 
     if (reader.is_interleaved) {
         int mcu_count = 0;
-        for (int y_mcu = 0; y_mcu < reader.num_mcus_y[0]; ++y_mcu) {
-            for (int x_mcu = 0; x_mcu < reader.num_mcus_x[0]; ++x_mcu) {
+        for (int y_mcu = 0; y_mcu < reader.num_mcus_y; ++y_mcu) {
+            for (int x_mcu = 0; x_mcu < reader.num_mcus_x; ++x_mcu) {
                 // one MCU
                 for (int i = 0; i < reader.num_components; ++i) {
                     const jpeggpu::huffman_table& table_dc =
@@ -319,7 +319,7 @@ inline jpeggpu_status process_scan_legacy(jpeggpu::reader& reader)
                             const int y_block = y_mcu * reader.ss_y[i] + y_ss;
                             const int x_block = x_mcu * reader.ss_x[i] + x_ss;
                             const size_t idx  = y_block * jpeggpu::block_size *
-                                                   reader.mcu_sizes_x[i] * reader.num_mcus_x[i] +
+                                                   reader.mcu_sizes_x[i] * reader.num_mcus_x +
                                                x_block * jpeggpu::block_size * jpeggpu::block_size;
                             int16_t* dst = &reader.data[i][idx];
                             decode_block(dst, table_dc, table_ac, state, state.dc[i]);
@@ -328,7 +328,7 @@ inline jpeggpu_status process_scan_legacy(jpeggpu::reader& reader)
                 }
                 mcu_count++;
                 // FIXME what if restart_interval is not set?
-                if (mcu_count % reader.restart_interval == 0) {
+                if (reader.restart_interval && mcu_count % reader.restart_interval == 0) {
                     for (int c = 0; c < jpeggpu::max_comp_count; ++c) {
                         state.dc[c] = 0;
                     }

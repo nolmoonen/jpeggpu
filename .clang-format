@@ -2,6 +2,7 @@ AlignAfterOpenBracket: AlwaysBreak
 AlignConsecutiveAssignments: AcrossComments
 AllowShortIfStatementsOnASingleLine: Always
 AlwaysBreakTemplateDeclarations: Yes
+AttributeMacros: ['__device__']
 BinPackArguments: False
 BinPackParameters: False
 BreakBeforeBraces: Custom

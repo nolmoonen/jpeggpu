@@ -74,8 +74,8 @@ struct reader {
     int mcu_sizes_y[max_comp_count];
     int data_sizes_x[max_comp_count];
     int data_sizes_y[max_comp_count];
-    int num_mcus_x[max_comp_count];
-    int num_mcus_y[max_comp_count];
+    int num_mcus_x;
+    int num_mcus_y;
 
     int16_t* data[max_comp_count];
     uint8_t* image_out[max_comp_count];

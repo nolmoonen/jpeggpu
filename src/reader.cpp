@@ -262,8 +262,17 @@ jpeggpu_status jpeggpu::reader::read_sos()
         data_sizes_y[i] =
             ceiling_div(sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i])) * mcu_sizes_y[i];
 
-        num_mcus_x[i] = ceiling_div(data_sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i]));
-        num_mcus_y[i] = ceiling_div(data_sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i]));
+        if (i == 0) {
+            num_mcus_x = ceiling_div(data_sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i]));
+            num_mcus_y = ceiling_div(data_sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i]));
+        } else {
+            assert(
+                ceiling_div(data_sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i])) ==
+                static_cast<unsigned int>(num_mcus_x));
+            assert(
+                ceiling_div(data_sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i])) ==
+                static_cast<unsigned int>(num_mcus_y));
+        }
     }
 
     // const size_t consumed = image_remaining - state.image_size;
@@ -403,7 +412,7 @@ jpeggpu_status jpeggpu::reader::read()
             read_dht();
             continue;
         case jpeggpu::MARKER_EOI:
-            break;
+            break; // nothing to skip
         case jpeggpu::MARKER_SOS:
             read_sos();
             continue;
@@ -413,12 +422,10 @@ jpeggpu_status jpeggpu::reader::read()
         case jpeggpu::MARKER_DRI:
             read_dri();
             continue;
-
         default:
             JPEGGPU_CHECK_STATUS(skip_segment());
             continue;
         }
-        JPEGGPU_CHECK_STATUS(skip_segment());
     } while (marker != jpeggpu::MARKER_EOI);
 
     return JPEGGPU_SUCCESS;

@@ -1,6 +1,6 @@
 #include "decoder.hpp"
-#include "decode_gpu.hpp"
 #include "decode_cpu_legacy.hpp"
+#include "decode_gpu.hpp"
 #include "defs.hpp"
 #include "idct.hpp"
 #include "marker.hpp"
@@ -56,10 +56,10 @@ jpeggpu_status jpeggpu::decoder::decode(jpeggpu_img* img)
         reader.image_out[i] = new uint8_t[reader.data_sizes_x[i] * reader.data_sizes_y[i]];
     }
 
-    process_scan_legacy(reader);
+    // process_scan_legacy(reader);
+    process_scan(reader, cudaStreamDefault); // TODO stream
 
-    // TODO check that the number of scans seen is equal to the number of
-    //   components
+    // TODO check that the number of scans seen is equal to the number of components
     jpeggpu::idct(&reader);
 
     // FIXME find better place
