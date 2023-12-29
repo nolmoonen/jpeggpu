@@ -11,6 +11,7 @@
 
 // https://arxiv.org/abs/2111.09219
 // https://www.w3.org/Graphics/JPEG/itu-t81.pdf
+// https://u.cs.biu.ac.il/~wisemay/computer2003.pdf
 
 namespace jpeggpu {
 
@@ -35,7 +36,7 @@ enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 using qtable = uint8_t[64];
 
 // clang-format off
-constexpr std::array<int, 64 + 16> order_natural = {
+__device__ constexpr int order_natural[64 + 16] = {
      0,  1,  8, 16,  9,  2,  3, 10,
     17, 24, 32, 25, 18, 11,  4,  5,
     12, 19, 26, 33, 40, 48, 41, 34,
@@ -44,7 +45,7 @@ constexpr std::array<int, 64 + 16> order_natural = {
     29, 22, 15, 23, 30, 37, 44, 51,
     58, 59, 52, 45, 38, 31, 39, 46,
     53, 60, 61, 54, 47, 55, 62, 63,
-    63, 63, 63, 63, 63, 63, 63, 63, // Extra entries for safety in decoder
+    63, 63, 63, 63, 63, 63, 63, 63, // Extra entries for safety in decoder TODO is this needed?
     63, 63, 63, 63, 63, 63, 63, 63};
 // clang-format on
 

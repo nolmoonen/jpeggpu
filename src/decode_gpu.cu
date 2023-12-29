@@ -93,6 +93,9 @@ __device__ void discard_bits(reader_state& rstate, int num_bits)
     rstate.cache_num_bits -= num_bits;
 }
 
+/// \brief
+///
+/// \param[out] length Number of bits read.
 uint8_t __device__ get_category(
     reader_state& rstate, int& length, const jpeggpu::huffman_table& table)
 {
@@ -130,6 +133,11 @@ __device__ int get_value(int num_bits, int code)
     return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
+/// \brief Zero run length, indicates a run of 16 zeros.
+constexpr int symbol_zrl = INT32_MAX;
+/// \brief End of block, indicates all remaining coefficients in the data unit are zero.
+constexpr int symbol_eob = INT32_MAX - 1;
+
 __device__ void decode_next_symbol_dc(
     reader_state& rstate,
     int& length,
@@ -137,8 +145,8 @@ __device__ void decode_next_symbol_dc(
     int& run_length,
     const jpeggpu::huffman_table& table)
 {
-    int category_length = 0;
-    const int category  = get_category(rstate, category_length, table);
+    int category_length    = 0;
+    const uint8_t category = get_category(rstate, category_length, table);
 
     if (category != 0) {
         assert(0 < category && category < 17);
@@ -147,7 +155,7 @@ __device__ void decode_next_symbol_dc(
         if (rstate.cache_num_bits < category) {
             // TODO are these return values okay?
             length     = category_length;
-            symbol     = 0;
+            symbol     = symbol_eob; // TODO just skip the remainder?
             run_length = 0;
             return;
         }
@@ -163,11 +171,6 @@ __device__ void decode_next_symbol_dc(
         run_length = 0;
     }
 };
-
-/// \brief Zero run length, indicates a run of 16 zeros.
-constexpr int symbol_zrl = INT32_MAX;
-/// \brief End of block, indicates all remaining coefficients in the data unit are zero.
-constexpr int symbol_eob = INT32_MAX - 1;
 
 __device__ void decode_next_symbol_ac(
     reader_state& rstate,
@@ -190,7 +193,7 @@ __device__ void decode_next_symbol_ac(
         if (rstate.cache_num_bits < category) {
             // TODO are these return values okay?
             length     = category_length;
-            symbol     = 0;
+            symbol     = symbol_eob; // TODO just end the block
             run_length = 0;
             return;
         }
@@ -305,14 +308,8 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 /// \tparam is_overflow Whether `i` was decoded by another thread already. TODO word this better.
 /// \tparam do_write Whether to write the coefficients to the output buffer.
 template <bool is_overflow, bool do_write>
-__device__ subsequence_info decode_subsequence(
-    int i,
-    int16_t* out_0,
-    int16_t* out_1,
-    int16_t* out_2,
-    int16_t* out_3,
-    subsequence_info* s_info,
-    const_state cstate)
+__device__ subsequence_info
+decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cstate)
 {
     subsequence_info info;
     info.p = i * subsequence_size; // start of i-th subsequence
@@ -333,7 +330,12 @@ __device__ subsequence_info decode_subsequence(
         position_in_output = s_info[i].n;
     }
     if constexpr (is_overflow) {
-        info = s_info[i - 1];
+        // FIXME is this proper? if not doing this, an uninitialized read will occur due to not
+        //   storing n in sync_intra
+        info.p = s_info[i - 1].p;
+        info.c = s_info[i - 1].c;
+        info.z = s_info[i - 1].z;
+        // info   = s_info[i - 1];
     }
     subsequence_info last_symbol; // the last detected codeword
     const int scan_bit_size = (cstate.scan_end - cstate.scan) * 8;
@@ -350,22 +352,9 @@ __device__ subsequence_info decode_subsequence(
         decode_next_symbol(rstate, length, symbol, run_length, table, info.z, is_dc);
         is_dc = false;  // only one dc symbol per data unit
         if (do_write) { // TODO could make a separate kernel for this
-            assert(position_in_output >= 0);
-            switch (comp) {
-            case component::y:
-                if (position_in_output < 12192768) out_0[position_in_output] = symbol; // FIXME
-                break;
-            case component::cb:
-                if (position_in_output < 3048192) out_1[position_in_output] = symbol; // FIXME
-                break;
-            case component::cr:
-                if (position_in_output < 3048192) out_2[position_in_output] = symbol; // FIXME
-                break;
-            case component::k:
-                assert(false);
-                out_3[position_in_output] = symbol;
-                break;
-            }
+            // out[position_in_output] = symbol;
+            out[position_in_output / 64 * 64 + jpeggpu::order_natural[position_in_output % 64]] =
+                symbol;
         }
         position_in_output = position_in_output + run_length + 1;
         info.p += length;
@@ -374,18 +363,14 @@ __device__ subsequence_info decode_subsequence(
         if (info.z >= 64 || symbol == symbol_eob) {
             // the data unit is complete
             info.z = 0;
-            info.c++;
+            ++info.c;
+            is_dc = true;
+
             // ass-1
             const int num_data_units_in_mcu = cstate.ssx * cstate.ssy + (cstate.num_components - 1);
             if (info.c >= num_data_units_in_mcu) {
-                // data unit is complete
+                // mcu is complete
                 info.c = 0;
-            }
-            const component comp_next =
-                calc_component(cstate.ssx, cstate.ssy, info.c, cstate.num_components);
-            if (comp != comp_next) {
-                // component is complete
-                is_dc = true;
             }
         }
     }
@@ -417,18 +402,18 @@ __global__ void sync_intra_sequence(
     // alg-3:10
     // FIXME should we be storing `n` here? paper text says no but psuedo says yes
     {
-        subsequence_info info = decode_subsequence<false, false>(
-            subseq_global, nullptr, nullptr, nullptr, nullptr, s_info, cstate);
+        subsequence_info info =
+            decode_subsequence<false, false>(subseq_global, nullptr, s_info, cstate);
         s_info[subseq_global].p = info.p;
+        s_info[subseq_global].n = 0; // FIXME this is required to make initcheck succeed
         s_info[subseq_global].c = info.c;
         s_info[subseq_global].z = info.z;
     }
     __syncthreads(); // wait until data of next subsequence is available
     ++subseq_global;
     while (!synchronized && subseq_global <= end) {
-        subsequence_info info = decode_subsequence<true, false>(
-            subseq_global, nullptr, nullptr, nullptr, nullptr, s_info, cstate);
-        assert(info.n >= 0); // FIXME debug
+        subsequence_info info =
+            decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
         if (info.p == s_info[subseq_global].p &&
             same_component(
                 cstate.ssx, cstate.ssy, info.c, s_info[subseq_global].c, cstate.num_components) &&
@@ -437,7 +422,11 @@ __global__ void sync_intra_sequence(
             //   `subseq_global`th subsequence as the thread before it
             synchronized = true;
             // FIXME unclear from paper if we should break here
+            // break;
         }
+        // FIXME inserted a sync, s_info[subseq_global] may be read in another thread's
+        //   decode_subsequence
+        __syncthreads();
         s_info[subseq_global] = info;
         ++subseq_global;
         __syncthreads();
@@ -464,9 +453,8 @@ __global__ void sync_inter_sequence(
     // paper uses `+ block_size` but `end` should be an index
     const int end     = min(subseq_global + block_size, num_subsequences - 1);
     while (!synchronized && subseq_global <= end) {
-        subsequence_info info = decode_subsequence<true, false>(
-            subseq_global, nullptr, nullptr, nullptr, nullptr, s_info, cstate);
-        assert(info.n >= 0);
+        subsequence_info info =
+            decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
         if (info.p == s_info[subseq_global].p &&
             same_component(
                 cstate.ssx, cstate.ssy, info.c, s_info[subseq_global].c, cstate.num_components) &&
@@ -483,13 +471,7 @@ __global__ void sync_inter_sequence(
 }
 
 __global__ void decode_write(
-    int16_t* out_0,
-    int16_t* out_1,
-    int16_t* out_2,
-    int16_t* out_3,
-    subsequence_info* s_info,
-    int num_subsequences,
-    const_state cstate)
+    int16_t* out, subsequence_info* s_info, int num_subsequences, const_state cstate)
 {
     const int si = blockIdx.x * blockDim.x + threadIdx.x;
     if (si >= num_subsequences) {
@@ -499,9 +481,9 @@ __global__ void decode_write(
     // only first thread does not do overflow
     constexpr bool do_write = true;
     if (si == 0) {
-        decode_subsequence<false, do_write>(si, out_0, out_1, out_2, out_3, s_info, cstate);
+        decode_subsequence<false, do_write>(si, out, s_info, cstate);
     } else {
-        decode_subsequence<true, do_write>(si, out_0, out_1, out_2, out_3, s_info, cstate);
+        decode_subsequence<true, do_write>(si, out, s_info, cstate);
     }
 }
 
@@ -595,14 +577,15 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
     CHECK_CUDA(cudaMemcpyAsync(
         d_scan, reader.scan_start, reader.scan_size, cudaMemcpyHostToDevice, stream));
 
-    int16_t* d_out[jpeggpu::max_comp_count];
+    // alg-1:01
+    size_t total_data_size = 0;
     for (int c = 0; c < reader.num_components; ++c) {
-        // alg-1:01
-        const size_t data_size = reader.data_sizes_x[c] * reader.data_sizes_y[c] * sizeof(int16_t);
-        CHECK_CUDA(cudaMalloc(&d_out[c], data_size));
-        // initialize to zero, since only non-zeros are written
-        CHECK_CUDA(cudaMemsetAsync(d_out[c], 0, data_size, stream));
+        total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
     }
+    int16_t* d_out;
+    CHECK_CUDA(cudaMalloc(&d_out, total_data_size * sizeof(int16_t)));
+    // initialize to zero, since only non-zeros are written
+    CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
 
     // alg-1:05
     subsequence_info* d_s_info;
@@ -623,7 +606,6 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
 
         CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
 
-        // FIXME hangs
         sync_intra_sequence<block_size>
             <<<num_sequences, block_size, 0, stream>>>(d_s_info, num_subsequences, cstate);
         CHECK_CUDA(cudaGetLastError());
@@ -702,9 +684,6 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
         d_s_info,
         num_subsequences * sizeof(subsequence_info),
         cudaMemcpyDeviceToHost));
-    for (int i = 0; i < num_subsequences; ++i) {
-        assert(h_s_info[i].n >= 0);
-    }
 
     // TODO consider SoA or do in-place
     // alg-1:07-08
@@ -746,24 +725,40 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
         CHECK_CUDA(cudaFree(d_reduce_out));
     }
 
+    // FIXME debug
+    CHECK_CUDA(cudaMemcpy(
+        h_s_info.data(),
+        d_s_info,
+        num_subsequences * sizeof(subsequence_info),
+        cudaMemcpyDeviceToHost));
+
     // alg-1:09-15
     decode_write<<<num_sequences, block_size, 0, stream>>>(
-        d_out[0], d_out[1], d_out[2], d_out[3], d_s_info, num_subsequences, cstate);
+        d_out, d_s_info, num_subsequences, cstate);
     CHECK_CUDA(cudaGetLastError());
 
     CHECK_CUDA(cudaFree(d_s_info));
 
-    for (int c = 0; c < reader.num_components; ++c) {
-        CHECK_CUDA(cudaMemcpyAsync(
-            reader.data[c],
-            d_out[c],
-            reader.data_sizes_x[c] * reader.data_sizes_y[c] * sizeof(int16_t),
-            cudaMemcpyDeviceToHost,
-            stream));
+    // TODO replace with GPU transpose
+    std::vector<int16_t> h_out(total_data_size);
+    CHECK_CUDA(cudaMemcpyAsync(
+        h_out.data(), d_out, total_data_size * sizeof(int16_t), cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    // TODO fix for subsampling and number of components
+    for (int y = 0; y < reader.num_mcus_y; ++y) {
+        for (int x = 0; x < reader.num_mcus_x; ++x) {
+            const int idx                    = y * reader.num_mcus_x + x;
+            constexpr size_t data_unit_bytes = 64 * sizeof(int16_t);
+            std::memcpy(
+                reader.data[0] + idx * 64, h_out.data() + (idx * 3 + 0) * 64, data_unit_bytes);
+            std::memcpy(
+                reader.data[1] + idx * 64, h_out.data() + (idx * 3 + 1) * 64, data_unit_bytes);
+            std::memcpy(
+                reader.data[2] + idx * 64, h_out.data() + (idx * 3 + 2) * 64, data_unit_bytes);
+        }
     }
-    for (int c = 0; c < reader.num_components; ++c) {
-        CHECK_CUDA(cudaFree(d_out[c]));
-    }
+
+    CHECK_CUDA(cudaFree(d_out));
     CHECK_CUDA(cudaFree(d_scan));
 
     CHECK_CUDA(cudaFree(d_huff));
@@ -785,16 +780,16 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
             }
 
             // one MCU
-            for (int i = 0; i < reader.num_components; ++i) {
-                for (int y_ss = 0; y_ss < reader.ss_y[i]; ++y_ss) {
-                    for (int x_ss = 0; x_ss < reader.ss_x[i]; ++x_ss) {
-                        const int y_block = y_mcu * reader.ss_y[i] + y_ss;
-                        const int x_block = x_mcu * reader.ss_x[i] + x_ss;
-                        const size_t idx  = y_block * jpeggpu::block_size * reader.mcu_sizes_x[i] *
+            for (int c = 0; c < reader.num_components; ++c) {
+                for (int y_ss = 0; y_ss < reader.ss_y[c]; ++y_ss) {
+                    for (int x_ss = 0; x_ss < reader.ss_x[c]; ++x_ss) {
+                        const int y_block = y_mcu * reader.ss_y[c] + y_ss;
+                        const int x_block = x_mcu * reader.ss_x[c] + x_ss;
+                        const size_t idx  = y_block * jpeggpu::block_size * reader.mcu_sizes_x[c] *
                                                reader.num_mcus_x +
                                            x_block * jpeggpu::block_size * jpeggpu::block_size;
-                        int16_t* dst = &reader.data[i][idx];
-                        dst[0]       = dc[i] += dst[0];
+                        int16_t* dst = &reader.data[c][idx];
+                        dst[0]       = dc[c] += dst[0];
                     }
                 }
             }
