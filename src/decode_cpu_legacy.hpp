@@ -274,7 +274,7 @@ int decode_block(
             r = huffman_cpu_decoder_get_bits(state, s);
             //    s: ac value
             s = huffman_cpu_decoder_value_from_category(s, r);
-
+            assert(k < 64);
             dst[jpeggpu::order_natural[k]] = s;
         } else {
             // s = 0, means ac value is 0 ? Only if r = 15.
@@ -284,13 +284,13 @@ int decode_block(
         }
     }
 
-    // printf("CPU Decode Block ");
-    // for (int y = 0; y < 8; y++) {
-    //   for (int x = 0; x < 8; x++) {
-    //     printf("%4d ", dst[y * 8 + x]);
-    //   }
-    // }
-    // printf("\n");
+    printf("CPU Decode Block\n");
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            printf("%4d ", dst[y * 8 + x]);
+        }
+        printf("\n");
+    }
 
     return 0;
 }

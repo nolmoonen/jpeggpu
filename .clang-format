@@ -1,5 +1,6 @@
 AlignAfterOpenBracket: AlwaysBreak
 AlignConsecutiveAssignments: AcrossComments
+AlignTrailingComments: Never
 AllowShortIfStatementsOnASingleLine: Always
 AlwaysBreakTemplateDeclarations: Yes
 AttributeMacros: ['__device__']

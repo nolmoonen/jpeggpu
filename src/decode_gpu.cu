@@ -19,7 +19,9 @@ namespace {
 
 /// \brief "s", subsequence size in 32 bits. Paper uses 4 or 32 depending on the quality of the
 ///   encoded image.
-constexpr int chunk_size       = 16;              // 4;               ///< "s", in 32 bits
+// constexpr int chunk_size       = 1224; // 4;               ///< "s", in 32 bits
+// constexpr int chunk_size       = 1224 / 5; // 4;               ///< "s", in 32 bits
+constexpr int chunk_size       = 32; // 4;               ///< "s", in 32 bits
 constexpr int subsequence_size = chunk_size * 32; ///< size in bits
 // subsequence size is in bits, it makes it easier if it is a multiple of eight for data reading
 static_assert(subsequence_size % 8 == 0);
@@ -53,13 +55,14 @@ __device__ void load_byte(reader_state& rstate)
     assert(rstate.cache_num_bits + 8 < 32);
 
     const uint8_t next_byte = *(rstate.data++);
-    if (next_byte == 0xff) {
-        // skip next byte, check its value
-        const uint8_t marker = *(rstate.data++);
-        // should be a stuffed byte or a restart marker
-        assert(marker == 0 || (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7));
-        // stuffed byte or marker is subsequently ignored
-    }
+    // if (next_byte == 0xff) {
+    //     // skip next byte, check its value
+    //     const uint8_t marker = *(rstate.data++);
+    //     // should be a stuffed byte or a restart marker
+    //     assert(marker == 0 || (jpeggpu::MARKER_RST0 <= marker && marker <=
+    //     jpeggpu::MARKER_RST7));
+    //     // stuffed byte or marker is subsequently ignored
+    // }
 
     rstate.cache = (rstate.cache << 8) | next_byte;
     rstate.cache_num_bits += 8;
@@ -96,6 +99,7 @@ __device__ void discard_bits(reader_state& rstate, int num_bits)
 /// \brief
 ///
 /// \param[out] length Number of bits read.
+template <bool do_discard = true>
 uint8_t __device__ get_category(
     reader_state& rstate, int& length, const jpeggpu::huffman_table& table)
 {
@@ -116,11 +120,15 @@ uint8_t __device__ get_category(
             break;
         }
     }
-    // termination condition: 1 <= i + 1 <= max_bits, i + 1 is number of bits
-    discard_bits(rstate, i + 1);
+    assert(1 <= i + 1 && i + 1 <= 16);
+    // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
+    if constexpr (do_discard) {
+        discard_bits(rstate, i + 1);
+    }
     length        = i + 1;
     const int idx = table.valptr[i + 1] + (code - table.mincode[i + 1]);
-    if (idx < 0 || idx >= 256) {
+    if (idx < 0 || 256 <= idx) {
+        // assert(false); // FIXME debug
         // found a value that does not make sense. this can happen if the wrong huffman
         //   table is used. TODO is this the correct return value?
         return 0;
@@ -134,7 +142,7 @@ __device__ int get_value(int num_bits, int code)
 }
 
 /// \brief Zero run length, indicates a run of 16 zeros.
-constexpr int symbol_zrl = INT32_MAX;
+// constexpr int symbol_zrl = INT32_MAX;
 /// \brief End of block, indicates all remaining coefficients in the data unit are zero.
 constexpr int symbol_eob = INT32_MAX - 1;
 
@@ -143,16 +151,19 @@ __device__ void decode_next_symbol_dc(
     int& length,
     int& symbol,
     int& run_length,
-    const jpeggpu::huffman_table& table)
+    const jpeggpu::huffman_table& table_dc,
+    const jpeggpu::huffman_table& table_ac,
+    int z)
 {
     int category_length    = 0;
-    const uint8_t category = get_category(rstate, category_length, table);
+    const uint8_t category = get_category(rstate, category_length, table_dc);
 
     if (category != 0) {
         assert(0 < category && category < 17);
         load_bits(rstate, category);
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
+            // assert(false); // FIXME debug
             // TODO are these return values okay?
             length     = category_length;
             symbol     = symbol_eob; // TODO just skip the remainder?
@@ -160,15 +171,29 @@ __device__ void decode_next_symbol_dc(
             return;
         }
         const int offset = select_bits(rstate, category);
-        const int value  = get_value(category, offset);
+        discard_bits(rstate, category);
+        const int value = get_value(category, offset);
 
-        length     = category_length + category;
-        symbol     = value;
-        run_length = 0;
+        length = category_length + category;
+        symbol = value;
     } else {
-        length     = category_length;
-        symbol     = 0;
-        run_length = 0;
+        length = category_length;
+        symbol = 0;
+    }
+
+    // peek next to determine run (is always AC)
+    {
+        int len;
+        const uint8_t s    = get_category<false>(rstate, len, table_ac);
+        const int run      = (s >> 4);
+        const int category = s & 0xf;
+
+        if (category != 0) {
+            run_length = run;
+        } else {
+            // either EOB or ZRL, which is treated as a symbol
+            run_length = 0;
+        }
     }
 };
 
@@ -191,6 +216,7 @@ __device__ void decode_next_symbol_ac(
         load_bits(rstate, category);
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
+            assert(false); // FIXME debug
             // TODO are these return values okay?
             length     = category_length;
             symbol     = symbol_eob; // TODO just end the block
@@ -198,16 +224,52 @@ __device__ void decode_next_symbol_ac(
             return;
         }
         const int offset = select_bits(rstate, category);
-        const int value  = get_value(category, offset);
+        discard_bits(rstate, category);
+        const int value = get_value(category, offset);
 
-        length     = category_length + category;
-        symbol     = value;
-        run_length = run;
+        length = category_length + category;
+        symbol = value;
+
+        if (z + run + 1 <= 63) {
+            // next value is ac coefficient, peek next to determine run
+            {
+                int len;
+                const uint8_t s    = get_category<false>(rstate, len, table);
+                const int run      = (s >> 4);
+                const int category = s & 0xf;
+
+                if (category != 0) {
+                    run_length = run;
+                } else {
+                    // EOB or ZRL
+                    run_length = 0;
+                }
+            }
+        } else {
+            // next table is dc
+            run_length = 0;
+        }
     } else {
         if (run == 15) {
             length     = category_length;
-            symbol     = symbol_zrl;
-            run_length = run;
+            symbol     = 0; // ZRL
+            run_length = 15;
+
+            if (z + 15 + 1 <= 63) {
+                // there may be a symbol after the ZRL
+                {
+                    int len;
+                    const uint8_t s    = get_category<false>(rstate, len, table);
+                    const int run      = (s >> 4);
+                    const int category = s & 0xf;
+
+                    if (category != 0) {
+                        run_length += run;
+                    }
+                }
+            } else {
+                // next is dc
+            }
         } else {
             length     = category_length;
             symbol     = symbol_eob;
@@ -235,22 +297,23 @@ __device__ void decode_next_symbol(
     int& length,
     int& symbol,
     int& run_length,
-    const jpeggpu::huffman_table& table,
+    const jpeggpu::huffman_table& table_dc,
+    const jpeggpu::huffman_table& table_ac,
     int z,
     bool is_dc)
 {
     if (is_dc) {
-        decode_next_symbol_dc(rstate, length, symbol, run_length, table);
+        decode_next_symbol_dc(rstate, length, symbol, run_length, table_dc, table_ac, z);
     } else {
-        decode_next_symbol_ac(rstate, length, symbol, run_length, table, z);
+        decode_next_symbol_ac(rstate, length, symbol, run_length, table_ac, z);
     }
 }
 
 enum class component {
-    y,  // Y (YCbCR) or C (CMYK)
+    y, // Y (YCbCR) or C (CMYK)
     cb, // Cb (YCbCR) or M (CMYK)
     cr, // Cr (YCbCR) or Y (CMYK)
-    k   // k (CMYK)
+    k // k (CMYK)
 };
 
 /// \brief Infer image components based on data unit index `c` (in MCU).
@@ -318,12 +381,10 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
     info.z = 0;
 
     reader_state rstate;
-    rstate.data           = cstate.scan + info.p / 8; // subsequence_size is multiple of eight
+    rstate.data           = cstate.scan + (info.p / 8); // subsequence_size is multiple of eight
     rstate.data_end       = cstate.scan_end;
     rstate.cache          = 0;
     rstate.cache_num_bits = 0;
-
-    bool is_dc = true; // data unit starts with dc symbol
 
     int position_in_output = 0;
     if constexpr (do_write) {
@@ -335,36 +396,98 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         info.p = s_info[i - 1].p;
         info.c = s_info[i - 1].c;
         info.z = s_info[i - 1].z;
-        // info   = s_info[i - 1];
+
+        rstate.data        = cstate.scan + (info.p / 8);
+        const int in_cache = (8 - (info.p % 8)) % 8; // bits still in cache
+        // printf("info.p=%d, %d, in_cache=%d\n", info.p, info.p % 8, in_cache);
+        if (in_cache > 0) {
+            rstate.cache          = *(rstate.data++);
+            rstate.cache_num_bits = 8;
+            discard_bits(rstate, 8 - in_cache);
+        }
     }
+
+    // printf(
+    //     "start write %d tid %d: info.p=%d, info.c=%d, info.n=%d, info.z=%d, "
+    //     "position_in_output=%d\n",
+    //     do_write,
+    //     threadIdx.x,
+    //     info.p,
+    //     info.c,
+    //     info.n,
+    //     info.z,
+    //     position_in_output);
+
+    // FIXME latest change, intuitively seems correct, but is it?
+    // bool is_dc = info.z == 0; // data unit starts with dc symbol
+
     subsequence_info last_symbol; // the last detected codeword
     const int scan_bit_size = (cstate.scan_end - cstate.scan) * 8;
-    while (info.p < min((i + 1) * subsequence_size, scan_bit_size)) {
+    while (info.p <= min((i + 1) * subsequence_size, scan_bit_size)) {
         last_symbol = info;
+        // printf(
+        //     "last_symbol tid %d: info.p=%d, info.c=%d, info.n=%d, info.z=%d\n",
+        //     threadIdx.x,
+        //     last_symbol.p,
+        //     last_symbol.c,
+        //     last_symbol.n,
+        //     last_symbol.z);
+        // FIXME should there be a condition here to ensure termination?
+        if (info.n >= ((70 + 7) / 8 * 8) * ((46 + 7) / 8 * 8) * 3) {
+            break;
+        }
         const component comp =
             calc_component(cstate.ssx, cstate.ssy, info.c, cstate.num_components);
-        const jpeggpu::huffman_table& table =
-            comp == component::y ? (is_dc ? *cstate.table_luma_dc : *cstate.table_luma_ac)
-                                 : (is_dc ? *cstate.table_chroma_dc : *cstate.table_chroma_ac);
+        // const jpeggpu::huffman_table& table =
+        //     comp == component::y ? (is_dc ? *cstate.table_luma_dc : *cstate.table_luma_ac)
+        //                          : (is_dc ? *cstate.table_chroma_dc : *cstate.table_chroma_ac);
         int length     = 0;
         int symbol     = 0;
         int run_length = 0;
-        decode_next_symbol(rstate, length, symbol, run_length, table, info.z, is_dc);
-        is_dc = false;  // only one dc symbol per data unit
-        if (do_write) { // TODO could make a separate kernel for this
+        decode_next_symbol(
+            rstate,
+            length,
+            symbol,
+            run_length,
+            comp == component::y ? *cstate.table_luma_dc : *cstate.table_chroma_dc,
+            comp == component::y ? *cstate.table_luma_ac : *cstate.table_chroma_ac,
+            info.z,
+            info.z == 0 /* is_dc */);
+        // printf("%d %d\n", symbol, run_length);
+        // is_dc = false; // only one dc symbol per data unit
+        // FIXME is the solution to decode one symbol "ahead"?
+        // position_in_output += run_length; // contrary to paper, preceding zeroes
+        // if (do_write && symbol != symbol_eob) { // extra check is needed because preceding zeroes
+        if (do_write) {
+            // TODO could make a separate kernel for this
             // out[position_in_output] = symbol;
             out[position_in_output / 64 * 64 + jpeggpu::order_natural[position_in_output % 64]] =
-                symbol;
+                symbol == symbol_eob ? 0 : symbol;
         }
-        position_in_output = position_in_output + run_length + 1;
+        // TODO can run_length theorethically go out of block?
+        position_in_output += run_length + 1;
         info.p += length;
         info.n += run_length + 1;
         info.z += run_length + 1;
+        // if (threadIdx.x == 0) {
+        //     assert(info.z <= 64);
+        // }
+        // FIXME is EOB check needed?
         if (info.z >= 64 || symbol == symbol_eob) {
             // the data unit is complete
             info.z = 0;
             ++info.c;
-            is_dc = true;
+            // is_dc = true;
+            // if (do_write) {
+            //     printf("CPU Decode Block\n");
+            //     for (int y = 0; y < 8; y++) {
+            //         for (int x = 0; x < 8; x++) {
+            //             printf("%4d ", (int)out[(position_in_output - 64) / 64 * 64 + y * 8 +
+            //             x]);
+            //         }
+            //         printf("\n");
+            //     }
+            // }
 
             // ass-1
             const int num_data_units_in_mcu = cstate.ssx * cstate.ssy + (cstate.num_components - 1);
@@ -374,7 +497,18 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
             }
         }
     }
+
+    // printf(
+    //     "end write %d tid %d: info.p=%d, info.c=%d, info.n=%d, info.z=%d\n",
+    //     do_write,
+    //     threadIdx.x,
+    //     last_symbol.p,
+    //     last_symbol.c,
+    //     last_symbol.n,
+    //     last_symbol.z);
+
     return last_symbol;
+    // return info;
 }
 
 /// \brief Each thread handles one subsequence.
@@ -400,18 +534,21 @@ __global__ void sync_intra_sequence(
     // paper uses `+ block_size` but `end` should be an index
     const int end     = min(seq_global + block_size - 1, num_subsequences - 1);
     // alg-3:10
-    // FIXME should we be storing `n` here? paper text says no but psuedo says yes
     {
         subsequence_info info =
             decode_subsequence<false, false>(subseq_global, nullptr, s_info, cstate);
         s_info[subseq_global].p = info.p;
-        s_info[subseq_global].n = 0; // FIXME this is required to make initcheck succeed
+        // paper text does not mention `n` should be stored here, but if not storing `n`
+        //   the first (of block) subsequence info's `n` will not be initialized
+        s_info[subseq_global].n = info.n;
         s_info[subseq_global].c = info.c;
         s_info[subseq_global].z = info.z;
+        printf("%d, n=%d, subseq_global=%d\n", threadIdx.x, info.n, subseq_global);
     }
     __syncthreads(); // wait until data of next subsequence is available
     ++subseq_global;
     while (!synchronized && subseq_global <= end) {
+        printf("%d\n", threadIdx.x);
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
         if (info.p == s_info[subseq_global].p &&
@@ -421,8 +558,9 @@ __global__ void sync_intra_sequence(
             // the decoding process of this thread has found the same "outcome" for the
             //   `subseq_global`th subsequence as the thread before it
             synchronized = true;
-            // FIXME unclear from paper if we should break here
-            // break;
+            // printf(
+            //     "tid=%d, info.n=%d, s_info.n=%d\n", threadIdx.x, info.n,
+            //     s_info[subseq_global].n);
         }
         // FIXME inserted a sync, s_info[subseq_global] may be read in another thread's
         //   decode_subsequence
@@ -431,6 +569,7 @@ __global__ void sync_intra_sequence(
         ++subseq_global;
         __syncthreads();
     }
+    printf("%d synced=%d\n", threadIdx.x, (int)synchronized);
 }
 
 /// \brief Each thread handles one sequence, the last sequence is not handled.
@@ -535,8 +674,38 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
         }
     }
 
-    // this assumption allows to represent the bit offset with an int
-    assert(reader.scan_size * 8 <= INT_MAX);
+    // destuff TODO GPU
+    uint8_t* d_scan;
+    int scan_size = 0;
+    {
+        std::vector<uint8_t> destuffed;
+        destuffed.reserve(reader.scan_size);
+
+        for (size_t i = 0; i < reader.scan_size; ++i) {
+            const uint8_t byte = reader.scan_start[i];
+            if (byte == 0xff) {
+                assert(i + 1 < reader.scan_size);
+                ++i;
+                // skip next byte, check its value
+                const uint8_t marker = reader.scan_start[i];
+                // should be a stuffed byte or a restart marker
+                assert(
+                    marker == 0 ||
+                    (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7));
+                // stuffed byte or marker is subsequently ignored
+            }
+            destuffed.push_back(byte);
+        }
+
+        // this assumption allows to represent the bit offset with an int
+        assert(destuffed.size() * 8 <= INT_MAX);
+
+        scan_size = destuffed.size();
+
+        CHECK_CUDA(cudaMalloc(&d_scan, scan_size));
+        CHECK_CUDA(
+            cudaMemcpyAsync(d_scan, destuffed.data(), scan_size, cudaMemcpyHostToDevice, stream));
+    }
 
     jpeggpu::huffman_table* d_huff;
     CHECK_CUDA(cudaMalloc(&d_huff, 4 * sizeof(jpeggpu::huffman_table)));
@@ -565,17 +734,12 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
         cudaMemcpyHostToDevice,
         stream));
 
-    const size_t scan_bit_size = reader.scan_size * 8;
+    const size_t scan_bit_size = scan_size * 8;
     const int num_subsequences =
         ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size)); // "N"
     constexpr int block_size = 256; // "b", size in subsequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
-
-    uint8_t* d_scan;
-    CHECK_CUDA(cudaMalloc(&d_scan, reader.scan_size));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_scan, reader.scan_start, reader.scan_size, cudaMemcpyHostToDevice, stream));
 
     // alg-1:01
     size_t total_data_size = 0;
@@ -593,7 +757,7 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
 
     const const_state cstate = {
         d_scan,
-        d_scan + reader.scan_size,
+        d_scan + scan_size,
         d_huff + 0,
         d_huff + 1,
         d_huff + 2,
@@ -769,8 +933,9 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
     // undo DC difference encoding
     // TODO deal with non-interleaved?
     // TODO deal with non-restart interval
-    int dc[jpeggpu::max_comp_count];
-    int mcu_count = 0;
+    int dc[jpeggpu::max_comp_count] = {};
+    int mcu_count                   = 0;
+    assert(reader.restart_interval == 0);
     for (int y_mcu = 0; y_mcu < reader.num_mcus_y; ++y_mcu) {
         for (int x_mcu = 0; x_mcu < reader.num_mcus_x; ++x_mcu) {
             if (reader.restart_interval && mcu_count % reader.restart_interval == 0) {
@@ -790,6 +955,13 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
                                            x_block * jpeggpu::block_size * jpeggpu::block_size;
                         int16_t* dst = &reader.data[c][idx];
                         dst[0]       = dc[c] += dst[0];
+                        // printf("CPU Decode Block\n");
+                        // for (int y = 0; y < 8; y++) {
+                        //     for (int x = 0; x < 8; x++) {
+                        //         printf("%4d ", (int)dst[y * 8 + x]);
+                        //     }
+                        //     printf("\n");
+                        // }
                     }
                 }
             }
