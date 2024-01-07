@@ -22,6 +22,9 @@ namespace {
 // constexpr int chunk_size       = 1224; // 4;               ///< "s", in 32 bits
 // constexpr int chunk_size       = 1224 / 5; // 4;               ///< "s", in 32 bits
 constexpr int chunk_size       = 32; // 4;               ///< "s", in 32 bits
+// constexpr int chunk_size       = 2012; // 4;               ///< "s", in 32 bits
+// constexpr int chunk_size       = 515072; // 4;               ///< "s", in 32 bits
+// constexpr int chunk_size       = 515072 / 2; // 4;               ///< "s", in 32 bits
 constexpr int subsequence_size = chunk_size * 32; ///< size in bits
 // subsequence size is in bits, it makes it easier if it is a multiple of eight for data reading
 static_assert(subsequence_size % 8 == 0);
@@ -230,7 +233,7 @@ __device__ void decode_next_symbol_ac(
         length = category_length + category;
         symbol = value;
 
-        if (z + run + 1 <= 63) {
+        if (z + 1 <= 63) { // note: z already includes `run`
             // next value is ac coefficient, peek next to determine run
             {
                 int len;
@@ -255,7 +258,7 @@ __device__ void decode_next_symbol_ac(
             symbol     = 0; // ZRL
             run_length = 15;
 
-            if (z + 15 + 1 <= 63) {
+            if (z + 1 <= 63) {
                 // there may be a symbol after the ZRL
                 {
                     int len;
@@ -399,7 +402,6 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
 
         rstate.data        = cstate.scan + (info.p / 8);
         const int in_cache = (8 - (info.p % 8)) % 8; // bits still in cache
-        // printf("info.p=%d, %d, in_cache=%d\n", info.p, info.p % 8, in_cache);
         if (in_cache > 0) {
             rstate.cache          = *(rstate.data++);
             rstate.cache_num_bits = 8;
@@ -407,43 +409,25 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         }
     }
 
-    // printf(
-    //     "start write %d tid %d: info.p=%d, info.c=%d, info.n=%d, info.z=%d, "
-    //     "position_in_output=%d\n",
-    //     do_write,
-    //     threadIdx.x,
-    //     info.p,
-    //     info.c,
-    //     info.n,
-    //     info.z,
-    //     position_in_output);
-
-    // FIXME latest change, intuitively seems correct, but is it?
-    // bool is_dc = info.z == 0; // data unit starts with dc symbol
-
     subsequence_info last_symbol; // the last detected codeword
     const int scan_bit_size = (cstate.scan_end - cstate.scan) * 8;
     while (info.p <= min((i + 1) * subsequence_size, scan_bit_size)) {
         last_symbol = info;
-        // printf(
-        //     "last_symbol tid %d: info.p=%d, info.c=%d, info.n=%d, info.z=%d\n",
-        //     threadIdx.x,
-        //     last_symbol.p,
-        //     last_symbol.c,
-        //     last_symbol.n,
-        //     last_symbol.z);
         // FIXME should there be a condition here to ensure termination?
-        if (info.n >= ((70 + 7) / 8 * 8) * ((46 + 7) / 8 * 8) * 3) {
+        // if (info.n >= ((70 + 7) / 8 * 8) * ((46 + 7) / 8 * 8) * 3) {
+        if (info.n >= ((2000 + 7) / 8 * 8) * ((3008 + 7) / 8 * 8) * 3) {
+            break;
+        }
+        if (position_in_output >= ((2000 + 7) / 8 * 8) * ((3008 + 7) / 8 * 8) * 3) {
             break;
         }
         const component comp =
             calc_component(cstate.ssx, cstate.ssy, info.c, cstate.num_components);
-        // const jpeggpu::huffman_table& table =
-        //     comp == component::y ? (is_dc ? *cstate.table_luma_dc : *cstate.table_luma_ac)
-        //                          : (is_dc ? *cstate.table_chroma_dc : *cstate.table_chroma_ac);
         int length     = 0;
         int symbol     = 0;
         int run_length = 0;
+        // FIXME this should return length > 0 or some other
+        //   condition to make sure the while loop does not get stuck
         decode_next_symbol(
             rstate,
             length,
@@ -453,8 +437,6 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
             comp == component::y ? *cstate.table_luma_ac : *cstate.table_chroma_ac,
             info.z,
             info.z == 0 /* is_dc */);
-        // printf("%d %d\n", symbol, run_length);
-        // is_dc = false; // only one dc symbol per data unit
         // FIXME is the solution to decode one symbol "ahead"?
         // position_in_output += run_length; // contrary to paper, preceding zeroes
         // if (do_write && symbol != symbol_eob) { // extra check is needed because preceding zeroes
@@ -469,15 +451,11 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         info.p += length;
         info.n += run_length + 1;
         info.z += run_length + 1;
-        // if (threadIdx.x == 0) {
-        //     assert(info.z <= 64);
-        // }
         // FIXME is EOB check needed?
         if (info.z >= 64 || symbol == symbol_eob) {
             // the data unit is complete
             info.z = 0;
             ++info.c;
-            // is_dc = true;
             // if (do_write) {
             //     printf("CPU Decode Block\n");
             //     for (int y = 0; y < 8; y++) {
@@ -498,17 +476,7 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         }
     }
 
-    // printf(
-    //     "end write %d tid %d: info.p=%d, info.c=%d, info.n=%d, info.z=%d\n",
-    //     do_write,
-    //     threadIdx.x,
-    //     last_symbol.p,
-    //     last_symbol.c,
-    //     last_symbol.n,
-    //     last_symbol.z);
-
     return last_symbol;
-    // return info;
 }
 
 /// \brief Each thread handles one subsequence.
@@ -543,12 +511,10 @@ __global__ void sync_intra_sequence(
         s_info[subseq_global].n = info.n;
         s_info[subseq_global].c = info.c;
         s_info[subseq_global].z = info.z;
-        printf("%d, n=%d, subseq_global=%d\n", threadIdx.x, info.n, subseq_global);
     }
     __syncthreads(); // wait until data of next subsequence is available
     ++subseq_global;
     while (!synchronized && subseq_global <= end) {
-        printf("%d\n", threadIdx.x);
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
         if (info.p == s_info[subseq_global].p &&
@@ -558,9 +524,6 @@ __global__ void sync_intra_sequence(
             // the decoding process of this thread has found the same "outcome" for the
             //   `subseq_global`th subsequence as the thread before it
             synchronized = true;
-            // printf(
-            //     "tid=%d, info.n=%d, s_info.n=%d\n", threadIdx.x, info.n,
-            //     s_info[subseq_global].n);
         }
         // FIXME inserted a sync, s_info[subseq_global] may be read in another thread's
         //   decode_subsequence
@@ -569,7 +532,6 @@ __global__ void sync_intra_sequence(
         ++subseq_global;
         __syncthreads();
     }
-    printf("%d synced=%d\n", threadIdx.x, (int)synchronized);
 }
 
 /// \brief Each thread handles one sequence, the last sequence is not handled.
@@ -587,10 +549,11 @@ __global__ void sync_inter_sequence(
         return;
     }
 
+    // last subsequence of sequence i
     int subseq_global = (bi + 1) * block_size;
     bool synchronized = false;
     // paper uses `+ block_size` but `end` should be an index
-    const int end     = min(subseq_global + block_size, num_subsequences - 1);
+    const int end     = min(subseq_global + block_size - 1, num_subsequences - 1);
     while (!synchronized && subseq_global <= end) {
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
@@ -599,10 +562,11 @@ __global__ void sync_inter_sequence(
                 cstate.ssx, cstate.ssy, info.c, s_info[subseq_global].c, cstate.num_components) &&
             info.z == s_info[subseq_global].z) {
             // this means a synchronization point was found
-            synchronized                = true;
+            synchronized            = true;
             // TODO paper says bi - 1 but this will be 0 for the first thread?
-            sequence_not_synced[bi + 1] = false;
+            sequence_not_synced[bi] = false;
         }
+        __syncthreads();
         s_info[subseq_global] = info; // FIXME paper gives no index
         ++subseq_global;
         __syncthreads();
@@ -630,8 +594,10 @@ struct sum_subsequence_info {
     __device__ __forceinline__ subsequence_info
     operator()(const subsequence_info& a, const subsequence_info& b) const
     {
-        assert(static_cast<size_t>(a.n) + b.n <= INT32_MAX);
-        assert(a.n >= 0 && b.n >= 0);
+        // asserts in the comparison function are not great since CUB may execute the comparator on
+        // garbage data if the block or warp is not completely full
+        // assert(static_cast<size_t>(a.n) + b.n <= INT32_MAX);
+        // assert(a.n >= 0 && b.n >= 0);
         return {0, a.n + b.n, 0, 0};
     }
 };
@@ -692,6 +658,7 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
                 assert(
                     marker == 0 ||
                     (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7));
+                (void)marker; // surpress warning
                 // stuffed byte or marker is subsequently ignored
             }
             destuffed.push_back(byte);
@@ -777,20 +744,14 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
         CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
         std::cout << "intra sequence sync done\n";
 
-        // FIXME is this condition enough to properly deal with this?
         if (num_sequences > 1) {
             // note: the meaning of this array is flipped, a one is produced if not synced
             uint8_t* d_sequence_not_synced;
-            CHECK_CUDA(cudaMalloc(&d_sequence_not_synced, num_sequences * sizeof(uint8_t)));
+            CHECK_CUDA(cudaMalloc(&d_sequence_not_synced, (num_sequences - 1) * sizeof(uint8_t)));
             CHECK_CUDA(cudaMemsetAsync( // all are initialized to "not synced"
                 d_sequence_not_synced,
                 static_cast<uint8_t>(true),
-                num_sequences * sizeof(uint8_t),
-                stream));
-            CHECK_CUDA(cudaMemsetAsync( // except the first sequence, which is already synced
-                d_sequence_not_synced,
-                static_cast<uint8_t>(false),
-                sizeof(uint8_t),
+                (num_sequences - 1) * sizeof(uint8_t),
                 stream));
 
             int* d_num_unsynced_sequence;
@@ -803,12 +764,29 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
                 temp_storage_bytes,
                 d_sequence_not_synced,
                 d_num_unsynced_sequence,
-                num_sequences,
+                num_sequences - 1,
                 stream));
 
             CHECK_CUDA(cudaMalloc(&d_temp_storage, temp_storage_bytes));
 
             int h_num_unsynced_sequence;
+
+            // FIXME debug
+            CHECK_CUDA(cub::DeviceReduce::Sum(
+                d_temp_storage,
+                temp_storage_bytes,
+                d_sequence_not_synced,
+                d_num_unsynced_sequence,
+                num_sequences - 1,
+                stream));
+            CHECK_CUDA(cudaMemcpy(
+                &h_num_unsynced_sequence,
+                d_num_unsynced_sequence,
+                sizeof(int),
+                cudaMemcpyDeviceToHost));
+            std::cout << "unsynced: " << h_num_unsynced_sequence << "\n";
+            // FIXME end debug
+
             do {
                 // TODO this means the subsequence size must be dynamic.
                 //   for the syncing in the kernel to work, only one block can be launched
@@ -823,15 +801,15 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
                     temp_storage_bytes,
                     d_sequence_not_synced,
                     d_num_unsynced_sequence,
-                    num_sequences,
+                    num_sequences - 1,
                     stream));
+                CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
 
-                CHECK_CUDA(cudaMemcpyAsync(
+                CHECK_CUDA(cudaMemcpy(
                     &h_num_unsynced_sequence,
                     d_num_unsynced_sequence,
                     sizeof(int),
-                    cudaMemcpyDeviceToHost,
-                    stream));
+                    cudaMemcpyDeviceToHost));
 
                 std::cout << "unsynced: " << h_num_unsynced_sequence << "\n";
             } while (h_num_unsynced_sequence);
@@ -851,9 +829,11 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
 
     // TODO consider SoA or do in-place
     // alg-1:07-08
-    {
+    if (num_subsequences > 1) {
         subsequence_info* d_reduce_out;
         CHECK_CUDA(cudaMalloc(&d_reduce_out, num_subsequences * sizeof(subsequence_info)));
+        // FIXME debug to satisfy initcheck
+        CHECK_CUDA(cudaMemset(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info)));
 
         const subsequence_info init_value{0, 0, 0, 0};
         void* d_temp_storage      = nullptr;
@@ -869,6 +849,8 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
             stream));
 
         CHECK_CUDA(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+        // FIXME debug to satisfy initcheck
+        CHECK_CUDA(cudaMemset(d_temp_storage, 0, temp_storage_bytes));
 
         CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
             d_temp_storage,
@@ -881,11 +863,12 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
             stream));
 
         CHECK_CUDA(cudaFree(d_temp_storage));
-        constexpr int block_size_assign = 128;
+        constexpr int block_size_assign = 256;
         const int grid_dim =
             ceiling_div(num_subsequences, static_cast<unsigned int>(block_size_assign));
         assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
             num_subsequences, d_s_info, d_reduce_out);
+        CHECK_CUDA(cudaGetLastError());
         CHECK_CUDA(cudaFree(d_reduce_out));
     }
 
@@ -955,13 +938,6 @@ jpeggpu_status process_scan(jpeggpu::reader& reader, cudaStream_t stream)
                                            x_block * jpeggpu::block_size * jpeggpu::block_size;
                         int16_t* dst = &reader.data[c][idx];
                         dst[0]       = dc[c] += dst[0];
-                        // printf("CPU Decode Block\n");
-                        // for (int y = 0; y < 8; y++) {
-                        //     for (int x = 0; x < 8; x++) {
-                        //         printf("%4d ", (int)dst[y * 8 + x]);
-                        //     }
-                        //     printf("\n");
-                        // }
                     }
                 }
             }

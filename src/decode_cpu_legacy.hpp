@@ -284,14 +284,6 @@ int decode_block(
         }
     }
 
-    printf("CPU Decode Block\n");
-    for (int y = 0; y < 8; y++) {
-        for (int x = 0; x < 8; x++) {
-            printf("%4d ", dst[y * 8 + x]);
-        }
-        printf("\n");
-    }
-
     return 0;
 }
 

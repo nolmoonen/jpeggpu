@@ -6,6 +6,9 @@
 #include "marker.hpp"
 #include "reader.hpp"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include <jpeggpu/jpeggpu.h>
 
 #include <array>
@@ -14,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <stdint.h>
 #include <stdio.h>
@@ -59,6 +63,34 @@ jpeggpu_status jpeggpu::decoder::decode(jpeggpu_img* img)
     // process_scan_legacy(reader);
     process_scan(reader, cudaStreamDefault); // TODO stream
 
+    // std::ofstream file;
+    // file.open("gpu_log.txt");
+    // for (int y_mcu = 0; y_mcu < reader.num_mcus_y; ++y_mcu) {
+    //     for (int x_mcu = 0; x_mcu < reader.num_mcus_x; ++x_mcu) {
+    //         for (int c = 0; c < reader.num_components; ++c) {
+    //             for (int y_ss = 0; y_ss < reader.ss_y[c]; ++y_ss) {
+    //                 for (int x_ss = 0; x_ss < reader.ss_x[c]; ++x_ss) {
+    //                     const int y_block = y_mcu * reader.ss_y[c] + y_ss;
+    //                     const int x_block = x_mcu * reader.ss_x[c] + x_ss;
+    //                     const size_t idx  = y_block * jpeggpu::block_size * reader.mcu_sizes_x[c]
+    //                     *
+    //                                            reader.num_mcus_x +
+    //                                        x_block * jpeggpu::block_size * jpeggpu::block_size;
+    //                     int16_t* dst = &reader.data[c][idx];
+    //                     file << "\n";
+    //                     for (int y = 0; y < 8; y++) {
+    //                         for (int x = 0; x < 8; x++) {
+    //                             file << std::setw(4) << dst[y * 8 + x];
+    //                         }
+    //                         file << "\n";
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    // file.close();
+
     // TODO check that the number of scans seen is equal to the number of components
     jpeggpu::idct(&reader);
 
@@ -103,14 +135,14 @@ jpeggpu_status jpeggpu::decoder::decode(jpeggpu_img* img)
             }
         }
     }
-    std::ofstream file;
-    file.open("out.ppm");
-    file << "P3\n" << reader.size_x << " " << reader.size_y << "\n255\n";
-    for (size_t i = 0; i < rgb.size() / 3; ++i) {
-        file << static_cast<int>(rgb[3 * i + 0]) << " " << static_cast<int>(rgb[3 * i + 1]) << " "
-             << static_cast<int>(rgb[3 * i + 2]) << "\n";
-    }
-    file.close();
+
+    stbi_write_png(
+        "out.png",
+        reader.size_x,
+        reader.size_y,
+        3,
+        reinterpret_cast<void*>(rgb.data()),
+        reader.size_x * 3 /* stride_in_bytes */);
     // FIXME end
 
     return JPEGGPU_SUCCESS;
