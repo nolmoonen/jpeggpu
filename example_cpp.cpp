@@ -39,8 +39,9 @@ int main(int argc, char* argv[])
     CHECK_JPEGGPU(
         jpeggpu_decoder_parse_header(decoder, &img_info, file_data.data(), file_data.size()));
 
-    jpeggpu_img img;
-    CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &img));
+    // FIXME restore
+    // jpeggpu_img img;
+    // CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &img));
 
     CHECK_JPEGGPU(jpeggpu_decoder_cleanup(decoder));
 }

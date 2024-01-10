@@ -66,19 +66,37 @@ jpeggpu_status jpeggpu::reader::read_sof0()
         const uint8_t component_id     = read_uint8();
         const uint8_t sampling_factors = read_uint8();
         const int ss_x_c               = sampling_factors >> 4;
-        ss_x[c]                        = ss_x_c;
-        const int ss_y_c               = sampling_factors & 0xf;
-        ss_y[c]                        = ss_y_c;
-        const uint8_t qi               = read_uint8();
-        qtable_idx[c]                  = qi;
+        if (ss_x_c < 1 && ss_x_c > 4) {
+            return JPEGGPU_INVALID_JPEG;
+        }
+        if (ss_x_c == 3) {
+            // fairly annoying to handle, and extremely uncommon
+            return JPEGGPU_NOT_SUPPORTED;
+        }
+        css.x[c]         = ss_x_c;
+        const int ss_y_c = sampling_factors & 0xf;
+        if (ss_y_c < 1 && ss_y_c > 4) {
+            return JPEGGPU_INVALID_JPEG;
+        }
+        if (ss_y_c == 3) {
+            // fairly annoying to handle, and extremely uncommon
+            return JPEGGPU_NOT_SUPPORTED;
+        }
+        css.y[c]         = ss_y_c;
+        const uint8_t qi = read_uint8();
+        qtable_idx[c]    = qi;
         DBG_PRINT(
             "\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
             component_id,
-            ss_x[c],
-            ss_y[c],
+            css.x[c],
+            css.y[c],
             qi);
-        ss_x_max = std::max(ss_x_max, ss_x[c]);
-        ss_y_max = std::max(ss_y_max, ss_y[c]);
+        ss_x_max = std::max(ss_x_max, css.x[c]);
+        ss_y_max = std::max(ss_y_max, css.y[c]);
+    }
+    for (int c = num_components; c < jpeggpu::max_comp_count; ++c) {
+        css.x[c] = 0;
+        css.y[c] = 0;
     }
 
     return JPEGGPU_SUCCESS;
@@ -115,7 +133,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
     p = 0;
     for (int l = 1; l <= 16; l++) {
         if (table.bits[l]) {
-            table.valptr[l]  = p;           // huffval[] index of 1st symbol of code length l
+            table.valptr[l]  = p; // huffval[] index of 1st symbol of code length l
             table.mincode[l] = huffcode[p]; // minimum code of length l
             p += table.bits[l];
             table.maxcode[l] = huffcode[p - 1]; // maximum code of length l
@@ -251,11 +269,11 @@ jpeggpu_status jpeggpu::reader::read_sos()
     // TODO this is not compatible with non-interleaved, since there are multple scans
     assert(is_interleaved);
     for (int i = 0; i < num_components; ++i) {
-        sizes_x[i] = get_size(size_x, ss_x[i], ss_x_max);
-        sizes_y[i] = get_size(size_y, ss_y[i], ss_y_max);
+        sizes_x[i] = get_size(size_x, css.x[i], ss_x_max);
+        sizes_y[i] = get_size(size_y, css.y[i], ss_y_max);
 
-        mcu_sizes_x[i] = is_interleaved ? block_size * ss_x[i] : block_size;
-        mcu_sizes_y[i] = is_interleaved ? block_size * ss_y[i] : block_size;
+        mcu_sizes_x[i] = is_interleaved ? block_size * css.x[i] : block_size;
+        mcu_sizes_y[i] = is_interleaved ? block_size * css.y[i] : block_size;
 
         data_sizes_x[i] =
             ceiling_div(sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i])) * mcu_sizes_x[i];
@@ -359,6 +377,7 @@ jpeggpu_status jpeggpu::reader::read_dri()
         return JPEGGPU_INVALID_JPEG;
     }
 
+    seen_dri            = true;
     const uint16_t rsti = read_uint16();
     restart_interval    = rsti;
     DBG_PRINT("\trestart_interval: %" PRIu16 "\n", restart_interval);
@@ -429,6 +448,13 @@ jpeggpu_status jpeggpu::reader::read()
     } while (marker != jpeggpu::MARKER_EOI);
 
     return JPEGGPU_SUCCESS;
+}
+
+void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
+{
+    std::memset(this, 0, sizeof(reader));
+    this->image     = image;
+    this->image_end = image_end;
 }
 
 #undef JPEGGPU_CHECK_STATUS

@@ -5,7 +5,8 @@
 
 namespace jpeggpu {
 
-void idct(reader* decoder);
+void idct(
+    reader& reader, int16_t* (&d_image_qdct)[max_comp_count], uint8_t* (&d_image)[max_comp_count]);
 }
 
 #endif // JPEGGPU_IDCT_HPP_

@@ -51,16 +51,28 @@ enum jpeggpu_status jpeggpu_decoder_parse_header(
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    return decoder->decoder.parse_header(img_info, data, size);
+    return decoder->decoder.parse_header(*img_info, data, size);
 }
 
-enum jpeggpu_status jpeggpu_decoder_decode(jpeggpu_decoder_t decoder, struct jpeggpu_img* img)
+enum jpeggpu_status jpeggpu_decoder_decode(
+    jpeggpu_decoder_t decoder,
+    struct jpeggpu_img* img,
+    enum jpeggpu_color_format color_fmt,
+    enum jpeggpu_pixel_format pixel_fmt,
+    struct jpeggpu_subsampling subsampling,
+    void* d_tmp,
+    size_t* tmp_size)
 {
     if (!decoder) {
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    return decoder->decoder.decode(img);
+    // TODO filter out more impossible combinations
+    if (color_fmt == JPEGGPU_GRAY && pixel_fmt == JPEGGPU_P0P1P2) {
+        return JPEGGPU_INVALID_ARGUMENT;
+    }
+
+    return decoder->decoder.decode(*img, color_fmt, pixel_fmt, subsampling, d_tmp, *tmp_size);
 }
 
 enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder)

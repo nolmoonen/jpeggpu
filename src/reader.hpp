@@ -51,21 +51,32 @@ struct reader {
 
     jpeggpu_status read();
 
+    void reset(const uint8_t* image, const uint8_t* image_end);
+
     const uint8_t* image;
     const uint8_t* image_end;
+
+    // TODO include a `seen_dht` etc and check if exactly one such segment is
+    //   seen, else return error
 
     int size_x;
     int size_y;
     int num_components;
-    int ss_x[max_comp_count]; // ss as defined in spec
-    int ss_y[max_comp_count];
+
+    // subsampling as defined in the header. 1, 2, or 4
+    jpeggpu_subsampling css;
+    // max header-defined ss, to calculate MCU size. 1, 2, or 4
     int ss_x_max;
     int ss_y_max;
+
     int qtable_idx[max_comp_count]; // the qtable for each comp
     // in natural order
     qtable qtables[max_comp_count];
     huffman_table huff_tables[max_comp_count][HUFF_COUNT];
     int huff_map[max_comp_count][HUFF_COUNT];
+
+    jpeggpu_color_format color_fmt;
+    jpeggpu_pixel_format pixel_fmt;
 
     // TODO AoS
     int sizes_x[max_comp_count];
@@ -77,15 +88,16 @@ struct reader {
     int num_mcus_x;
     int num_mcus_y;
 
-    int16_t* data[max_comp_count];
-    uint8_t* image_out[max_comp_count];
     bool is_interleaved;
 
     // TODO what if non-interleaved?
     const uint8_t* scan_start;
     size_t scan_size;
 
-    int restart_interval; // TODO "has_restart interval"
+    /// \brief Whether a restart interval has been defined.
+    bool seen_dri;
+    /// \brief Restart interval for differential DC encoding, in number of MCUs.
+    int restart_interval;
 };
 
 inline int get_size(int size, int ss, int ss_max)

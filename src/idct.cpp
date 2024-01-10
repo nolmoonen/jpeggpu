@@ -1,11 +1,13 @@
 #include "idct.hpp"
 
+#include <vector>
+
 #define W1 2841 // 2048*sqrt(2)*cos(1*pi/16)
 #define W2 2676 // 2048*sqrt(2)*cos(2*pi/16)
 #define W3 2408 // 2048*sqrt(2)*cos(3*pi/16)
 #define W5 1609 // 2048*sqrt(2)*cos(5*pi/16)
 #define W6 1108 // 2048*sqrt(2)*cos(6*pi/16)
-#define W7 565  // 2048*sqrt(2)*cos(7*pi/16)
+#define W7 565 // 2048*sqrt(2)*cos(7*pi/16)
 
 // clipping table
 static int16_t iclip[1024];
@@ -148,17 +150,33 @@ void idct_data_unit(int16_t* data, const jpeggpu::qtable& table)
         idct_cpu_perform_column(data + i);
 }
 
-void jpeggpu::idct(jpeggpu::reader* decoder)
+void jpeggpu::idct(
+    jpeggpu::reader& reader,
+    int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
+    uint8_t* (&d_image)[jpeggpu::max_comp_count])
 {
+    std::vector<std::vector<int16_t>> h_image_qdct(reader.num_components);
+    std::vector<std::vector<uint8_t>> h_image(reader.num_components);
+    for (int c = 0; c < reader.num_components; ++c) {
+        const size_t size = reader.data_sizes_x[c] * reader.data_sizes_y[c];
+        h_image_qdct[c].resize(size);
+        CHECK_CUDA(cudaMemcpy(
+            h_image_qdct[c].data(),
+            d_image_qdct[c],
+            size * sizeof(int16_t),
+            cudaMemcpyDeviceToHost));
+        h_image[c].resize(size);
+    }
+
     idct_cpu_init();
-    for (int c = 0; c < decoder->num_components; ++c) {
-        const jpeggpu::qtable& table = decoder->qtables[decoder->qtable_idx[c]];
-        const int num_blocks_x       = decoder->data_sizes_x[c] / jpeggpu::block_size;
-        const int num_blocks_y       = decoder->data_sizes_y[c] / jpeggpu::block_size;
+    for (int c = 0; c < reader.num_components; ++c) {
+        const jpeggpu::qtable& table = reader.qtables[reader.qtable_idx[c]];
+        const int num_blocks_x       = reader.data_sizes_x[c] / jpeggpu::block_size;
+        const int num_blocks_y       = reader.data_sizes_y[c] / jpeggpu::block_size;
         for (int y = 0; y < num_blocks_y; ++y) {
             for (int x = 0; x < num_blocks_x; ++x) {
                 const int idx = y * num_blocks_x + x;
-                idct_data_unit(&decoder->data[c][64 * idx], table);
+                idct_data_unit(&(h_image_qdct[c][64 * idx]), table);
             }
         }
 
@@ -167,16 +185,21 @@ void jpeggpu::idct(jpeggpu::reader* decoder)
                 for (int z = 0; z < jpeggpu::block_size * jpeggpu::block_size; ++z) {
                     int coefficient_index =
                         (y * num_blocks_x + x) * (jpeggpu::block_size * jpeggpu::block_size) + z;
-                    int16_t coefficient = decoder->data[c][coefficient_index];
+                    int16_t coefficient = h_image_qdct[c][coefficient_index];
                     coefficient += 128;
                     if (coefficient > 255) coefficient = 255;
                     if (coefficient < 0) coefficient = 0;
                     int index = ((y * jpeggpu::block_size) + (z / jpeggpu::block_size)) *
-                                    decoder->data_sizes_x[c] +
+                                    reader.data_sizes_x[c] +
                                 ((x * jpeggpu::block_size) + (z % jpeggpu::block_size));
-                    decoder->image_out[c][index] = coefficient;
+                    h_image[c][index] = coefficient;
                 }
             }
         }
+    }
+
+    for (int c = 0; c < reader.num_components; ++c) {
+        const size_t size = reader.data_sizes_x[c] * reader.data_sizes_y[c];
+        CHECK_CUDA(cudaMemcpy(d_image[c], h_image[c].data(), size, cudaMemcpyHostToDevice));
     }
 }

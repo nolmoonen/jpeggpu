@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstring>
 #include <stdint.h>
+#include <vector>
 
 namespace {
 
@@ -289,8 +290,14 @@ int decode_block(
 
 } // namespace
 
-inline jpeggpu_status process_scan_legacy(jpeggpu::reader& reader)
+inline jpeggpu_status process_scan_legacy(
+    jpeggpu::reader& reader, int16_t* (&d_image_qdct)[jpeggpu::max_comp_count])
 {
+    std::vector<std::vector<int16_t>> h_image_qdct(reader.num_components);
+    for (int c = 0; c < reader.num_components; ++c) {
+        h_image_qdct[c].resize(reader.data_sizes_x[c] * reader.data_sizes_y[c]);
+    }
+
     coder_state state            = {};
     state.image                  = reader.scan_start;
     const size_t image_remaining = reader.scan_size;
@@ -306,21 +313,20 @@ inline jpeggpu_status process_scan_legacy(jpeggpu::reader& reader)
                         reader.huff_tables[reader.huff_map[i][jpeggpu::HUFF_DC]][jpeggpu::HUFF_DC];
                     const jpeggpu::huffman_table& table_ac =
                         reader.huff_tables[reader.huff_map[i][jpeggpu::HUFF_AC]][jpeggpu::HUFF_AC];
-                    for (int y_ss = 0; y_ss < reader.ss_y[i]; ++y_ss) {
-                        for (int x_ss = 0; x_ss < reader.ss_x[i]; ++x_ss) {
-                            const int y_block = y_mcu * reader.ss_y[i] + y_ss;
-                            const int x_block = x_mcu * reader.ss_x[i] + x_ss;
+                    for (int y_ss = 0; y_ss < reader.css.y[i]; ++y_ss) {
+                        for (int x_ss = 0; x_ss < reader.css.x[i]; ++x_ss) {
+                            const int y_block = y_mcu * reader.css.y[i] + y_ss;
+                            const int x_block = x_mcu * reader.css.x[i] + x_ss;
                             const size_t idx  = y_block * jpeggpu::block_size *
                                                    reader.mcu_sizes_x[i] * reader.num_mcus_x +
                                                x_block * jpeggpu::block_size * jpeggpu::block_size;
-                            int16_t* dst = &reader.data[i][idx];
+                            int16_t* dst = &(h_image_qdct[i][idx]);
                             decode_block(dst, table_dc, table_ac, state, state.dc[i]);
                         }
                     }
                 }
                 mcu_count++;
-                // FIXME what if restart_interval is not set?
-                if (reader.restart_interval && mcu_count % reader.restart_interval == 0) {
+                if (reader.seen_dri && mcu_count % reader.restart_interval == 0) {
                     for (int c = 0; c < jpeggpu::max_comp_count; ++c) {
                         state.dc[c] = 0;
                     }
@@ -331,6 +337,15 @@ inline jpeggpu_status process_scan_legacy(jpeggpu::reader& reader)
                 }
             }
         }
+
+        for (int c = 0; c < reader.num_components; ++c) {
+            CHECK_CUDA(cudaMemcpy(
+                d_image_qdct[c],
+                h_image_qdct[c].data(),
+                reader.data_sizes_x[c] * reader.data_sizes_y[c] * sizeof(int16_t),
+                cudaMemcpyHostToDevice));
+        }
+
     } else {
         return JPEGGPU_NOT_SUPPORTED; // TODO
     }

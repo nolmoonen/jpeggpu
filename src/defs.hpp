@@ -17,6 +17,7 @@ namespace jpeggpu {
 
 #define DBG_PRINT(...) printf(__VA_ARGS__);
 
+// FIXME prepend with JPEGGPU_ ?
 #define CHECK_CUDA(call)                                                                           \
     do {                                                                                           \
         cudaError_t err = call;                                                                    \
@@ -27,7 +28,9 @@ namespace jpeggpu {
         }                                                                                          \
     } while (0)
 
-constexpr int block_size     = 8;
+/// TODO more descriptive name?
+constexpr int block_size = 8;
+constexpr int data_unit_size = 64;
 /// components
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
 /// huffman types
