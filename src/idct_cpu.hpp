@@ -1,6 +1,42 @@
-#include "idct.hpp"
+/// \file https://github.com/CESNET/GPUJPEG/blob/master/src/gpujpeg_dct_cpu.c
+/**
+ * @file
+ * Copyright (c) 2011-2019, CESNET z.s.p.o
+ * Copyright (c) 2011, Silicon Genome, LLC.
+ *
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#ifndef JPEGGPU_IDCT_HPP_
+#define JPEGGPU_IDCT_HPP_
+
+#include "defs.hpp"
+#include "reader.hpp"
 
 #include <vector>
+
+namespace jpeggpu {
 
 #define W1 2841 // 2048*sqrt(2)*cos(1*pi/16)
 #define W2 2676 // 2048*sqrt(2)*cos(2*pi/16)
@@ -150,10 +186,8 @@ void idct_data_unit(int16_t* data, const jpeggpu::qtable& table)
         idct_cpu_perform_column(data + i);
 }
 
-void jpeggpu::idct(
-    jpeggpu::reader& reader,
-    int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
-    uint8_t* (&d_image)[jpeggpu::max_comp_count])
+void idct(
+    reader& reader, int16_t* (&d_image_qdct)[max_comp_count], uint8_t* (&d_image)[max_comp_count])
 {
     std::vector<std::vector<int16_t>> h_image_qdct(reader.num_components);
     std::vector<std::vector<uint8_t>> h_image(reader.num_components);
@@ -170,9 +204,9 @@ void jpeggpu::idct(
 
     idct_cpu_init();
     for (int c = 0; c < reader.num_components; ++c) {
-        const jpeggpu::qtable& table = reader.qtables[reader.qtable_idx[c]];
-        const int num_blocks_x       = reader.data_sizes_x[c] / jpeggpu::block_size;
-        const int num_blocks_y       = reader.data_sizes_y[c] / jpeggpu::block_size;
+        const qtable& table    = reader.qtables[reader.qtable_idx[c]];
+        const int num_blocks_x = reader.data_sizes_x[c] / jpeggpu::block_size;
+        const int num_blocks_y = reader.data_sizes_y[c] / jpeggpu::block_size;
         for (int y = 0; y < num_blocks_y; ++y) {
             for (int x = 0; x < num_blocks_x; ++x) {
                 const int idx = y * num_blocks_x + x;
@@ -203,3 +237,7 @@ void jpeggpu::idct(
         CHECK_CUDA(cudaMemcpy(d_image[c], h_image[c].data(), size, cudaMemcpyHostToDevice));
     }
 }
+
+} // namespace jpeggpu
+
+#endif // JPEGGPU_IDCT_HPP_

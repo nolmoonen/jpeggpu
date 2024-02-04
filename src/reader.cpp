@@ -316,10 +316,14 @@ jpeggpu_status jpeggpu::reader::read_sos()
         if (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7) {
             // restart marker is okay and part of scan
             DBG_PRINT("\trst marker\n");
-        } else {
+        } else if (marker == jpeggpu::MARKER_EOI) {
             // rewind the marker
             image -= 2;
             break;
+        } else {
+            DBG_PRINT("marker %s\n", jpeggpu::get_marker_string(marker));
+            DBG_PRINT("unexpected");
+            return JPEGGPU_INVALID_JPEG; // TODO is it?
         }
     } while (image < image_end);
     scan_size = image - scan_start;

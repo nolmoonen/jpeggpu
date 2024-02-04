@@ -15,17 +15,13 @@
 
 namespace {
 
+/// TODO remove these assumptions
 /// Assumption 1 (ass-1): all non-luma is subsampled with the same factor
 /// Assumption 2 (ass-2): Huffman table mapping
 
 /// \brief "s", subsequence size in 32 bits. Paper uses 4 or 32 depending on the quality of the
-///   encoded image.
-// constexpr int chunk_size       = 1224; // 4;               ///< "s", in 32 bits
-// constexpr int chunk_size       = 1224 / 5; // 4;               ///< "s", in 32 bits
-constexpr int chunk_size       = 32; // 4;               ///< "s", in 32 bits
-// constexpr int chunk_size       = 2012; // 4;               ///< "s", in 32 bits
-// constexpr int chunk_size       = 515072; // 4;               ///< "s", in 32 bits
-// constexpr int chunk_size       = 515072 / 2; // 4;               ///< "s", in 32 bits
+///   encoded image. TODO value of 4 seems to get the decoder stuck.
+constexpr int chunk_size       = 8; ///< "s", in 32 bits
 constexpr int subsequence_size = chunk_size * 32; ///< size in bits
 // subsequence size is in bits, it makes it easier if it is a multiple of eight for data reading
 static_assert(subsequence_size % 8 == 0);
@@ -38,9 +34,9 @@ struct subsequence_info {
     int p;
     /// \brief The number of decoded symbols.
     int n;
-    /// \brief The data unit index in the MCU (slightly deviates from paper). The color component
-    ///   (meaning of `c` in the paper) can be inferred from this, together with subsampling
-    ///   factors.
+    /// \brief The data unit index in the MCU. With the sampling factors, the color component
+    ///   can be inferred. The paper calls this field "the current color component",
+    ///   but merely checking the color component will not suffice.
     int c;
     /// \brief Zig-zag index.
     int z;
@@ -53,25 +49,20 @@ struct reader_state {
     int cache_num_bits;
 };
 
+/// \brief Loads the next eight bits.
 __device__ void load_byte(reader_state& rstate)
 {
     assert(rstate.data < rstate.data_end);
     assert(rstate.cache_num_bits + 8 < 32);
 
+    // byte stuffing and restart markers are removed beforehand, padding in front
+    //   of restart markers is not
     const uint8_t next_byte = *(rstate.data++);
-    // if (next_byte == 0xff) {
-    //     // skip next byte, check its value
-    //     const uint8_t marker = *(rstate.data++);
-    //     // should be a stuffed byte or a restart marker
-    //     assert(marker == 0 || (jpeggpu::MARKER_RST0 <= marker && marker <=
-    //     jpeggpu::MARKER_RST7));
-    //     // stuffed byte or marker is subsequently ignored
-    // }
-
-    rstate.cache = (rstate.cache << 8) | next_byte;
+    rstate.cache            = (rstate.cache << 8) | next_byte;
     rstate.cache_num_bits += 8;
 }
 
+/// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
 __device__ void load_bits(reader_state& rstate, int num_bits)
 {
     while (rstate.cache_num_bits < num_bits) {
@@ -83,6 +74,8 @@ __device__ void load_bits(reader_state& rstate, int num_bits)
     }
 }
 
+/// \brief Peeks `num_bits` from cache, does not remove them.
+///   Assumes enough bits are present.
 __device__ int select_bits(reader_state& rstate, int num_bits)
 {
     assert(num_bits < 31);
@@ -92,6 +85,7 @@ __device__ int select_bits(reader_state& rstate, int num_bits)
     return rstate.cache >> (rstate.cache_num_bits - num_bits);
 }
 
+/// \brief Removes `num_bits` from cache.
 __device__ void discard_bits(reader_state& rstate, int num_bits)
 {
     assert(rstate.cache_num_bits >= num_bits);
@@ -100,8 +94,9 @@ __device__ void discard_bits(reader_state& rstate, int num_bits)
     rstate.cache_num_bits -= num_bits;
 }
 
-/// \brief
+/// \brief Get the Huffman category from stream.
 ///
+/// \tparam do_discard Whether to discard the bits that were read in the process.
 /// \param[out] length Number of bits read.
 template <bool do_discard = true>
 uint8_t __device__ get_category(
@@ -132,7 +127,6 @@ uint8_t __device__ get_category(
     length        = i + 1;
     const int idx = table.valptr[i + 1] + (code - table.mincode[i + 1]);
     if (idx < 0 || 256 <= idx) {
-        // assert(false); // FIXME debug
         // found a value that does not make sense. this can happen if the wrong huffman
         //   table is used. TODO is this the correct return value?
         return 0;
@@ -145,8 +139,6 @@ __device__ int get_value(int num_bits, int code)
     return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
-/// \brief Zero run length, indicates a run of 16 zeros.
-// constexpr int symbol_zrl = INT32_MAX;
 /// \brief End of block, indicates all remaining coefficients in the data unit are zero.
 constexpr int symbol_eob = INT32_MAX - 1;
 
@@ -167,11 +159,11 @@ __device__ void decode_next_symbol_dc(
         load_bits(rstate, category);
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
-            // assert(false); // FIXME debug
-            // TODO are these return values okay?
-            length     = category_length;
-            symbol     = symbol_eob; // TODO just skip the remainder?
-            run_length = 0;
+            // eat all remaining so the `decode_subsequence` loop does not get stuck
+            discard_bits(rstate, rstate.cache_num_bits);
+            length     = category_length + rstate.cache_num_bits;
+            symbol     = symbol_eob; // arbitrary symbol
+            run_length = 0; // arbitrary length
             return;
         }
         const int offset = select_bits(rstate, category);
@@ -220,11 +212,11 @@ __device__ void decode_next_symbol_ac(
         load_bits(rstate, category);
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
-            // assert(false); // FIXME debug
-            // TODO are these return values okay?
-            length     = category_length;
-            symbol     = symbol_eob; // TODO just end the block
-            run_length = 0;
+            // eat all remaining so the `decode_subsequence` loop does not get stuck
+            discard_bits(rstate, rstate.cache_num_bits);
+            length     = category_length + rstate.cache_num_bits;
+            symbol     = symbol_eob; // arbitrary symbol
+            run_length = 0; // arbitrary length
             return;
         }
         const int offset = select_bits(rstate, category);
@@ -290,12 +282,11 @@ __device__ void decode_next_symbol_ac(
 ///     index in the zig-zag sequence
 ///
 /// \param[inout] rstate
-/// \param[out] length The number of processed bits.
+/// \param[out] length The number of processed bits. Will be non-zero.
 /// \param[out] symbol The decoded coefficient, provided the code was not EOB or ZRL.
 /// \param[out] run_length The run-length of zeroes which the coefficient is followed by.
 /// \param[in] table
 /// \param[in] z Current index in the zig-zag sequence.
-/// \param[in] is_dc
 __device__ void decode_next_symbol(
     reader_state& rstate,
     int& length,
@@ -303,10 +294,9 @@ __device__ void decode_next_symbol(
     int& run_length,
     const jpeggpu::huffman_table& table_dc,
     const jpeggpu::huffman_table& table_ac,
-    int z,
-    bool is_dc)
+    int z)
 {
-    if (is_dc) {
+    if (z == 0) {
         decode_next_symbol_dc(rstate, length, symbol, run_length, table_dc, table_ac, z);
     } else {
         decode_next_symbol_ac(rstate, length, symbol, run_length, table_ac, z);
@@ -350,12 +340,6 @@ __device__ component calc_component(int ssx, int ssy, int c, int num_components)
     assert(false);
 }
 
-__device__ bool same_component(int ssx, int ssy, int c0, int c1, int num_components)
-{
-    return calc_component(ssx, ssy, c0, num_components) ==
-           calc_component(ssx, ssy, c1, num_components);
-}
-
 struct const_state {
     const uint8_t* scan;
     const uint8_t* scan_end;
@@ -366,6 +350,7 @@ struct const_state {
     int ssx;
     int ssy;
     int num_components;
+    int num_data_units;
 };
 
 static_assert(std::is_trivially_copyable_v<const_state>);
@@ -412,23 +397,13 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
 
     subsequence_info last_symbol; // the last detected codeword
     const int scan_bit_size = (cstate.scan_end - cstate.scan) * 8;
-    while (info.p <= min((i + 1) * subsequence_size, scan_bit_size)) {
-        last_symbol = info;
-        // FIXME should there be a condition here to ensure termination?
-        // if (info.n >= ((70 + 7) / 8 * 8) * ((46 + 7) / 8 * 8) * 3) {
-        if (info.n >= ((70 + 7) / 8 * 8) * ((46 + 7) / 8 * 8) * 3) {
-            break;
-        }
-        if (position_in_output >= ((70 + 7) / 8 * 8) * ((46 + 7) / 8 * 8) * 3) {
-            break;
-        }
+    while (info.p < min((i + 1) * subsequence_size, scan_bit_size)) {
         const component comp =
             calc_component(cstate.ssx, cstate.ssy, info.c, cstate.num_components);
         int length     = 0;
         int symbol     = 0;
         int run_length = 0;
-        // FIXME this should return length > 0 or some other
-        //   condition to make sure the while loop does not get stuck
+        // always returns length > 0 to ensure while loop does not get stuck
         decode_next_symbol(
             rstate,
             length,
@@ -436,37 +411,24 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
             run_length,
             comp == component::y ? *cstate.table_luma_dc : *cstate.table_chroma_dc,
             comp == component::y ? *cstate.table_luma_ac : *cstate.table_chroma_ac,
-            info.z,
-            info.z == 0 /* is_dc */);
-        // FIXME is the solution to decode one symbol "ahead"?
-        // position_in_output += run_length; // contrary to paper, preceding zeroes
-        // if (do_write && symbol != symbol_eob) { // extra check is needed because preceding zeroes
+            info.z);
         if (do_write) {
             // TODO could make a separate kernel for this
-            // out[position_in_output] = symbol;
             out[position_in_output / 64 * 64 + jpeggpu::order_natural[position_in_output % 64]] =
                 symbol == symbol_eob ? 0 : symbol;
         }
-        // TODO can run_length theorethically go out of block?
-        position_in_output += run_length + 1;
+        if (do_write) {
+            position_in_output += run_length + 1;
+        }
         info.p += length;
         info.n += run_length + 1;
         info.z += run_length + 1;
-        // FIXME is EOB check needed?
+
+        // TODO is EOB check needed?
         if (info.z >= 64 || symbol == symbol_eob) {
             // the data unit is complete
             info.z = 0;
             ++info.c;
-            // if (do_write) {
-            //     printf("CPU Decode Block\n");
-            //     for (int y = 0; y < 8; y++) {
-            //         for (int x = 0; x < 8; x++) {
-            //             printf("%4d ", (int)out[(position_in_output - 64) / 64 * 64 + y * 8 +
-            //             x]);
-            //         }
-            //         printf("\n");
-            //     }
-            // }
 
             // ass-1
             const int num_data_units_in_mcu = cstate.ssx * cstate.ssy + (cstate.num_components - 1);
@@ -474,6 +436,14 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
                 // mcu is complete
                 info.c = 0;
             }
+        }
+
+        last_symbol = info;
+
+        // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
+        //   this problem is excerbated by restart intevals, where padding occurs more frequently
+        if (position_in_output >= cstate.num_data_units * 64) {
+            break;
         }
     }
 
@@ -518,9 +488,7 @@ __global__ void sync_intra_sequence(
     while (!synchronized && subseq_global <= end) {
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
-        if (info.p == s_info[subseq_global].p &&
-            same_component(
-                cstate.ssx, cstate.ssy, info.c, s_info[subseq_global].c, cstate.num_components) &&
+        if (info.p == s_info[subseq_global].p && info.c == s_info[subseq_global].c &&
             info.z == s_info[subseq_global].z) {
             // the decoding process of this thread has found the same "outcome" for the
             //   `subseq_global`th subsequence as the thread before it
@@ -558,9 +526,7 @@ __global__ void sync_inter_sequence(
     while (!synchronized && subseq_global <= end) {
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
-        if (info.p == s_info[subseq_global].p &&
-            same_component(
-                cstate.ssx, cstate.ssy, info.c, s_info[subseq_global].c, cstate.num_components) &&
+        if (info.p == s_info[subseq_global].p && info.c == s_info[subseq_global].c &&
             info.z == s_info[subseq_global].z) {
             // this means a synchronization point was found
             synchronized            = true;
@@ -597,8 +563,6 @@ struct sum_subsequence_info {
     {
         // asserts in the comparison function are not great since CUB may execute the comparator on
         // garbage data if the block or warp is not completely full
-        // assert(static_cast<size_t>(a.n) + b.n <= INT32_MAX);
-        // assert(a.n >= 0 && b.n >= 0);
         return {0, a.n + b.n, 0, 0};
     }
 };
@@ -779,8 +743,10 @@ jpeggpu_status jpeggpu::process_scan(
 
     // alg-1:01
     size_t total_data_size = 0;
+    int num_data_units     = 0;
     for (int c = 0; c < reader.num_components; ++c) {
         total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
+        num_data_units += (reader.data_sizes_x[c] / 8) * (reader.data_sizes_y[c] / 8);
     }
     int16_t* d_out;
     CHECK_STAT(jpeggpu::gpu_alloc_reserve(
@@ -805,18 +771,14 @@ jpeggpu_status jpeggpu::process_scan(
         d_huff + 3,
         reader.css.x[0],
         reader.css.y[0],
-        reader.num_components};
+        reader.num_components,
+        num_data_units};
 
     { // sync_decoders (Algorithm 3)
-
-        CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
 
         sync_intra_sequence<block_size>
             <<<num_sequences, block_size, 0, stream>>>(d_s_info, num_subsequences, cstate);
         CHECK_CUDA(cudaGetLastError());
-
-        CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
-        std::cout << "intra sequence sync done\n";
 
         if (num_sequences > 1) {
             // note: the meaning of this array is flipped, a one is produced if not synced
@@ -850,23 +812,6 @@ jpeggpu_status jpeggpu::process_scan(
                 reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
 
             int h_num_unsynced_sequence;
-
-            // FIXME debug
-            CHECK_CUDA(cub::DeviceReduce::Sum(
-                d_tmp_storage,
-                tmp_storage_bytes,
-                d_sequence_not_synced,
-                d_num_unsynced_sequence,
-                num_sequences - 1,
-                stream));
-            CHECK_CUDA(cudaMemcpy(
-                &h_num_unsynced_sequence,
-                d_num_unsynced_sequence,
-                sizeof(int),
-                cudaMemcpyDeviceToHost));
-            std::cout << "unsynced: " << h_num_unsynced_sequence << "\n";
-            // FIXME end debug
-
             do {
                 // TODO this means the subsequence size must be dynamic.
                 //   for the syncing in the kernel to work, only one block can be launched
@@ -883,8 +828,6 @@ jpeggpu_status jpeggpu::process_scan(
                     d_num_unsynced_sequence,
                     num_sequences - 1,
                     stream));
-                CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
-
                 CHECK_CUDA(cudaMemcpy(
                     &h_num_unsynced_sequence,
                     d_num_unsynced_sequence,
@@ -914,7 +857,8 @@ jpeggpu_status jpeggpu::process_scan(
             d_tmp,
             tmp_size));
         // FIXME debug to satisfy initcheck
-        CHECK_CUDA(cudaMemset(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info)));
+        CHECK_CUDA(
+            cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
 
         const subsequence_info init_value{0, 0, 0, 0};
         void* d_tmp_storage      = nullptr;
@@ -932,7 +876,7 @@ jpeggpu_status jpeggpu::process_scan(
         CHECK_STAT(jpeggpu::gpu_alloc_reserve(
             reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
         // FIXME debug to satisfy initcheck
-        CHECK_CUDA(cudaMemset(d_tmp_storage, 0, tmp_storage_bytes));
+        CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
 
         CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
             d_tmp_storage,
@@ -960,9 +904,11 @@ jpeggpu_status jpeggpu::process_scan(
         cudaMemcpyDeviceToHost));
 
     // alg-1:09-15
+    CHECK_CUDA(cudaStreamSynchronize(stream)); // FIXME debug
     decode_write<<<num_sequences, block_size, 0, stream>>>(
         d_out, d_s_info, num_subsequences, cstate);
     CHECK_CUDA(cudaGetLastError());
+    CHECK_CUDA(cudaStreamSynchronize(stream)); // FIXME debug
 
     // FIXME can the below (and above) deal with non-interleaved scans?
 

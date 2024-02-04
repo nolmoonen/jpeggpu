@@ -1,9 +1,9 @@
 #include "decoder.hpp"
 #include "convert.hpp"
-#include "decode_cpu_legacy.hpp"
+#include "decode_cpu.hpp"
 #include "decode_gpu.hpp"
 #include "defs.hpp"
-#include "idct.hpp"
+#include "idct_cpu.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
 
