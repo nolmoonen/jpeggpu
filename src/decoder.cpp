@@ -72,27 +72,60 @@ inline bool operator!=(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling
     return !(lhs == rhs);
 }
 
+size_t calculate_gpu_memory(const jpeggpu::reader& reader)
+{
+    size_t required = 0;
+    for (int c = 0; c < reader.num_components; ++c) {
+        const size_t size = reader.data_sizes_x[c] * reader.data_sizes_y[c];
+        required += jpeggpu::gpu_alloc_size(size * sizeof(int16_t)); // d_image_qdct
+        required += jpeggpu::gpu_alloc_size(size * sizeof(uint8_t)); // d_image
+    }
+    if (is_gpu_decode_possible(reader)) {
+        required += jpeggpu::calculate_gpu_decode_memory(reader);
+    }
+    return required;
+}
+
+#define CHECK_STAT(call)                                                                           \
+    do {                                                                                           \
+        jpeggpu_status stat = call;                                                                \
+        if (stat != JPEGGPU_SUCCESS) {                                                             \
+            return JPEGGPU_INTERNAL_ERROR;                                                         \
+        }                                                                                          \
+    } while (0)
+
 jpeggpu_status jpeggpu::decoder::decode(
     jpeggpu_img& img,
     jpeggpu_color_format color_fmt,
     jpeggpu_pixel_format pixel_fmt,
     jpeggpu_subsampling subsampling,
-    void* d_tmp,
-    size_t& tmp_size)
+    void* d_tmp_param,
+    size_t& tmp_size_param,
+    cudaStream_t stream)
 {
-    if (d_tmp == nullptr) {
-        tmp_size = size_t{20} << 20; // FIXME
+    const size_t required_memory =
+        calculate_gpu_memory(reader) + calculate_gpu_decode_memory(reader);
+    if (d_tmp_param == nullptr) {
+        tmp_size_param = required_memory;
         return jpeggpu_status::JPEGGPU_SUCCESS;
     }
 
+    if (tmp_size_param < required_memory) {
+        return jpeggpu_status::JPEGGPU_INVALID_ARGUMENT;
+    }
+
+    void* d_tmp     = d_tmp_param;
+    size_t tmp_size = tmp_size_param;
     for (int c = 0; c < reader.num_components; ++c) {
         const size_t size = reader.data_sizes_x[c] * reader.data_sizes_y[c];
-        CHECK_CUDA(cudaMalloc(&(d_image_qdct[c]), size * sizeof(uint16_t)));
-        CHECK_CUDA(cudaMalloc(&(d_image[c]), size));
+        CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+            reinterpret_cast<void**>(&(d_image_qdct[c])), size * sizeof(int16_t), d_tmp, tmp_size));
+        CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+            reinterpret_cast<void**>(&(d_image[c])), size * sizeof(uint8_t), d_tmp, tmp_size));
     }
 
     if (is_gpu_decode_possible(reader)) {
-        process_scan(reader, d_image_qdct, cudaStreamDefault); // TODO stream
+        process_scan(reader, d_image_qdct, d_tmp, tmp_size, stream);
     } else {
         DBG_PRINT("falling back to CPU decode\n");
         process_scan_legacy(reader, d_image_qdct);
@@ -131,8 +164,10 @@ jpeggpu_status jpeggpu::decoder::decode(
             color_fmt,
             pixel_fmt,
             subsampling,
-            cudaStreamDefault); // TODO stream
+            stream);
     }
 
     return JPEGGPU_SUCCESS;
 }
+
+#undef CHECK_STAT

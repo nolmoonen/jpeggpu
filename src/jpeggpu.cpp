@@ -61,7 +61,8 @@ enum jpeggpu_status jpeggpu_decoder_decode(
     enum jpeggpu_pixel_format pixel_fmt,
     struct jpeggpu_subsampling subsampling,
     void* d_tmp,
-    size_t* tmp_size)
+    size_t* tmp_size,
+    cudaStream_t stream)
 {
     if (!decoder) {
         return JPEGGPU_INVALID_ARGUMENT;
@@ -72,7 +73,8 @@ enum jpeggpu_status jpeggpu_decoder_decode(
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    return decoder->decoder.decode(*img, color_fmt, pixel_fmt, subsampling, d_tmp, *tmp_size);
+    return decoder->decoder.decode(
+        *img, color_fmt, pixel_fmt, subsampling, d_tmp, *tmp_size, stream);
 }
 
 enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder)

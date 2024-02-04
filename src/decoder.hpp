@@ -20,7 +20,8 @@ struct decoder {
         jpeggpu_pixel_format pixel_fmt,
         jpeggpu_subsampling subsampling,
         void* d_tmp,
-        size_t& tmp_size);
+        size_t& tmp_size,
+        cudaStream_t stream);
 
     struct reader reader;
 

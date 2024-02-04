@@ -29,7 +29,7 @@ namespace jpeggpu {
     } while (0)
 
 /// TODO more descriptive name?
-constexpr int block_size = 8;
+constexpr int block_size     = 8;
 constexpr int data_unit_size = 64;
 /// components
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;

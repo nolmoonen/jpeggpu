@@ -83,13 +83,13 @@ int main(int argc, char* argv[])
 
     size_t tmp_size = 0;
     CHECK_JPEGGPU(jpeggpu_decoder_decode(
-        decoder, &img, JPEGGPU_SRGB, JPEGGPU_P012, img_info.subsampling, NULL, &tmp_size));
+        decoder, &img, JPEGGPU_SRGB, JPEGGPU_P012, img_info.subsampling, NULL, &tmp_size, stream));
 
     void* d_tmp = NULL;
     CHECK_CUDA(cudaMalloc((void**)&d_tmp, tmp_size));
 
     CHECK_JPEGGPU(jpeggpu_decoder_decode(
-        decoder, &img, JPEGGPU_SRGB, JPEGGPU_P012, img_info.subsampling, &d_tmp, &tmp_size));
+        decoder, &img, JPEGGPU_SRGB, JPEGGPU_P012, img_info.subsampling, d_tmp, &tmp_size, stream));
 
     CHECK_CUDA(cudaFree(d_tmp));
 
