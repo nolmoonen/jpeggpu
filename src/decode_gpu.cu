@@ -21,7 +21,7 @@ namespace {
 
 /// \brief "s", subsequence size in 32 bits. Paper uses 4 or 32 depending on the quality of the
 ///   encoded image.
-constexpr int chunk_size       = 4; ///< "s", in 32 bits FIXME was 8
+constexpr int chunk_size       = 8; ///< "s", in 32 bits
 constexpr int subsequence_size = chunk_size * 32; ///< size in bits
 // subsequence size is in bits, it makes it easier if it is a multiple of eight for data reading
 static_assert(subsequence_size % 8 == 0);
@@ -157,8 +157,8 @@ __device__ void decode_next_symbol_dc(
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
             // eat all remaining so the `decode_subsequence` loop does not get stuck
+            length = category_length + rstate.cache_num_bits;
             discard_bits(rstate, rstate.cache_num_bits);
-            length     = category_length + rstate.cache_num_bits;
             symbol     = 0; // arbitrary symbol
             run_length = 0; // arbitrary length
             return;
@@ -209,8 +209,8 @@ __device__ void decode_next_symbol_ac(
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
             // eat all remaining so the `decode_subsequence` loop does not get stuck
+            length = category_length + rstate.cache_num_bits;
             discard_bits(rstate, rstate.cache_num_bits);
-            length     = category_length + rstate.cache_num_bits;
             symbol     = 0; // arbitrary symbol
             run_length = 0; // arbitrary length
             return;
@@ -224,18 +224,16 @@ __device__ void decode_next_symbol_ac(
 
         if (z + 1 <= 63) { // note: z already includes `run`
             // next value is ac coefficient, peek next to determine run
-            {
-                int len;
-                const uint8_t s    = get_category<false>(rstate, len, table);
-                const int run      = s >> 4;
-                const int category = s & 0xf;
+            int len;
+            const uint8_t s    = get_category<false>(rstate, len, table);
+            const int run      = s >> 4;
+            const int category = s & 0xf;
 
-                if (category != 0) {
-                    run_length = run;
-                } else {
-                    // EOB or ZRL
-                    run_length = 0;
-                }
+            if (category != 0) {
+                run_length = run;
+            } else {
+                // EOB or ZRL
+                run_length = 0;
             }
         } else {
             // next table is dc
@@ -382,8 +380,9 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         info.c = s_info[i - 1].c;
         info.z = s_info[i - 1].z;
 
+        // overflowing from saved state, restore the reader state
         rstate.data        = cstate.scan + (info.p / 8);
-        const int in_cache = (8 - (info.p % 8)) % 8; // bits still in cache
+        const int in_cache = (8 - (info.p % 8)) % 8;
         if (in_cache > 0) {
             rstate.cache          = *(rstate.data++);
             rstate.cache_num_bits = 8;
@@ -394,6 +393,15 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
     subsequence_info last_symbol; // the last detected codeword
     const int scan_bit_size = (cstate.scan_end - cstate.scan) * 8;
     while (info.p < min((i + 1) * subsequence_size, scan_bit_size)) {
+        // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
+        //   (so info.p cannot reliably be used to determine if the loop should break)
+        //   this problem is excerbated by restart intevals, where padding occurs more frequently
+        if (position_in_output >= cstate.num_data_units * 64) {
+            break;
+        }
+
+        last_symbol = info;
+
         const component comp =
             calc_component(cstate.ssx, cstate.ssy, info.c, cstate.num_components);
         int length     = 0;
@@ -431,14 +439,6 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
                 // mcu is complete
                 info.c = 0;
             }
-        }
-
-        last_symbol = info;
-
-        // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
-        //   this problem is excerbated by restart intevals, where padding occurs more frequently
-        if (position_in_output >= cstate.num_data_units * 64) {
-            break;
         }
     }
 
@@ -742,7 +742,7 @@ jpeggpu_status jpeggpu::process_scan(
     const size_t scan_bit_size = scan_size * 8;
     const int num_subsequences =
         ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size)); // "N"
-    constexpr int block_size = 32; // "b", size in subsequences FIXME debug (was 256)
+    constexpr int block_size = 256; // "b", size in subsequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
     std::cout << "num_subsequences: " << num_subsequences << " num_sequences: " << num_sequences
