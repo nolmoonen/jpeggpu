@@ -20,8 +20,8 @@ namespace {
 /// Assumption 2 (ass-2): Huffman table mapping
 
 /// \brief "s", subsequence size in 32 bits. Paper uses 4 or 32 depending on the quality of the
-///   encoded image. TODO value of 4 seems to get the decoder stuck.
-constexpr int chunk_size       = 8; ///< "s", in 32 bits
+///   encoded image.
+constexpr int chunk_size       = 4; ///< "s", in 32 bits FIXME was 8
 constexpr int subsequence_size = chunk_size * 32; ///< size in bits
 // subsequence size is in bits, it makes it easier if it is a multiple of eight for data reading
 static_assert(subsequence_size % 8 == 0);
@@ -139,9 +139,6 @@ __device__ int get_value(int num_bits, int code)
     return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
-/// \brief End of block, indicates all remaining coefficients in the data unit are zero.
-constexpr int symbol_eob = INT32_MAX - 1;
-
 __device__ void decode_next_symbol_dc(
     reader_state& rstate,
     int& length,
@@ -162,7 +159,7 @@ __device__ void decode_next_symbol_dc(
             // eat all remaining so the `decode_subsequence` loop does not get stuck
             discard_bits(rstate, rstate.cache_num_bits);
             length     = category_length + rstate.cache_num_bits;
-            symbol     = symbol_eob; // arbitrary symbol
+            symbol     = 0; // arbitrary symbol
             run_length = 0; // arbitrary length
             return;
         }
@@ -181,13 +178,14 @@ __device__ void decode_next_symbol_dc(
     {
         int len;
         const uint8_t s    = get_category<false>(rstate, len, table_ac);
-        const int run      = (s >> 4);
+        const int run      = s >> 4;
         const int category = s & 0xf;
 
         if (category != 0) {
             run_length = run;
         } else {
-            // either EOB or ZRL, which is treated as a symbol
+            // either EOB or ZRL, which are treated as a symbol,
+            //   so there are no zeros inbetween the DC value and EOB or ZRL
             run_length = 0;
         }
     }
@@ -202,20 +200,18 @@ __device__ void decode_next_symbol_ac(
     int z)
 {
     int category_length = 0;
-    // s = (run, category)
     const uint8_t s     = get_category(rstate, category_length, table);
-    const int run       = (s >> 4);
+    const int run       = s >> 4;
     const int category  = s & 0xf;
 
     if (category != 0) {
-        assert(0 < category && category < 17);
         load_bits(rstate, category);
         // there might not be `category` bits left
         if (rstate.cache_num_bits < category) {
             // eat all remaining so the `decode_subsequence` loop does not get stuck
             discard_bits(rstate, rstate.cache_num_bits);
             length     = category_length + rstate.cache_num_bits;
-            symbol     = symbol_eob; // arbitrary symbol
+            symbol     = 0; // arbitrary symbol
             run_length = 0; // arbitrary length
             return;
         }
@@ -231,7 +227,7 @@ __device__ void decode_next_symbol_ac(
             {
                 int len;
                 const uint8_t s    = get_category<false>(rstate, len, table);
-                const int run      = (s >> 4);
+                const int run      = s >> 4;
                 const int category = s & 0xf;
 
                 if (category != 0) {
@@ -251,24 +247,24 @@ __device__ void decode_next_symbol_ac(
             symbol     = 0; // ZRL
             run_length = 15;
 
-            if (z + 1 <= 63) {
-                // there may be a symbol after the ZRL
-                {
-                    int len;
-                    const uint8_t s    = get_category<false>(rstate, len, table);
-                    const int run      = (s >> 4);
-                    const int category = s & 0xf;
+            if (z + 1 + 15 <= 63) {
+                // there is an AC symbol after the ZRL
+                int len;
+                const uint8_t s    = get_category<false>(rstate, len, table);
+                const int run      = s >> 4;
+                const int category = s & 0xf;
 
-                    if (category != 0) {
-                        run_length += run;
-                    }
+                if (category != 0) {
+                    run_length += run;
+                } else {
+                    // EOB or ZRL
                 }
             } else {
                 // next is dc
             }
         } else {
             length     = category_length;
-            symbol     = symbol_eob;
+            symbol     = 0; // EOB
             run_length = 63 - z;
         }
     }
@@ -277,9 +273,9 @@ __device__ void decode_next_symbol_ac(
 /// \brief Extracts coefficients from the bitstream while switching between DC and AC Huffman
 /// tables.
 ///
-/// - If symbol equals ZRL, 15 will be returned for run_length
+/// - If symbol equals ZRL, 15 will be returned for run_length.
 /// - If symbol equals EOB, 63 - z will be returned for run_length, with z begin the current
-///     index in the zig-zag sequence
+///     index in the zig-zag sequence.
 ///
 /// \param[inout] rstate
 /// \param[out] length The number of processed bits. Will be non-zero.
@@ -403,7 +399,7 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         int length     = 0;
         int symbol     = 0;
         int run_length = 0;
-        // always returns length > 0 to ensure while loop does not get stuck
+        // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol(
             rstate,
             length,
@@ -415,7 +411,7 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         if (do_write) {
             // TODO could make a separate kernel for this
             out[position_in_output / 64 * 64 + jpeggpu::order_natural[position_in_output % 64]] =
-                symbol == symbol_eob ? 0 : symbol;
+                symbol;
         }
         if (do_write) {
             position_in_output += run_length + 1;
@@ -424,8 +420,7 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         info.n += run_length + 1;
         info.z += run_length + 1;
 
-        // TODO is EOB check needed?
-        if (info.z >= 64 || symbol == symbol_eob) {
+        if (info.z >= 64) {
             // the data unit is complete
             info.z = 0;
             ++info.c;
@@ -450,8 +445,11 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
     return last_symbol;
 }
 
-/// \brief Each thread handles one subsequence.
-///   alg-3:05-23
+/// \brief Intra sequence synchronization (alg-3:05-23).
+///   Each thread handles one subsequence at a time. Starting from each unique subsequence,
+///   decode one subsequence at a time until the result is equal to the result of a different
+///   thread having decoded that subsequence. If that is the case, the result is correct and
+///   this thread is done.
 ///
 /// \tparam block_size "b", the number of adjacent subsequences that form a sequence.
 template <int block_size>
@@ -462,15 +460,16 @@ __global__ void sync_intra_sequence(
     const int bi = blockIdx.x;
     const int si = threadIdx.x;
 
-    const int seq_global = bi * block_size;
-    int subseq_global    = seq_global + si;
+    const int seq_global = bi * block_size; // first subsequence index in sequence
+    int subseq_global    = seq_global + si; // sequence index of thread
 
     if (subseq_global >= num_subsequences) {
         return;
     }
 
     bool synchronized = false;
-    // paper uses `+ block_size` but `end` should be an index
+    // index of the last subsequence in this sequence
+    //   paper uses `+ block_size` but `end` should be an index
     const int end     = min(seq_global + block_size - 1, num_subsequences - 1);
     // alg-3:10
     {
@@ -478,27 +477,28 @@ __global__ void sync_intra_sequence(
             decode_subsequence<false, false>(subseq_global, nullptr, s_info, cstate);
         s_info[subseq_global].p = info.p;
         // paper text does not mention `n` should be stored here, but if not storing `n`
-        //   the first (of block) subsequence info's `n` will not be initialized
+        //   the first subsequence info's `n` will not be initialized. for simpliticy, store all
         s_info[subseq_global].n = info.n;
         s_info[subseq_global].c = info.c;
         s_info[subseq_global].z = info.z;
     }
-    __syncthreads(); // wait until data of next subsequence is available
+    __syncthreads(); // wait until result of next subsequence is available
     ++subseq_global;
     while (!synchronized && subseq_global <= end) {
+        // overflow, so `decode_subsequence` reads from `s_info[subseq_global - 1]`
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
         if (info.p == s_info[subseq_global].p && info.c == s_info[subseq_global].c &&
             info.z == s_info[subseq_global].z) {
             // the decoding process of this thread has found the same "outcome" for the
-            //   `subseq_global`th subsequence as the thread before it
+            //   `subseq_global`th subsequence as the next thread
             synchronized = true;
         }
-        // FIXME inserted a sync, s_info[subseq_global] may be read in another thread's
-        //   decode_subsequence
+        // (not in paper) wait until other threads have finished reading segment `subseq_global`
         __syncthreads();
         s_info[subseq_global] = info;
         ++subseq_global;
+        // make the new result of segment `subseq_global` available to all threads
         __syncthreads();
     }
 }
@@ -512,29 +512,34 @@ __global__ void sync_inter_sequence(
     uint8_t* sequence_not_synced,
     int num_sequences)
 {
-    assert(blockIdx.x == 0); // required for syncing to work
-    const int bi = threadIdx.x;
+    // Thread with global id `tid` handles sequence `tid + 1 = i`, since sequence zero needs no work
+    const int bi = blockDim.x * blockIdx.x + threadIdx.x;
     if (bi >= num_sequences - 1) {
         return;
     }
 
-    // last subsequence of sequence i
+    // first subsequence of sequence i
     int subseq_global = (bi + 1) * block_size;
     bool synchronized = false;
-    // paper uses `+ block_size` but `end` should be an index
+    // index of the last subsequence in sequence i
+    //   paper uses `+ block_size` but `end` should be an index
     const int end     = min(subseq_global + block_size - 1, num_subsequences - 1);
     while (!synchronized && subseq_global <= end) {
+        // overflow, so `decode_subsequence` reads from `s_info[subseq_global - 1]`
         subsequence_info info =
             decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
         if (info.p == s_info[subseq_global].p && info.c == s_info[subseq_global].c &&
             info.z == s_info[subseq_global].z) {
             // this means a synchronization point was found
             synchronized            = true;
-            // TODO paper says bi - 1 but this will be 0 for the first thread?
-            sequence_not_synced[bi] = false;
+            // paper uses `bi - 1`, we use bi since the array has `num_sequence - 1` elements
+            sequence_not_synced[bi] = false; // set sequence i to "synced"
         }
+        // FIXME each sequence reads from the last subsequence of the previous sequence,
+        //   which can still be written to by the previous sequence. the sync here will not prevent
+        //   this problem if two problematic sequences are in different blocks
         __syncthreads();
-        s_info[subseq_global] = info; // FIXME paper gives no index
+        s_info[subseq_global] = info;
         ++subseq_global;
         __syncthreads();
     }
@@ -737,9 +742,11 @@ jpeggpu_status jpeggpu::process_scan(
     const size_t scan_bit_size = scan_size * 8;
     const int num_subsequences =
         ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size)); // "N"
-    constexpr int block_size = 256; // "b", size in subsequences
+    constexpr int block_size = 32; // "b", size in subsequences FIXME debug (was 256)
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
+    std::cout << "num_subsequences: " << num_subsequences << " num_sequences: " << num_sequences
+              << "\n";
 
     // alg-1:01
     size_t total_data_size = 0;
@@ -776,9 +783,11 @@ jpeggpu_status jpeggpu::process_scan(
 
     { // sync_decoders (Algorithm 3)
 
+        CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
         sync_intra_sequence<block_size>
             <<<num_sequences, block_size, 0, stream>>>(d_s_info, num_subsequences, cstate);
         CHECK_CUDA(cudaGetLastError());
+        CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
 
         if (num_sequences > 1) {
             // note: the meaning of this array is flipped, a one is produced if not synced
@@ -811,12 +820,14 @@ jpeggpu_status jpeggpu::process_scan(
             CHECK_STAT(jpeggpu::gpu_alloc_reserve(
                 reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
 
+            CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
             int h_num_unsynced_sequence;
             do {
-                // TODO this means the subsequence size must be dynamic.
-                //   for the syncing in the kernel to work, only one block can be launched
-                const int block_size_inter = num_sequences - 1;
-                sync_inter_sequence<block_size><<<1, block_size_inter, 0, stream>>>(
+                constexpr int block_size_inter = 256; // does not need to be `block_size`
+                const int num_inter_blocks =
+                    ceiling_div(num_sequences, static_cast<unsigned int>(block_size_inter));
+                CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
+                sync_inter_sequence<block_size><<<num_inter_blocks, block_size_inter, 0, stream>>>(
                     d_s_info, num_subsequences, cstate, d_sequence_not_synced, num_sequences);
                 CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
                 std::cout << "inter sequence sync done\n";
