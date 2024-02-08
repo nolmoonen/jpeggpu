@@ -128,7 +128,7 @@ uint8_t __device__ get_category(
     const int idx = table.valptr[i + 1] + (code - table.mincode[i + 1]);
     if (idx < 0 || 256 <= idx) {
         // found a value that does not make sense. this can happen if the wrong huffman
-        //   table is used. TODO is this the correct return value?
+        //   table is used. return arbitrary value
         return 0;
     }
     return table.huffval[idx];
@@ -136,6 +136,7 @@ uint8_t __device__ get_category(
 
 __device__ int get_value(int num_bits, int code)
 {
+    // TODO leftshift negative value is UB
     return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
@@ -374,9 +375,9 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         position_in_output = s_info[i].n;
     }
     if constexpr (is_overflow) {
-        // FIXME is this proper? if not doing this, an uninitialized read will occur due to not
-        //   storing n in sync_intra
         info.p = s_info[i - 1].p;
+        // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
+        //   only for each subsequence (and not an aggregate)
         info.c = s_info[i - 1].c;
         info.z = s_info[i - 1].z;
 
@@ -477,7 +478,7 @@ __global__ void sync_intra_sequence(
             decode_subsequence<false, false>(subseq_global, nullptr, s_info, cstate);
         s_info[subseq_global].p = info.p;
         // paper text does not mention `n` should be stored here, but if not storing `n`
-        //   the first subsequence info's `n` will not be initialized. for simpliticy, store all
+        //   the first subsequence info's `n` will not be initialized. for simplicity, store all
         s_info[subseq_global].n = info.n;
         s_info[subseq_global].c = info.c;
         s_info[subseq_global].z = info.z;
@@ -535,7 +536,7 @@ __global__ void sync_inter_sequence(
             // paper uses `bi - 1`, we use bi since the array has `num_sequence - 1` elements
             sequence_not_synced[bi] = false; // set sequence i to "synced"
         }
-        // FIXME each sequence reads from the last subsequence of the previous sequence,
+        // TODO each sequence reads from the last subsequence of the previous sequence,
         //   which can still be written to by the previous sequence. the sync here will not prevent
         //   this problem if two problematic sequences are in different blocks
         __syncthreads();
@@ -670,6 +671,7 @@ size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
         }                                                                                          \
     } while (0)
 
+// FIXME adapt for non-interleaved scans
 jpeggpu_status jpeggpu::process_scan(
     jpeggpu::reader& reader,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
@@ -783,11 +785,9 @@ jpeggpu_status jpeggpu::process_scan(
 
     { // sync_decoders (Algorithm 3)
 
-        CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
         sync_intra_sequence<block_size>
             <<<num_sequences, block_size, 0, stream>>>(d_s_info, num_subsequences, cstate);
         CHECK_CUDA(cudaGetLastError());
-        CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
 
         if (num_sequences > 1) {
             // note: the meaning of this array is flipped, a one is produced if not synced
@@ -820,16 +820,13 @@ jpeggpu_status jpeggpu::process_scan(
             CHECK_STAT(jpeggpu::gpu_alloc_reserve(
                 reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
 
-            CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
             int h_num_unsynced_sequence;
             do {
                 constexpr int block_size_inter = 256; // does not need to be `block_size`
                 const int num_inter_blocks =
                     ceiling_div(num_sequences, static_cast<unsigned int>(block_size_inter));
-                CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
                 sync_inter_sequence<block_size><<<num_inter_blocks, block_size_inter, 0, stream>>>(
                     d_s_info, num_subsequences, cstate, d_sequence_not_synced, num_sequences);
-                CHECK_CUDA(cudaDeviceSynchronize()); // FIXME remove
                 std::cout << "inter sequence sync done\n";
 
                 CHECK_CUDA(cub::DeviceReduce::Sum(
@@ -850,14 +847,6 @@ jpeggpu_status jpeggpu::process_scan(
         }
     }
 
-    // FIXME debug
-    std::vector<subsequence_info> h_s_info(num_subsequences);
-    CHECK_CUDA(cudaMemcpy(
-        h_s_info.data(),
-        d_s_info,
-        num_subsequences * sizeof(subsequence_info),
-        cudaMemcpyDeviceToHost));
-
     // TODO consider SoA or do in-place
     // alg-1:07-08
     {
@@ -867,7 +856,7 @@ jpeggpu_status jpeggpu::process_scan(
             num_subsequences * sizeof(subsequence_info),
             d_tmp,
             tmp_size));
-        // FIXME debug to satisfy initcheck
+        // TODO debug to satisfy initcheck
         CHECK_CUDA(
             cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
 
@@ -886,7 +875,7 @@ jpeggpu_status jpeggpu::process_scan(
 
         CHECK_STAT(jpeggpu::gpu_alloc_reserve(
             reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
-        // FIXME debug to satisfy initcheck
+        // TODO debug to satisfy initcheck
         CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
 
         CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
@@ -907,21 +896,10 @@ jpeggpu_status jpeggpu::process_scan(
         CHECK_CUDA(cudaGetLastError());
     }
 
-    // FIXME debug
-    CHECK_CUDA(cudaMemcpy(
-        h_s_info.data(),
-        d_s_info,
-        num_subsequences * sizeof(subsequence_info),
-        cudaMemcpyDeviceToHost));
-
     // alg-1:09-15
-    CHECK_CUDA(cudaStreamSynchronize(stream)); // FIXME debug
     decode_write<<<num_sequences, block_size, 0, stream>>>(
         d_out, d_s_info, num_subsequences, cstate);
     CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaStreamSynchronize(stream)); // FIXME debug
-
-    // FIXME can the below (and above) deal with non-interleaved scans?
 
     std::vector<std::vector<int16_t>> data(reader.num_components);
     for (int c = 0; c < reader.num_components; ++c) {
@@ -933,8 +911,6 @@ jpeggpu_status jpeggpu::process_scan(
     CHECK_CUDA(cudaMemcpyAsync(
         h_out.data(), d_out, total_data_size * sizeof(int16_t), cudaMemcpyDeviceToHost, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
-
-    // TODO fix for non-interleaved
 
     int data_unit_idx = 0;
     for (int y = 0; y < reader.num_mcus_y; ++y) {
@@ -958,11 +934,7 @@ jpeggpu_status jpeggpu::process_scan(
         }
     }
 
-    // FIXME for subsampled images, it may be needed to first rearrange the data unit order
-    //   for the luminance plane
-
     // undo DC difference encoding
-    // TODO deal with non-interleaved?
     int dc[jpeggpu::max_comp_count] = {};
     int mcu_count                   = 0;
     for (int y_mcu = 0; y_mcu < reader.num_mcus_y; ++y_mcu) {
