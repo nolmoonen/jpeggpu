@@ -87,6 +87,7 @@ struct reader {
     int data_sizes_y[max_comp_count];
     int num_mcus_x;
     int num_mcus_y;
+    int num_segments;
 
     bool is_interleaved;
 

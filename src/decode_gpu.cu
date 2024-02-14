@@ -1,13 +1,18 @@
 #include "decode_gpu.hpp"
+#include "decoder_defs.hpp"
 #include "defs.hpp"
+#include "destuff.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
 #include "util.hpp"
 
+#include <jpeggpu/jpeggpu.h>
+
 #include <cub/device/device_reduce.cuh>
 #include <cub/device/device_scan.cuh>
+#include <cub/thread/thread_operators.cuh>
+
 #include <cuda_runtime.h>
-#include <jpeggpu/jpeggpu.h>
 
 #include <cassert>
 #include <type_traits>
@@ -19,15 +24,8 @@ namespace {
 /// Assumption 1 (ass-1): all non-luma is subsampled with the same factor
 /// Assumption 2 (ass-2): Huffman table mapping
 
-/// \brief "s", subsequence size in 32 bits. Paper uses 4 or 32 depending on the quality of the
-///   encoded image.
-constexpr int chunk_size       = 8; ///< "s", in 32 bits
-constexpr int subsequence_size = chunk_size * 32; ///< size in bits
-// subsequence size is in bits, it makes it easier if it is a multiple of eight for data reading
-static_assert(subsequence_size % 8 == 0);
-
-/// \brief Contains all required information about the last syncrhonization point for the
-///   subsequence.
+/// \brief Contains all required information about the last synchronization point for the
+///   subsequence. All information is relative to the segment.
 struct subsequence_info {
     /// \brief Bit(!) position in scan. "Location of the last detected codeword."
     ///   TODO size_t?
@@ -346,6 +344,7 @@ struct const_state {
     int ssy;
     int num_components;
     int num_data_units;
+    int restart_interval;
 };
 
 static_assert(std::is_trivially_copyable_v<const_state>);
@@ -354,35 +353,52 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 ///
 /// \tparam is_overflow Whether `i` was decoded by another thread already. TODO word this better.
 /// \tparam do_write Whether to write the coefficients to the output buffer.
+/// \param i Global subsequence index.
+/// \param segment_info Segment info for the segment that subsequence `i` is in.
+/// \param segment_idx The index of the segment subsequence `i` is in.
 template <bool is_overflow, bool do_write>
-__device__ subsequence_info
-decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cstate)
+__device__ subsequence_info decode_subsequence(
+    int i,
+    int16_t* out,
+    subsequence_info* s_info,
+    const const_state& cstate,
+    const jpeggpu::segment_info& segment_info,
+    int segment_idx)
 {
+    assert(i >= segment_info.subseq_offset);
+    const int i_rel = i - segment_info.subseq_offset;
+
     subsequence_info info;
-    info.p = i * subsequence_size; // start of i-th subsequence
+    // start of i-th subsequence
+    info.p = i_rel * jpeggpu::subsequence_size;
     info.n = 0;
     info.c = 0; // start from the first data unit of the Y component
     info.z = 0;
 
     reader_state rstate;
-    rstate.data           = cstate.scan + (info.p / 8); // subsequence_size is multiple of eight
-    rstate.data_end       = cstate.scan_end;
+    // subsequence_size is multiple of eight
+    rstate.data           = cstate.scan + segment_info.begin + (info.p / 8);
+    rstate.data_end       = cstate.scan + segment_info.end;
     rstate.cache          = 0;
     rstate.cache_num_bits = 0;
 
+    const int num_data_units_in_mcu = cstate.ssx * cstate.ssy + cstate.num_components - 1;
+
     int position_in_output = 0;
     if constexpr (do_write) {
-        position_in_output = s_info[i].n;
+        position_in_output = s_info[i].n + segment_idx * cstate.restart_interval *
+                                               num_data_units_in_mcu * jpeggpu::data_unit_size;
     }
     if constexpr (is_overflow) {
         info.p = s_info[i - 1].p;
+        // FIXME previous testing did not take into account the `do_write` version? maybe
         // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
         //   only for each subsequence (and not an aggregate)
         info.c = s_info[i - 1].c;
         info.z = s_info[i - 1].z;
 
         // overflowing from saved state, restore the reader state
-        rstate.data        = cstate.scan + (info.p / 8);
+        rstate.data        = cstate.scan + segment_info.begin + (info.p / 8);
         const int in_cache = (8 - (info.p % 8)) % 8;
         if (in_cache > 0) {
             rstate.cache          = *(rstate.data++);
@@ -391,13 +407,15 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
         }
     }
 
+    const int end_subseq = (i_rel + 1) * jpeggpu::subsequence_size; // first bit in next subsequence
+    const int end_segment = (segment_info.end - segment_info.begin) * 8; // bit count in segment
     subsequence_info last_symbol; // the last detected codeword
-    const int scan_bit_size = (cstate.scan_end - cstate.scan) * 8;
-    while (info.p < min((i + 1) * subsequence_size, scan_bit_size)) {
+    while (info.p < min(end_subseq, end_segment)) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
         //   (so info.p cannot reliably be used to determine if the loop should break)
         //   this problem is excerbated by restart intevals, where padding occurs more frequently
-        if (position_in_output >= cstate.num_data_units * 64) {
+        if (do_write && position_in_output >= (segment_idx + 1) * cstate.restart_interval *
+                                                  num_data_units_in_mcu * jpeggpu::data_unit_size) {
             break;
         }
 
@@ -455,7 +473,11 @@ decode_subsequence(int i, int16_t* out, subsequence_info* s_info, const_state cs
 /// \tparam block_size "b", the number of adjacent subsequences that form a sequence.
 template <int block_size>
 __global__ void sync_intra_sequence(
-    subsequence_info* s_info, int num_subsequences, const_state cstate)
+    subsequence_info* s_info,
+    int num_subsequences,
+    const_state cstate,
+    const jpeggpu::segment_info* segment_infos,
+    const int* segment_indices)
 {
     assert(block_size == blockDim.x);
     const int bi = blockIdx.x;
@@ -468,14 +490,25 @@ __global__ void sync_intra_sequence(
         return;
     }
 
+    // obtain the segment info for this subsequence
+    const int segment_idx                = segment_indices[subseq_global];
+    const jpeggpu::segment_info seg_info = segment_infos[segment_idx];
+    // index of the final subsequence in this segment
+    const int final_index                = seg_info.subseq_offset +
+                            ceiling_div(
+                                seg_info.end - seg_info.begin,
+                                static_cast<unsigned int>(jpeggpu::subsequence_size_bytes)) -
+                            1;
+    assert(subseq_global <= final_index);
+
     bool synchronized = false;
     // index of the last subsequence in this sequence
     //   paper uses `+ block_size` but `end` should be an index
-    const int end     = min(seq_global + block_size - 1, num_subsequences - 1);
+    const int end     = min(seq_global + block_size - 1, final_index);
     // alg-3:10
     {
-        subsequence_info info =
-            decode_subsequence<false, false>(subseq_global, nullptr, s_info, cstate);
+        subsequence_info info = decode_subsequence<false, false>(
+            subseq_global, nullptr, s_info, cstate, seg_info, segment_idx);
         s_info[subseq_global].p = info.p;
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
@@ -487,8 +520,8 @@ __global__ void sync_intra_sequence(
     ++subseq_global;
     while (!synchronized && subseq_global <= end) {
         // overflow, so `decode_subsequence` reads from `s_info[subseq_global - 1]`
-        subsequence_info info =
-            decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
+        subsequence_info info = decode_subsequence<true, false>(
+            subseq_global, nullptr, s_info, cstate, seg_info, segment_idx);
         if (info.p == s_info[subseq_global].p && info.c == s_info[subseq_global].c &&
             info.z == s_info[subseq_global].z) {
             // the decoding process of this thread has found the same "outcome" for the
@@ -511,7 +544,9 @@ __global__ void sync_inter_sequence(
     int num_subsequences,
     const_state cstate,
     uint8_t* sequence_not_synced,
-    int num_sequences)
+    int num_sequences,
+    const jpeggpu::segment_info* segment_infos,
+    const int* segment_indices)
 {
     // Thread with global id `tid` handles sequence `tid + 1 = i`, since sequence zero needs no work
     const int bi = blockDim.x * blockIdx.x + threadIdx.x;
@@ -519,16 +554,35 @@ __global__ void sync_inter_sequence(
         return;
     }
 
-    // first subsequence of sequence i
+    // first subsequence of sequence `i`, which we are flowing into from the last
+    //   subsequence of sequence `i - 1` (i.e. `tid`)
     int subseq_global = (bi + 1) * block_size;
+
+    // obtain the segment info for last subsequence of sequence `tid`
+    const int segment_idx                = segment_indices[subseq_global - 1];
+    const jpeggpu::segment_info seg_info = segment_infos[segment_idx];
+    // index of the final subsequence in this segment
+    const int final_index                = seg_info.subseq_offset +
+                            ceiling_div(
+                                seg_info.end - seg_info.begin,
+                                static_cast<unsigned int>(jpeggpu::subsequence_size_bytes)) -
+                            1;
+    assert(subseq_global - 1 <= final_index);
+    if (subseq_global - 1 == final_index) {
+        // the last subsequence of sequence `tid` is the last subsequence in the segment,
+        //   no overflow is needed
+        sequence_not_synced[bi] = false;
+        return;
+    }
+
     bool synchronized = false;
     // index of the last subsequence in sequence i
     //   paper uses `+ block_size` but `end` should be an index
-    const int end     = min(subseq_global + block_size - 1, num_subsequences - 1);
+    const int end     = min(subseq_global + block_size - 1, final_index);
     while (!synchronized && subseq_global <= end) {
         // overflow, so `decode_subsequence` reads from `s_info[subseq_global - 1]`
-        subsequence_info info =
-            decode_subsequence<true, false>(subseq_global, nullptr, s_info, cstate);
+        subsequence_info info = decode_subsequence<true, false>(
+            subseq_global, nullptr, s_info, cstate, seg_info, segment_idx);
         if (info.p == s_info[subseq_global].p && info.c == s_info[subseq_global].c &&
             info.z == s_info[subseq_global].z) {
             // this means a synchronization point was found
@@ -538,7 +592,8 @@ __global__ void sync_inter_sequence(
         }
         // TODO each sequence reads from the last subsequence of the previous sequence,
         //   which can still be written to by the previous sequence. the sync here will not prevent
-        //   this problem if two problematic sequences are in different blocks
+        //   this problem if two problematic sequences are in different blocks.
+        //   maybe this can be prevented by kernel waiting instead of a reduction on outputs?
         __syncthreads();
         s_info[subseq_global] = info;
         ++subseq_global;
@@ -547,19 +602,27 @@ __global__ void sync_inter_sequence(
 }
 
 __global__ void decode_write(
-    int16_t* out, subsequence_info* s_info, int num_subsequences, const_state cstate)
+    int16_t* out,
+    subsequence_info* s_info,
+    int num_subsequences,
+    const_state cstate,
+    const jpeggpu::segment_info* segment_infos,
+    const int* segment_indices)
 {
     const int si = blockIdx.x * blockDim.x + threadIdx.x;
     if (si >= num_subsequences) {
         return;
     }
 
+    const int segment_idx                = segment_indices[si];
+    const jpeggpu::segment_info seg_info = segment_infos[segment_idx];
+
     // only first thread does not do overflow
     constexpr bool do_write = true;
-    if (si == 0) {
-        decode_subsequence<false, do_write>(si, out, s_info, cstate);
+    if (si == seg_info.subseq_offset) {
+        decode_subsequence<false, do_write>(si, out, s_info, cstate, seg_info, segment_idx);
     } else {
-        decode_subsequence<true, do_write>(si, out, s_info, cstate);
+        decode_subsequence<true, do_write>(si, out, s_info, cstate, seg_info, segment_idx);
     }
 }
 
@@ -615,50 +678,50 @@ bool jpeggpu::is_gpu_decode_possible(const jpeggpu::reader& reader)
 size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
 {
     size_t required = 0;
-    // d_scan (can be less due to destuffing)
-    required += gpu_alloc_size(reader.scan_size);
-    // d_huff
-    required += gpu_alloc_size(4 * sizeof(jpeggpu::huffman_table));
-    // d_out
-    size_t total_data_size = 0;
-    for (int c = 0; c < reader.num_components; ++c) {
-        total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
-    }
-    required += gpu_alloc_size(total_data_size * sizeof(int16_t));
-    // d_s_info
-    const size_t scan_bit_size = reader.scan_size * 8;
-    const int num_subsequences =
-        ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size));
-    required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
-    // d_sequence_not_synced
-    constexpr int block_size = 256;
-    const int num_sequences  = ceiling_div(num_subsequences, static_cast<unsigned int>(block_size));
-    required += gpu_alloc_size((num_sequences - 1) * sizeof(uint8_t));
-    // d_num_unsynced_sequence
-    required += gpu_alloc_size(sizeof(int));
-    // d_tmp_storage (reduction)
-    size_t tmp_storage_bytes_reduction = 0;
-    CHECK_CUDA(cub::DeviceReduce::Sum(
-        nullptr,
-        tmp_storage_bytes_reduction,
-        reinterpret_cast<uint8_t*>(0),
-        reinterpret_cast<int*>(0),
-        num_sequences - 1,
-        cudaStreamDefault));
-    required += gpu_alloc_size(tmp_storage_bytes_reduction);
-    // d_reduce_out
-    required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
-    // d_tmp_storage (scan)
-    size_t tmp_storage_bytes_scan = 0;
-    CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
-        nullptr,
-        tmp_storage_bytes_scan,
-        reinterpret_cast<subsequence_info*>(0),
-        reinterpret_cast<subsequence_info*>(0),
-        sum_subsequence_info{},
-        subsequence_info{},
-        num_subsequences,
-        cudaStreamDefault));
+    // // d_scan (can be less due to destuffing)
+    // required += gpu_alloc_size(reader.scan_size);
+    // // d_huff
+    // required += gpu_alloc_size(4 * sizeof(jpeggpu::huffman_table));
+    // // d_out
+    // size_t total_data_size = 0;
+    // for (int c = 0; c < reader.num_components; ++c) {
+    //     total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
+    // }
+    // required += gpu_alloc_size(total_data_size * sizeof(int16_t));
+    // // d_s_info
+    // const size_t scan_bit_size = reader.scan_size * 8;
+    // const int num_subsequences =
+    //     ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size));
+    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
+    // // d_sequence_not_synced
+    // constexpr int block_size = 256;
+    // const int num_sequences  = ceiling_div(num_subsequences, static_cast<unsigned
+    // int>(block_size)); required += gpu_alloc_size((num_sequences - 1) * sizeof(uint8_t));
+    // // d_num_unsynced_sequence
+    // required += gpu_alloc_size(sizeof(int));
+    // // d_tmp_storage (reduction)
+    // size_t tmp_storage_bytes_reduction = 0;
+    // CHECK_CUDA(cub::DeviceReduce::Sum(
+    //     nullptr,
+    //     tmp_storage_bytes_reduction,
+    //     reinterpret_cast<uint8_t*>(0),
+    //     reinterpret_cast<int*>(0),
+    //     num_sequences - 1,
+    //     cudaStreamDefault));
+    // required += gpu_alloc_size(tmp_storage_bytes_reduction);
+    // // d_reduce_out
+    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
+    // // d_tmp_storage (scan)
+    // size_t tmp_storage_bytes_scan = 0;
+    // CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
+    //     nullptr,
+    //     tmp_storage_bytes_scan,
+    //     reinterpret_cast<subsequence_info*>(0),
+    //     reinterpret_cast<subsequence_info*>(0),
+    //     sum_subsequence_info{},
+    //     subsequence_info{},
+    //     num_subsequences,
+    //     cudaStreamDefault));
 
     return required;
 }
@@ -671,7 +734,9 @@ size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
         }                                                                                          \
     } while (0)
 
-// FIXME adapt for non-interleaved scans
+// FIXME adapt for non-interleaved scans. for now, everywhere it's assumed it is interleaved, and
+//   there is only one scan
+// TODO reuse allocations to use less memory
 jpeggpu_status jpeggpu::process_scan(
     jpeggpu::reader& reader,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
@@ -679,38 +744,16 @@ jpeggpu_status jpeggpu::process_scan(
     size_t& tmp_size,
     cudaStream_t stream)
 {
-    // destuff TODO GPU
     uint8_t* d_scan;
-    int scan_size = 0;
-    {
-        std::vector<uint8_t> destuffed;
-        destuffed.reserve(reader.scan_size);
-
-        for (size_t i = 0; i < reader.scan_size; ++i) {
-            const uint8_t byte = reader.scan_start[i];
-            if (byte == 0xff) {
-                assert(i + 1 < reader.scan_size);
-                ++i;
-                // skip next byte, check its value
-                const uint8_t marker = reader.scan_start[i];
-                // should be a stuffed byte or a restart marker
-                assert(
-                    marker == 0 ||
-                    (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7));
-                (void)marker; // surpress warning
-                // stuffed byte or marker is subsequently ignored
-            }
-            destuffed.push_back(byte);
-        }
-
-        // this assumption allows to represent the bit offset with an int
-        assert(destuffed.size() * 8 <= INT_MAX);
-
-        scan_size = destuffed.size();
-
-        CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-            reinterpret_cast<void**>(&d_scan), scan_size, d_tmp, tmp_size));
-        CHECK_CUDA(cudaMemcpy(d_scan, destuffed.data(), scan_size, cudaMemcpyHostToDevice));
+    int scan_size;
+    int num_subsequences; // "N"
+    jpeggpu::segment_info* d_segment_infos;
+    int* d_segment_indices;
+    // FIXME update calculate_gpu_decode_memory according to changes in `gpu_alloc_reserve`
+    const jpeggpu_status stat = jpeggpu::destuff(
+        reader, d_scan, scan_size, num_subsequences, d_segment_infos, d_segment_indices, stream);
+    if (stat != JPEGGPU_SUCCESS) {
+        return stat;
     }
 
     jpeggpu::huffman_table* d_huff;
@@ -741,9 +784,6 @@ jpeggpu_status jpeggpu::process_scan(
         cudaMemcpyHostToDevice,
         stream));
 
-    const size_t scan_bit_size = scan_size * 8;
-    const int num_subsequences =
-        ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size)); // "N"
     constexpr int block_size = 256; // "b", size in subsequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
@@ -781,16 +821,18 @@ jpeggpu_status jpeggpu::process_scan(
         reader.css.x[0],
         reader.css.y[0],
         reader.num_components,
-        num_data_units};
+        num_data_units,
+        reader.seen_dri ? reader.restart_interval : reader.num_mcus_x * reader.num_mcus_y};
 
     { // sync_decoders (Algorithm 3)
 
-        sync_intra_sequence<block_size>
-            <<<num_sequences, block_size, 0, stream>>>(d_s_info, num_subsequences, cstate);
+        sync_intra_sequence<block_size><<<num_sequences, block_size, 0, stream>>>(
+            d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
         CHECK_CUDA(cudaGetLastError());
 
         if (num_sequences > 1) {
-            // note: the meaning of this array is flipped, a one is produced if not synced
+            // the meaning of this array is flipped w.r.t. the paper,
+            //   a one is produced if not synced
             uint8_t* d_sequence_not_synced;
             CHECK_STAT(jpeggpu::gpu_alloc_reserve(
                 reinterpret_cast<void**>(&d_sequence_not_synced),
@@ -826,7 +868,14 @@ jpeggpu_status jpeggpu::process_scan(
                 const int num_inter_blocks =
                     ceiling_div(num_sequences, static_cast<unsigned int>(block_size_inter));
                 sync_inter_sequence<block_size><<<num_inter_blocks, block_size_inter, 0, stream>>>(
-                    d_s_info, num_subsequences, cstate, d_sequence_not_synced, num_sequences);
+                    d_s_info,
+                    num_subsequences,
+                    cstate,
+                    d_sequence_not_synced,
+                    num_sequences,
+                    d_segment_infos,
+                    d_segment_indices);
+                CHECK_CUDA(cudaGetLastError());
                 std::cout << "inter sequence sync done\n";
 
                 CHECK_CUDA(cub::DeviceReduce::Sum(
@@ -863,14 +912,16 @@ jpeggpu_status jpeggpu::process_scan(
         const subsequence_info init_value{0, 0, 0, 0};
         void* d_tmp_storage      = nullptr;
         size_t tmp_storage_bytes = 0;
-        CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
+        CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
             d_tmp_storage,
             tmp_storage_bytes,
+            d_segment_indices, // d_keys_in
             d_s_info,
             d_reduce_out,
             sum_subsequence_info{},
             init_value,
             num_subsequences,
+            cub::Equality{},
             stream));
 
         CHECK_STAT(jpeggpu::gpu_alloc_reserve(
@@ -878,14 +929,16 @@ jpeggpu_status jpeggpu::process_scan(
         // TODO debug to satisfy initcheck
         CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
 
-        CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
+        CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
             d_tmp_storage,
             tmp_storage_bytes,
+            d_segment_indices, // d_keys_in
             d_s_info,
             d_reduce_out,
             sum_subsequence_info{},
             init_value,
             num_subsequences,
+            cub::Equality{},
             stream));
 
         constexpr int block_size_assign = 256;
@@ -898,7 +951,7 @@ jpeggpu_status jpeggpu::process_scan(
 
     // alg-1:09-15
     decode_write<<<num_sequences, block_size, 0, stream>>>(
-        d_out, d_s_info, num_subsequences, cstate);
+        d_out, d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
     CHECK_CUDA(cudaGetLastError());
 
     std::vector<std::vector<int16_t>> data(reader.num_components);
@@ -970,6 +1023,10 @@ jpeggpu_status jpeggpu::process_scan(
             reader.data_sizes_x[c] * reader.data_sizes_y[c] * sizeof(int16_t),
             cudaMemcpyHostToDevice));
     }
+
+    CHECK_CUDA(cudaFree(d_segment_indices));
+    CHECK_CUDA(cudaFree(d_segment_infos));
+    CHECK_CUDA(cudaFree(d_scan));
 
     return JPEGGPU_SUCCESS;
 }

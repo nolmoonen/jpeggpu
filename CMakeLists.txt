@@ -18,6 +18,7 @@ add_library(jpeggpu STATIC
     "${SOURCE_DIR}/jpeggpu.cpp"
     "${SOURCE_DIR}/reader.cpp"
     "${SOURCE_DIR}/decode_gpu.cu"
+    "${SOURCE_DIR}/destuff.cu"
     "${SOURCE_DIR}/convert.cu"
     "${SOURCE_DIR}/decoder.cpp")
 target_include_directories(jpeggpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

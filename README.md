@@ -5,3 +5,4 @@
 - Add support for other SOFs?
 - Add optional logging, enable logging in example_tool.
 - Remove CPU decoder (by removing assumptions in GPU kernel) and replace CPU IDCT by a GPU version.
+- Implement full baseline.

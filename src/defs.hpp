@@ -52,6 +52,8 @@ __device__ constexpr int order_natural[64 + 16] = {
     63, 63, 63, 63, 63, 63, 63, 63};
 // clang-format on
 
+constexpr bool is_debug = true;
+
 } // namespace jpeggpu
 
 #endif // JPEGGPU_DEFS_HPP_

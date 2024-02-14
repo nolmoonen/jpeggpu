@@ -229,6 +229,14 @@ jpeggpu_status jpeggpu::reader::read_dht()
     return JPEGGPU_SUCCESS;
 }
 
+// TODO for non-interleaved, do something like the following:
+// - when encountering the first SOS, check if interleaved or non-interleaved.
+// - based on this, the data sizes etc. can be determined (but we don't know in
+//     which order the scans will come)
+// - back out and return control to user, who can allocate device memory
+// - destuff and take note of where the SOS headers are
+// - parse these
+// - do decoding in hierarchy: scan->restart_segment->sequence->subsequence
 jpeggpu_status jpeggpu::reader::read_sos()
 {
     if (!has_remaining(3)) {
@@ -265,8 +273,11 @@ jpeggpu_status jpeggpu::reader::read_sos()
     (void)spectral_start, (void)spectral_end, (void)successive_approximation;
 
     is_interleaved = num_components > 1;
+    if (!is_interleaved) {
+        return JPEGGPU_NOT_SUPPORTED;
+    }
 
-    // TODO this is not compatible with non-interleaved, since there are multple scans
+    // TODO this is not compatible with non-interleaved, since there are multiple scans
     assert(is_interleaved);
     for (int i = 0; i < num_components; ++i) {
         sizes_x[i] = get_size(size_x, css.x[i], ss_x_max);
@@ -292,10 +303,16 @@ jpeggpu_status jpeggpu::reader::read_sos()
                 static_cast<unsigned int>(num_mcus_y));
         }
     }
+    const int num_mcus = num_mcus_x * num_mcus_y;
+    if (restart_interval) {
+        // every entropy-encoded segment ends with a restart marker, except for the last
+        num_segments = ceiling_div(num_mcus, static_cast<unsigned int>(restart_interval));
+    } else {
+        num_segments = 1;
+    }
 
-    // const size_t consumed = image_remaining - state.image_size;
-    // *image += consumed;
-
+    // there is some duplicate work between the below code, and the destuffing in the decoder
+    //   this should be removed once non-interleaved scans are tackled (as described above)
     scan_start = image;
     do {
         const uint8_t* ret = reinterpret_cast<const uint8_t*>(
@@ -315,15 +332,14 @@ jpeggpu_status jpeggpu::reader::read_sos()
 
         if (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7) {
             // restart marker is okay and part of scan
-            DBG_PRINT("\trst marker\n");
-        } else if (marker == jpeggpu::MARKER_EOI) {
+        } else if (marker == jpeggpu::MARKER_EOI || marker == jpeggpu::MARKER_SOS) {
             // rewind the marker
             image -= 2;
             break;
         } else {
             DBG_PRINT("marker %s\n", jpeggpu::get_marker_string(marker));
             DBG_PRINT("unexpected");
-            return JPEGGPU_INVALID_JPEG; // TODO is it?
+            return JPEGGPU_INVALID_JPEG;
         }
     } while (image < image_end);
     scan_size = image - scan_start;
@@ -431,6 +447,20 @@ jpeggpu_status jpeggpu::reader::read()
         case jpeggpu::MARKER_SOF0:
             read_sof0();
             continue;
+        case jpeggpu::MARKER_SOF1:
+        case jpeggpu::MARKER_SOF2:
+        case jpeggpu::MARKER_SOF3:
+        case jpeggpu::MARKER_SOF5:
+        case jpeggpu::MARKER_SOF6:
+        case jpeggpu::MARKER_SOF7:
+        case jpeggpu::MARKER_SOF9:
+        case jpeggpu::MARKER_SOF10:
+        case jpeggpu::MARKER_SOF11:
+        case jpeggpu::MARKER_SOF13:
+        case jpeggpu::MARKER_SOF14:
+        case jpeggpu::MARKER_SOF15:
+            DBG_PRINT("unsupported JPEG type %s\n", get_marker_string(marker));
+            return JPEGGPU_NOT_SUPPORTED;
         case jpeggpu::MARKER_DHT:
             read_dht();
             continue;
