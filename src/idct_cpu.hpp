@@ -186,7 +186,7 @@ void idct_data_unit(int16_t* data, const jpeggpu::qtable& table)
         idct_cpu_perform_column(data + i);
 }
 
-void idct(
+void idct_cpu(
     reader& reader, int16_t* (&d_image_qdct)[max_comp_count], uint8_t* (&d_image)[max_comp_count])
 {
     std::vector<std::vector<int16_t>> h_image_qdct(reader.num_components);

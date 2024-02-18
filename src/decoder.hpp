@@ -12,6 +12,10 @@ namespace jpeggpu {
 
 struct decoder {
 
+    jpeggpu_status init();
+
+    void cleanup();
+
     jpeggpu_status parse_header(jpeggpu_img_info& img_info, const uint8_t* data, size_t size);
 
     jpeggpu_status decode(
@@ -24,6 +28,8 @@ struct decoder {
         cudaStream_t stream);
 
     struct reader reader;
+
+    uint8_t* d_qtables[max_comp_count];
 
     // output of decoding, quantized and cosine-transformed image data
     int16_t* d_image_qdct[max_comp_count];

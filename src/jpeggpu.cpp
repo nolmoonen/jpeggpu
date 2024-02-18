@@ -39,9 +39,9 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    *decoder = new jpeggpu_decoder;
+    *decoder = reinterpret_cast<jpeggpu_decoder*>(malloc(sizeof(jpeggpu_decoder)));
 
-    return JPEGGPU_SUCCESS;
+    return (*decoder)->decoder.init();
 }
 
 enum jpeggpu_status jpeggpu_decoder_parse_header(
@@ -83,7 +83,8 @@ enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder)
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    delete decoder;
+    decoder->decoder.cleanup();
+    free(decoder);
 
     return JPEGGPU_SUCCESS;
 }

@@ -3,6 +3,7 @@
 #include "decode_cpu.hpp"
 #include "decode_gpu.hpp"
 #include "defs.hpp"
+#include "idct.hpp"
 #include "idct_cpu.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
@@ -21,6 +22,24 @@
 #include <stdio.h>
 #include <type_traits>
 #include <vector>
+
+using namespace jpeggpu;
+
+jpeggpu_status jpeggpu::decoder::init()
+{
+    for (int c = 0; c < max_comp_count; ++c) {
+        CHECK_CUDA(cudaMalloc(&d_qtables[c], sizeof(uint8_t) * data_unit_size));
+    }
+    return JPEGGPU_SUCCESS;
+}
+
+void jpeggpu::decoder::cleanup()
+{
+    for (int c = 0; c < max_comp_count; ++c) {
+        cudaFree(d_qtables[c]);
+        d_qtables[c] = nullptr;
+    }
+}
 
 jpeggpu_status jpeggpu::decoder::parse_header(
     jpeggpu_img_info& img_info, const uint8_t* data, size_t size)
@@ -131,8 +150,20 @@ jpeggpu_status jpeggpu::decoder::decode(
         process_scan_legacy(reader, d_image_qdct);
     }
 
+    for (int c = 0; c < reader.num_components; ++c) {
+        constexpr int qtable_bytes = sizeof(uint8_t) * data_unit_size;
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_qtables[c],
+            reader.qtables[reader.qtable_idx[c]],
+            qtable_bytes,
+            cudaMemcpyHostToDevice,
+            stream));
+    }
+
     // TODO check that the number of scans seen is equal to the number of components
-    jpeggpu::idct(reader, d_image_qdct, d_image);
+
+    // jpeggpu::idct_cpu(reader, d_image_qdct, d_image);
+    jpeggpu::idct(reader, d_image_qdct, d_image, d_qtables, stream);
 
     // data will be planar, may be subsampled, may be RGB, YCbCr, CYMK, anything else
     if (reader.color_fmt != color_fmt || reader.pixel_fmt != pixel_fmt ||
