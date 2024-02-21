@@ -1,4 +1,5 @@
 #include "reader.hpp"
+#include "decoder_defs.hpp"
 #include "defs.hpp"
 #include "marker.hpp"
 
@@ -9,6 +10,40 @@
 #include <cinttypes>
 #include <cstring>
 #include <stdint.h>
+
+using namespace jpeggpu;
+
+jpeggpu_status reader::startup()
+{
+    // TODO free earlier allocations if one fails
+
+    for (int c = 0; c < max_comp_count; ++c) {
+        if (cudaMallocHost(&h_qtables[c], data_unit_size * sizeof(*(h_qtables[c]))) !=
+            cudaSuccess) {
+            return JPEGGPU_OUT_OF_HOST_MEMORY;
+        }
+
+        for (int h = 0; h < HUFF_COUNT; ++h) {
+            if (cudaMallocHost(&h_huff_tables[c][h], sizeof(*(h_huff_tables[c][h]))) !=
+                cudaSuccess) {
+                return JPEGGPU_OUT_OF_HOST_MEMORY;
+            }
+        }
+    }
+
+    return JPEGGPU_SUCCESS;
+}
+
+void reader::cleanup()
+{
+    for (int c = 0; c < max_comp_count; ++c) {
+        cudaFreeHost(h_qtables[c]);
+
+        for (int h = 0; h < HUFF_COUNT; ++h) {
+            cudaFreeHost(h_huff_tables[c][h]);
+        }
+    }
+}
 
 uint8_t jpeggpu::reader::read_uint8() { return *(image++); }
 
@@ -48,22 +83,26 @@ jpeggpu_status jpeggpu::reader::read_sof0()
     const uint8_t precision = read_uint8();
     (void)precision;
     const uint16_t num_lines            = read_uint16();
-    size_y                              = num_lines;
+    jpeg_stream.size_y                  = num_lines;
     const uint16_t num_samples_per_line = read_uint16();
-    size_x                              = num_samples_per_line;
+    jpeg_stream.size_x                  = num_samples_per_line;
     const uint8_t num_img_components    = read_uint8();
-    num_components                      = num_img_components;
+    if (num_img_components > max_comp_count) {
+        return JPEGGPU_INVALID_JPEG;
+    }
+    jpeg_stream.num_components = num_img_components;
 
     (*logger)(
         "\tsize_x: %" PRIu16 ", size_y: %" PRIu16 ", num_components: %" PRIu8 "\n",
-        size_x,
-        size_y,
-        num_components);
+        jpeg_stream.size_x,
+        jpeg_stream.size_y,
+        jpeg_stream.num_components);
 
-    ss_x_max = 0;
-    ss_y_max = 0;
-    for (uint8_t c = 0; c < num_components; ++c) {
+    jpeg_stream.ss_x_max = 0;
+    jpeg_stream.ss_y_max = 0;
+    for (uint8_t c = 0; c < jpeg_stream.num_components; ++c) {
         const uint8_t component_id     = read_uint8();
+        jpeg_stream.components[c].id   = component_id;
         const uint8_t sampling_factors = read_uint8();
         const int ss_x_c               = sampling_factors >> 4;
         if (ss_x_c < 1 && ss_x_c > 4) {
@@ -73,8 +112,8 @@ jpeggpu_status jpeggpu::reader::read_sof0()
             // fairly annoying to handle, and extremely uncommon
             return JPEGGPU_NOT_SUPPORTED;
         }
-        css.x[c]         = ss_x_c;
-        const int ss_y_c = sampling_factors & 0xf;
+        jpeg_stream.css.x[c] = ss_x_c;
+        const int ss_y_c     = sampling_factors & 0xf;
         if (ss_y_c < 1 && ss_y_c > 4) {
             return JPEGGPU_INVALID_JPEG;
         }
@@ -82,21 +121,17 @@ jpeggpu_status jpeggpu::reader::read_sof0()
             // fairly annoying to handle, and extremely uncommon
             return JPEGGPU_NOT_SUPPORTED;
         }
-        css.y[c]         = ss_y_c;
-        const uint8_t qi = read_uint8();
-        qtable_idx[c]    = qi;
+        jpeg_stream.css.y[c]                 = ss_y_c;
+        const uint8_t qi                     = read_uint8();
+        jpeg_stream.components[c].qtable_idx = qi;
         (*logger)(
             "\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
             component_id,
-            css.x[c],
-            css.y[c],
+            jpeg_stream.css.x[c],
+            jpeg_stream.css.y[c],
             qi);
-        ss_x_max = std::max(ss_x_max, css.x[c]);
-        ss_y_max = std::max(ss_y_max, css.y[c]);
-    }
-    for (int c = num_components; c < jpeggpu::max_comp_count; ++c) {
-        css.x[c] = 0;
-        css.y[c] = 0;
+        jpeg_stream.ss_x_max = std::max(jpeg_stream.ss_x_max, jpeg_stream.css.x[c]);
+        jpeg_stream.ss_y_max = std::max(jpeg_stream.ss_y_max, jpeg_stream.css.y[c]);
     }
 
     return JPEGGPU_SUCCESS;
@@ -143,29 +178,6 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
     }
     // Ensures huff_decode terminates
     table.maxcode[17] = 0xFFFFFL;
-
-    // Compute lookahead tables to speed up decoding.
-    // First we set all the table entries to 0, indicating "too long";
-    // then we iterate through the Huffman codes that are short enough and
-    // fill in all the entries that correspond to bit sequences starting
-    // with that code.
-    std::memset(table.look_nbits, 0, sizeof(int) * 256);
-
-    int HUFF_LOOKAHEAD = 8;
-    p                  = 0;
-    for (int l = 1; l <= HUFF_LOOKAHEAD; l++) {
-        for (int i = 1; i <= (int)table.bits[l]; i++, p++) {
-            // l = current code's length,
-            // p = its index in huffcode[] & huffval[]. Generate left-justified
-            // code followed by all possible bit sequences
-            int lookbits = huffcode[p] << (HUFF_LOOKAHEAD - l);
-            for (int ctr = 1 << (HUFF_LOOKAHEAD - l); ctr > 0; ctr--) {
-                table.look_nbits[lookbits] = l;
-                table.look_sym[lookbits]   = table.huffval[p];
-                lookbits++;
-            }
-        }
-    }
 }
 
 jpeggpu_status jpeggpu::reader::read_dht()
@@ -185,6 +197,7 @@ jpeggpu_status jpeggpu::reader::read_dht()
         --remaining;
         const int tc = index >> 4;
         const int th = index & 0xf;
+        // TODO check if these are already defined. if so, throw warning
         if (tc != 0 && tc != 1) {
             return JPEGGPU_INVALID_JPEG;
         }
@@ -196,7 +209,7 @@ jpeggpu_status jpeggpu::reader::read_dht()
             return JPEGGPU_INVALID_JPEG;
         }
 
-        jpeggpu::huffman_table& table = huff_tables[th][tc];
+        jpeggpu::huffman_table& table = *(h_huff_tables[th][tc]);
 
         // read bits
         table.bits[0] = 0;
@@ -222,21 +235,13 @@ jpeggpu_status jpeggpu::reader::read_dht()
         }
         remaining -= count;
 
-        // FIXME remove this
+        // TODO is this the correct place?
         compute_huffman_table(table);
     }
 
     return JPEGGPU_SUCCESS;
 }
 
-// TODO for non-interleaved, do something like the following:
-// - when encountering the first SOS, check if interleaved or non-interleaved.
-// - based on this, the data sizes etc. can be determined (but we don't know in
-//     which order the scans will come)
-// - back out and return control to user, who can allocate device memory
-// - destuff and take note of where the SOS headers are
-// - parse these
-// - do decoding in hierarchy: scan->restart_segment->sequence->subsequence
 jpeggpu_status jpeggpu::reader::read_sos()
 {
     if (!has_remaining(3)) {
@@ -245,22 +250,56 @@ jpeggpu_status jpeggpu::reader::read_sos()
 
     const uint16_t length        = read_uint16();
     const uint8_t num_components = read_uint8();
+    // there should only be one scan if the scan is interleaved (1 < num_components)
+    if (num_components > 4 || (1 < num_components && num_components < jpeg_stream.num_components)) {
+        return JPEGGPU_INVALID_JPEG;
+    }
+    jpeg_stream.is_interleaved = num_components > 1;
+
     if (length != 2 + 1 + 2 * num_components + 3) {
         return JPEGGPU_INVALID_JPEG;
     }
 
-    for (uint8_t i = 0; i < num_components; ++i) {
+    scan& scan = jpeg_stream.scans[reader_state.scan_idx++];
+
+    for (uint8_t c = 0; c < num_components; ++c) {
         if (!has_remaining(2)) {
             return JPEGGPU_INVALID_JPEG;
         }
 
-        const uint8_t selector      = read_uint8();
+        const uint8_t selector = read_uint8();
+        scan.ids[c]            = selector;
+        // check if selector matches the component index, since the frame header must have been seen
+        //   once we encounter start of scan
+        int comp_idx           = -1;
+        for (int d = 0; d < jpeg_stream.num_components; ++d) {
+            if (jpeg_stream.components[d].id == selector) {
+                comp_idx = d;
+                break;
+            }
+        }
+        if (comp_idx == -1) {
+            (*logger)(
+                "scan component %" PRIu8 " does not match any frame components (" PRIu8 " " PRIu8
+                " " PRIu8 " " PRIu8 ")\n",
+                selector,
+                jpeg_stream.components[0].id,
+                jpeg_stream.components[1].id,
+                jpeg_stream.components[2].id,
+                jpeg_stream.components[3].id);
+            return JPEGGPU_INVALID_JPEG;
+        }
+
         const uint8_t acdc_selector = read_uint8();
-        const int id_dc             = acdc_selector >> 4;
-        const int id_ac             = acdc_selector & 0xf;
+        const uint8_t id_dc         = acdc_selector >> 4;
+        const uint8_t id_ac         = acdc_selector & 0xf;
+        if (id_dc > 3 || id_ac > 3) {
+            return JPEGGPU_INVALID_JPEG;
+        }
         (*logger)("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
-        huff_map[i][jpeggpu::HUFF_DC] = id_dc;
-        huff_map[i][jpeggpu::HUFF_AC] = id_ac;
+        // TODO check if these Huffman indices are found
+        jpeg_stream.components[comp_idx].dc_idx = id_dc;
+        jpeg_stream.components[comp_idx].ac_idx = id_ac;
     }
 
     if (!has_remaining(3)) {
@@ -272,77 +311,53 @@ jpeggpu_status jpeggpu::reader::read_sos()
     const uint8_t successive_approximation = read_uint8();
     (void)spectral_start, (void)spectral_end, (void)successive_approximation;
 
-    is_interleaved = num_components > 1;
-    if (!is_interleaved) {
-        return JPEGGPU_NOT_SUPPORTED;
-    }
-
-    // TODO this is not compatible with non-interleaved, since there are multiple scans
-    assert(is_interleaved);
-    for (int i = 0; i < num_components; ++i) {
-        sizes_x[i] = get_size(size_x, css.x[i], ss_x_max);
-        sizes_y[i] = get_size(size_y, css.y[i], ss_y_max);
-
-        mcu_sizes_x[i] = is_interleaved ? block_size * css.x[i] : block_size;
-        mcu_sizes_y[i] = is_interleaved ? block_size * css.y[i] : block_size;
-
-        data_sizes_x[i] =
-            ceiling_div(sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i])) * mcu_sizes_x[i];
-        data_sizes_y[i] =
-            ceiling_div(sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i])) * mcu_sizes_y[i];
-
-        if (i == 0) {
-            num_mcus_x = ceiling_div(data_sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i]));
-            num_mcus_y = ceiling_div(data_sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i]));
-        } else {
-            assert(
-                ceiling_div(data_sizes_x[i], static_cast<unsigned int>(mcu_sizes_x[i])) ==
-                static_cast<unsigned int>(num_mcus_x));
-            assert(
-                ceiling_div(data_sizes_y[i], static_cast<unsigned int>(mcu_sizes_y[i])) ==
-                static_cast<unsigned int>(num_mcus_y));
-        }
-    }
-    const int num_mcus = num_mcus_x * num_mcus_y;
-    if (restart_interval) {
-        // every entropy-encoded segment ends with a restart marker, except for the last
-        num_segments = ceiling_div(num_mcus, static_cast<unsigned int>(restart_interval));
-    } else {
-        num_segments = 1;
-    }
-
-    // there is some duplicate work between the below code, and the destuffing in the decoder
-    //   this should be removed once non-interleaved scans are tackled (as described above)
-    scan_start = image;
+    const int scan_begin     = image - image_begin;
+    int num_bytes_in_segment = 0;
     do {
         const uint8_t* ret = reinterpret_cast<const uint8_t*>(
             std::memchr(reinterpret_cast<const void*>(image), 0xff, image_end - image));
-        // ff as final char is valid since it's valid encoder symbol if it's escaped
-        if (ret == nullptr || ret == image_end - 1) {
-            // file is fully processed
-            image = image_end;
-            break;
+        if (ret == nullptr) {
+            // file does not have an end of image marker
+            return JPEGGPU_INVALID_JPEG;
         }
+
+        num_bytes_in_segment += ret - image;
+
         image                = ret + 1;
         const uint8_t marker = read_uint8();
+        // `image` now points to after marker
         if (marker == 0) {
-            // escaped encoded 0, continue
+            // stuffed byte
+            ++num_bytes_in_segment; // 0xff00 is replaced by 0x00
             continue;
         }
 
-        if (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7) {
-            // restart marker is okay and part of scan
-        } else if (marker == jpeggpu::MARKER_EOI || marker == jpeggpu::MARKER_SOS) {
-            // rewind the marker
+        const bool is_rst      = jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7;
+        const bool is_scan_end = marker == jpeggpu::MARKER_EOI || marker == jpeggpu::MARKER_SOS;
+
+        if (is_rst || is_scan_end) {
+            scan.num_subsequences += ceiling_div(
+                num_bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes));
+            num_bytes_in_segment = 0;
+            ++scan.num_segments;
+        }
+
+        if (is_rst) {
+            continue;
+        }
+
+        if (is_scan_end) {
+            // rewind 0xff and marker byte
             image -= 2;
             break;
-        } else {
-            (*logger)("marker %s\n", jpeggpu::get_marker_string(marker));
-            (*logger)("unexpected");
-            return JPEGGPU_INVALID_JPEG;
         }
+
+        (*logger)("marker %s\n", jpeggpu::get_marker_string(marker));
+        (*logger)("unexpected\n");
+        return JPEGGPU_INVALID_JPEG;
     } while (image < image_end);
-    scan_size = image - scan_start;
+    scan.begin = scan_begin;
+    scan.end   = image - image_begin;
 
     return JPEGGPU_SUCCESS;
 }
@@ -368,7 +383,8 @@ jpeggpu_status jpeggpu::reader::read_dqt()
         const uint8_t info  = read_uint8();
         const int precision = info >> 4;
         const int id        = info & 0xf;
-        if ((precision != 0 && precision != 1) || id >= 4) {
+        // TODO warning if redefined
+        if ((precision != 0 && precision != 1) || id > 3) {
             return JPEGGPU_INVALID_JPEG;
         }
         if (precision != 0) {
@@ -377,9 +393,10 @@ jpeggpu_status jpeggpu::reader::read_dqt()
 
         for (int j = 0; j < 64; ++j) {
             // element in zigzag order
-            const uint8_t element                  = read_uint8();
+            const uint8_t element = read_uint8();
+
             // store in natural order
-            qtables[id][jpeggpu::order_natural[j]] = element;
+            (*h_qtables[id])[jpeggpu::order_natural[j]] = element;
         }
     }
 
@@ -397,10 +414,15 @@ jpeggpu_status jpeggpu::reader::read_dri()
         return JPEGGPU_INVALID_JPEG;
     }
 
-    seen_dri            = true;
-    const uint16_t rsti = read_uint16();
-    restart_interval    = rsti;
-    (*logger)("\trestart_interval: %" PRIu16 "\n", restart_interval);
+    const uint16_t rsti         = read_uint16();
+    const bool seen_rsti_before = jpeg_stream.restart_interval != 0;
+    if (seen_rsti_before && jpeg_stream.restart_interval != rsti) {
+        // TODO is this even a problem?
+        // do not support redefinining restart interval
+        return JPEGGPU_NOT_SUPPORTED;
+    }
+    jpeg_stream.restart_interval = rsti;
+    (*logger)("\trestart_interval: %" PRIu16 "\n", jpeg_stream.restart_interval);
 
     return JPEGGPU_SUCCESS;
 }
@@ -481,15 +503,72 @@ jpeggpu_status jpeggpu::reader::read()
         }
     } while (marker != jpeggpu::MARKER_EOI);
 
+    // TODO check that all found scans have all components
+
+    // TODO check that all qtables are found
+
+    jpeg_stream.num_scans = reader_state.scan_idx;
+
+    for (int i = 0; i < jpeg_stream.num_components; ++i) {
+        jpeg_stream.sizes_x[i] =
+            get_size(jpeg_stream.size_x, jpeg_stream.css.x[i], jpeg_stream.ss_x_max);
+        jpeg_stream.sizes_y[i] =
+            get_size(jpeg_stream.size_y, jpeg_stream.css.y[i], jpeg_stream.ss_y_max);
+
+        jpeg_stream.mcu_sizes_x[i] =
+            jpeg_stream.is_interleaved ? block_size * jpeg_stream.css.x[i] : block_size;
+        jpeg_stream.mcu_sizes_y[i] =
+            jpeg_stream.is_interleaved ? block_size * jpeg_stream.css.y[i] : block_size;
+
+        jpeg_stream.data_sizes_x[i] =
+            ceiling_div(
+                jpeg_stream.sizes_x[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_x[i])) *
+            jpeg_stream.mcu_sizes_x[i];
+        jpeg_stream.data_sizes_y[i] =
+            ceiling_div(
+                jpeg_stream.sizes_y[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_y[i])) *
+            jpeg_stream.mcu_sizes_y[i];
+
+        if (i == 0) {
+            jpeg_stream.num_mcus_x = ceiling_div(
+                jpeg_stream.data_sizes_x[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_x[i]));
+            jpeg_stream.num_mcus_y = ceiling_div(
+                jpeg_stream.data_sizes_y[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_y[i]));
+        } else {
+            assert(
+                ceiling_div(
+                    jpeg_stream.data_sizes_x[i],
+                    static_cast<unsigned int>(jpeg_stream.mcu_sizes_x[i])) ==
+                static_cast<unsigned int>(jpeg_stream.num_mcus_x));
+            assert(
+                ceiling_div(
+                    jpeg_stream.data_sizes_y[i],
+                    static_cast<unsigned int>(jpeg_stream.mcu_sizes_y[i])) ==
+                static_cast<unsigned int>(jpeg_stream.num_mcus_y));
+        }
+    }
+
     return JPEGGPU_SUCCESS;
 }
 
 void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end, struct logger* logger)
 {
-    std::memset(this, 0, sizeof(reader));
-    this->image     = image;
-    this->image_end = image_end;
-    this->logger    = logger;
+    this->image       = image;
+    this->image_begin = image;
+    this->image_end   = image_end;
+    this->logger      = logger;
+
+    // clear remaining state
+    std::memset(&jpeg_stream, 0, sizeof(jpeg_stream));
+    std::memset(&reader_state, 0, sizeof(reader_state));
+    // std::memset(segments, 0, max_num_segments * sizeof(segment));
+    for (int c = 0; c < max_comp_count; ++c) {
+        std::memset(h_qtables[c], 0, data_unit_size * sizeof(*(h_qtables[c])));
+
+        for (int h = 0; h < HUFF_COUNT; ++h) {
+            std::memset(h_huff_tables[c][h], 0, sizeof(*(h_huff_tables[c][h])));
+        }
+    }
 }
 
 #undef JPEGGPU_CHECK_STATUS

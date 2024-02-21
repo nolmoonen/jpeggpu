@@ -22,6 +22,7 @@ enum jpeggpu_status {
     JPEGGPU_INTERNAL_ERROR,
     /// the jpeg stream is compatible with the specification, but not supported by jpeggpu
     JPEGGPU_NOT_SUPPORTED,
+    JPEGGPU_OUT_OF_HOST_MEMORY,
 };
 
 const char* jpeggpu_get_status_string(enum jpeggpu_status stat);

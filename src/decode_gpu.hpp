@@ -5,18 +5,21 @@
 
 #include <jpeggpu/jpeggpu.h>
 
-namespace jpeggpu {
+#include <stddef.h>
+#include <stdint.h>
 
-bool is_gpu_decode_possible(const jpeggpu::reader& reader);
+namespace jpeggpu {
 
 size_t calculate_gpu_decode_memory(const jpeggpu::reader& reader);
 
 /// \brief Unregarded of whether the scan is interleaved or non-interleaved,
 ///   this function will output the quantized-cosine-transformed pixel data
 ///   in planar format.
-jpeggpu_status process_scan(
+jpeggpu_status decode(
     logger& logger,
     reader& reader,
+    const uint8_t* d_image_data,
+    uint8_t* d_image_data_destuffed,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
     void*& d_tmp,
     size_t& tmp_size,

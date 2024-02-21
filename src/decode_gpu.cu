@@ -20,10 +20,6 @@
 
 namespace {
 
-/// TODO remove these assumptions
-/// Assumption 1 (ass-1): all non-luma is subsampled with the same factor
-/// Assumption 2 (ass-2): Huffman table mapping
-
 /// \brief Contains all required information about the last synchronization point for the
 ///   subsequence. All information is relative to the segment.
 struct subsequence_info {
@@ -344,7 +340,7 @@ struct const_state {
     int ssy;
     int num_components;
     int num_data_units;
-    int restart_interval;
+    int num_mcus_in_segment;
 };
 
 static_assert(std::is_trivially_copyable_v<const_state>);
@@ -386,7 +382,7 @@ __device__ subsequence_info decode_subsequence(
 
     int position_in_output = 0;
     if constexpr (do_write) {
-        position_in_output = s_info[i].n + segment_idx * cstate.restart_interval *
+        position_in_output = s_info[i].n + segment_idx * cstate.num_mcus_in_segment *
                                                num_data_units_in_mcu * jpeggpu::data_unit_size;
     }
     if constexpr (is_overflow) {
@@ -414,7 +410,7 @@ __device__ subsequence_info decode_subsequence(
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
         //   (so info.p cannot reliably be used to determine if the loop should break)
         //   this problem is excerbated by restart intevals, where padding occurs more frequently
-        if (do_write && position_in_output >= (segment_idx + 1) * cstate.restart_interval *
+        if (do_write && position_in_output >= (segment_idx + 1) * cstate.num_mcus_in_segment *
                                                   num_data_units_in_mcu * jpeggpu::data_unit_size) {
             break;
         }
@@ -649,83 +645,6 @@ __global__ void assign_sinfo_n(
     dst[lid].n = src[lid].n;
 }
 
-} // namespace
-
-bool jpeggpu::is_gpu_decode_possible(const jpeggpu::reader& reader)
-{
-    // not supported if non-luminance planes do not have the same subsampling
-    //   this makes figuring the component out easier (c in s_info)
-    for (int c = 1; c < reader.num_components; ++c) {
-        if (reader.css.x[c] != 1 || reader.css.y[c] != 1) {
-            return false;
-        }
-    }
-
-    // ass-2
-    if (reader.huff_map[0][jpeggpu::HUFF_DC] != 0 || reader.huff_map[0][jpeggpu::HUFF_AC] != 0) {
-        return false;
-    }
-    for (int c = 1; c < reader.num_components; ++c) {
-        if (reader.huff_map[c][jpeggpu::HUFF_DC] != 1 ||
-            reader.huff_map[c][jpeggpu::HUFF_AC] != 1) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
-{
-    size_t required = 0;
-    // // d_scan (can be less due to destuffing)
-    // required += gpu_alloc_size(reader.scan_size);
-    // // d_huff
-    // required += gpu_alloc_size(4 * sizeof(jpeggpu::huffman_table));
-    // // d_out
-    // size_t total_data_size = 0;
-    // for (int c = 0; c < reader.num_components; ++c) {
-    //     total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
-    // }
-    // required += gpu_alloc_size(total_data_size * sizeof(int16_t));
-    // // d_s_info
-    // const size_t scan_bit_size = reader.scan_size * 8;
-    // const int num_subsequences =
-    //     ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size));
-    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
-    // // d_sequence_not_synced
-    // constexpr int block_size = 256;
-    // const int num_sequences  = ceiling_div(num_subsequences, static_cast<unsigned
-    // int>(block_size)); required += gpu_alloc_size((num_sequences - 1) * sizeof(uint8_t));
-    // // d_num_unsynced_sequence
-    // required += gpu_alloc_size(sizeof(int));
-    // // d_tmp_storage (reduction)
-    // size_t tmp_storage_bytes_reduction = 0;
-    // CHECK_CUDA(cub::DeviceReduce::Sum(
-    //     nullptr,
-    //     tmp_storage_bytes_reduction,
-    //     reinterpret_cast<uint8_t*>(0),
-    //     reinterpret_cast<int*>(0),
-    //     num_sequences - 1,
-    //     cudaStreamDefault));
-    // required += gpu_alloc_size(tmp_storage_bytes_reduction);
-    // // d_reduce_out
-    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
-    // // d_tmp_storage (scan)
-    // size_t tmp_storage_bytes_scan = 0;
-    // CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
-    //     nullptr,
-    //     tmp_storage_bytes_scan,
-    //     reinterpret_cast<subsequence_info*>(0),
-    //     reinterpret_cast<subsequence_info*>(0),
-    //     sum_subsequence_info{},
-    //     subsequence_info{},
-    //     num_subsequences,
-    //     cudaStreamDefault));
-
-    return required;
-}
-
 #define CHECK_STAT(call)                                                                           \
     do {                                                                                           \
         jpeggpu_status stat = call;                                                                \
@@ -737,55 +656,60 @@ size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
 // FIXME adapt for non-interleaved scans. for now, everywhere it's assumed it is interleaved, and
 //   there is only one scan
 // TODO reuse allocations to use less memory
-jpeggpu_status jpeggpu::process_scan(
-    logger& logger,
+jpeggpu_status decode_scan(
+    jpeggpu::logger& logger,
     jpeggpu::reader& reader,
-    int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
+    const uint8_t* d_image_data,
+    uint8_t* d_image_data_destuffed,
+    int16_t* d_out,
     void*& d_tmp,
     size_t& tmp_size,
+    const struct jpeggpu::scan& scan,
     cudaStream_t stream)
 {
-    uint8_t* d_scan;
-    int scan_size;
-    int num_subsequences; // "N"
+    const uint8_t* d_scan     = d_image_data + scan.begin;
+    uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
+
     jpeggpu::segment_info* d_segment_infos;
     int* d_segment_indices;
     // FIXME update calculate_gpu_decode_memory according to changes in `gpu_alloc_reserve`
-    const jpeggpu_status stat = jpeggpu::destuff(
-        reader, d_scan, scan_size, num_subsequences, d_segment_infos, d_segment_indices, stream);
+    const jpeggpu_status stat = destuff_scan(
+        reader, d_segment_infos, d_segment_indices, d_scan, d_scan_destuffed, scan, stream);
     if (stat != JPEGGPU_SUCCESS) {
         return stat;
     }
 
+    // TODO pick the right huffman table
     jpeggpu::huffman_table* d_huff;
     CHECK_STAT(jpeggpu::gpu_alloc_reserve(
         reinterpret_cast<void**>(&d_huff), 4 * sizeof(jpeggpu::huffman_table), d_tmp, tmp_size));
     CHECK_CUDA(cudaMemcpyAsync(
         d_huff + 0,
-        &(reader.huff_tables[0][jpeggpu::HUFF_DC]),
-        sizeof(jpeggpu::huffman_table),
+        reader.h_huff_tables[0][jpeggpu::HUFF_DC],
+        sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_DC]),
         cudaMemcpyHostToDevice,
         stream));
     CHECK_CUDA(cudaMemcpyAsync(
         d_huff + 1,
-        &(reader.huff_tables[0][jpeggpu::HUFF_AC]),
-        sizeof(jpeggpu::huffman_table),
+        reader.h_huff_tables[0][jpeggpu::HUFF_AC],
+        sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_AC]),
         cudaMemcpyHostToDevice,
         stream));
     CHECK_CUDA(cudaMemcpyAsync(
         d_huff + 2,
-        &(reader.huff_tables[1][jpeggpu::HUFF_DC]),
-        sizeof(jpeggpu::huffman_table),
+        reader.h_huff_tables[1][jpeggpu::HUFF_DC],
+        sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_DC]),
         cudaMemcpyHostToDevice,
         stream));
     CHECK_CUDA(cudaMemcpyAsync(
         d_huff + 3,
-        &(reader.huff_tables[1][jpeggpu::HUFF_AC]),
-        sizeof(jpeggpu::huffman_table),
+        reader.h_huff_tables[1][jpeggpu::HUFF_AC],
+        sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_AC]),
         cudaMemcpyHostToDevice,
         stream));
 
-    constexpr int block_size = 256; // "b", size in subsequences
+    const int num_subsequences = scan.num_subsequences; // "N"
+    constexpr int block_size   = 256; // "b", size in subsequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
     logger("num_subsequences: %d num_sequences: %d\n", num_subsequences, num_sequences);
@@ -793,15 +717,11 @@ jpeggpu_status jpeggpu::process_scan(
     // alg-1:01
     size_t total_data_size = 0;
     int num_data_units     = 0;
-    for (int c = 0; c < reader.num_components; ++c) {
-        total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
-        num_data_units += (reader.data_sizes_x[c] / 8) * (reader.data_sizes_y[c] / 8);
+    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
+        total_data_size += reader.jpeg_stream.data_sizes_x[c] * reader.jpeg_stream.data_sizes_y[c];
+        num_data_units +=
+            (reader.jpeg_stream.data_sizes_x[c] / 8) * (reader.jpeg_stream.data_sizes_y[c] / 8);
     }
-    int16_t* d_out;
-    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-        reinterpret_cast<void**>(&d_out), total_data_size * sizeof(int16_t), d_tmp, tmp_size));
-    // initialize to zero, since only non-zeros are written
-    CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
 
     // alg-1:05
     subsequence_info* d_s_info;
@@ -812,17 +732,20 @@ jpeggpu_status jpeggpu::process_scan(
         tmp_size));
 
     const const_state cstate = {
-        d_scan,
-        d_scan + scan_size,
+        d_scan_destuffed,
+        // TODO this is not the end of data, but the end of allocation. the final subsequence may read garbage.
+        d_scan_destuffed + (scan.end - scan.begin),
         d_huff + 0,
         d_huff + 1,
         d_huff + 2,
         d_huff + 3,
-        reader.css.x[0],
-        reader.css.y[0],
-        reader.num_components,
+        reader.jpeg_stream.css.x[0],
+        reader.jpeg_stream.css.y[0],
+        reader.jpeg_stream.num_components,
         num_data_units,
-        reader.seen_dri ? reader.restart_interval : reader.num_mcus_x * reader.num_mcus_y};
+        reader.jpeg_stream.restart_interval != 0
+            ? reader.jpeg_stream.restart_interval
+            : reader.jpeg_stream.num_mcus_x * reader.jpeg_stream.num_mcus_y};
 
     { // sync_decoders (Algorithm 3)
 
@@ -954,80 +877,198 @@ jpeggpu_status jpeggpu::process_scan(
         d_out, d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
     CHECK_CUDA(cudaGetLastError());
 
-    std::vector<std::vector<int16_t>> data(reader.num_components);
-    for (int c = 0; c < reader.num_components; ++c) {
-        data[c].resize(reader.data_sizes_x[c] * reader.data_sizes_y[c]);
-    }
-
-    // TODO replace with GPU transpose
-    std::vector<int16_t> h_out(total_data_size);
-    CHECK_CUDA(cudaMemcpyAsync(
-        h_out.data(), d_out, total_data_size * sizeof(int16_t), cudaMemcpyDeviceToHost, stream));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
-
-    int data_unit_idx = 0;
-    for (int y = 0; y < reader.num_mcus_y; ++y) {
-        for (int x = 0; x < reader.num_mcus_x; ++x) {
-            constexpr size_t data_unit_bytes = jpeggpu::data_unit_size * sizeof(int16_t);
-            for (int c = 0; c < reader.num_components; ++c) {
-                for (int ssy = 0; ssy < reader.css.y[c]; ++ssy) {
-                    for (int ssx = 0; ssx < reader.css.x[c]; ++ssx) {
-                        const int y_block = y * reader.css.y[c] + ssy;
-                        const int x_block = x * reader.css.x[c] + ssx;
-                        const size_t idx  = y_block * jpeggpu::block_size * reader.mcu_sizes_x[c] *
-                                               reader.num_mcus_x +
-                                           x_block * jpeggpu::block_size * jpeggpu::block_size;
-                        std::memcpy(
-                            data[c].data() + idx,
-                            h_out.data() + (data_unit_idx++) * jpeggpu::data_unit_size,
-                            data_unit_bytes);
-                    }
-                }
-            }
-        }
-    }
-
-    // undo DC difference encoding
-    int dc[jpeggpu::max_comp_count] = {};
-    int mcu_count                   = 0;
-    for (int y_mcu = 0; y_mcu < reader.num_mcus_y; ++y_mcu) {
-        for (int x_mcu = 0; x_mcu < reader.num_mcus_x; ++x_mcu) {
-            if (reader.seen_dri && mcu_count % reader.restart_interval == 0) {
-                for (int c = 0; c < jpeggpu::max_comp_count; ++c) {
-                    dc[c] = 0;
-                }
-            }
-
-            // one MCU
-            for (int c = 0; c < reader.num_components; ++c) {
-                for (int y_ss = 0; y_ss < reader.css.y[c]; ++y_ss) {
-                    for (int x_ss = 0; x_ss < reader.css.x[c]; ++x_ss) {
-                        const int y_block = y_mcu * reader.css.y[c] + y_ss;
-                        const int x_block = x_mcu * reader.css.x[c] + x_ss;
-                        const size_t idx  = y_block * jpeggpu::block_size * reader.mcu_sizes_x[c] *
-                                               reader.num_mcus_x +
-                                           x_block * jpeggpu::block_size * jpeggpu::block_size;
-                        int16_t* dst = &(data[c][idx]);
-                        dst[0]       = dc[c] += dst[0];
-                    }
-                }
-            }
-            ++mcu_count;
-        }
-    }
-
-    for (int c = 0; c < reader.num_components; ++c) {
-        CHECK_CUDA(cudaMemcpy(
-            d_image_qdct[c],
-            data[c].data(),
-            reader.data_sizes_x[c] * reader.data_sizes_y[c] * sizeof(int16_t),
-            cudaMemcpyHostToDevice));
-    }
-
     CHECK_CUDA(cudaFree(d_segment_indices));
     CHECK_CUDA(cudaFree(d_segment_infos));
-    CHECK_CUDA(cudaFree(d_scan));
 
+    return JPEGGPU_SUCCESS;
+}
+
+} // namespace
+
+size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
+{
+    size_t required = 0;
+    // // d_scan (can be less due to destuffing)
+    // required += gpu_alloc_size(reader.scan_size);
+    // // d_huff
+    // required += gpu_alloc_size(4 * sizeof(jpeggpu::huffman_table));
+    // // d_out
+    // size_t total_data_size = 0;
+    // for (int c = 0; c < reader.num_components; ++c) {
+    //     total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
+    // }
+    // required += gpu_alloc_size(total_data_size * sizeof(int16_t));
+    // // d_s_info
+    // const size_t scan_bit_size = reader.scan_size * 8;
+    // const int num_subsequences =
+    //     ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size));
+    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
+    // // d_sequence_not_synced
+    // constexpr int block_size = 256;
+    // const int num_sequences  = ceiling_div(num_subsequences, static_cast<unsigned
+    // int>(block_size)); required += gpu_alloc_size((num_sequences - 1) * sizeof(uint8_t));
+    // // d_num_unsynced_sequence
+    // required += gpu_alloc_size(sizeof(int));
+    // // d_tmp_storage (reduction)
+    // size_t tmp_storage_bytes_reduction = 0;
+    // CHECK_CUDA(cub::DeviceReduce::Sum(
+    //     nullptr,
+    //     tmp_storage_bytes_reduction,
+    //     reinterpret_cast<uint8_t*>(0),
+    //     reinterpret_cast<int*>(0),
+    //     num_sequences - 1,
+    //     cudaStreamDefault));
+    // required += gpu_alloc_size(tmp_storage_bytes_reduction);
+    // // d_reduce_out
+    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
+    // // d_tmp_storage (scan)
+    // size_t tmp_storage_bytes_scan = 0;
+    // CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
+    //     nullptr,
+    //     tmp_storage_bytes_scan,
+    //     reinterpret_cast<subsequence_info*>(0),
+    //     reinterpret_cast<subsequence_info*>(0),
+    //     sum_subsequence_info{},
+    //     subsequence_info{},
+    //     num_subsequences,
+    //     cudaStreamDefault));
+
+    return required;
+}
+
+jpeggpu_status jpeggpu::decode(
+    logger& logger,
+    jpeggpu::reader& reader, // TODO pass only jpeg_stream?
+    const uint8_t* d_image_data,
+    uint8_t* d_image_data_destuffed,
+    int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
+    void*& d_tmp,
+    size_t& tmp_size,
+    cudaStream_t stream)
+{
+    const struct reader::jpeg_stream& info = reader.jpeg_stream;
+    size_t total_data_size                 = 0;
+    for (int c = 0; c < info.num_components; ++c) {
+        total_data_size += info.data_sizes_x[c] * info.data_sizes_y[c];
+    }
+    int16_t* d_out;
+    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+        reinterpret_cast<void**>(&d_out), total_data_size * sizeof(int16_t), d_tmp, tmp_size));
+    // initialize to zero, since only non-zeros are written
+    CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
+
+    if (info.is_interleaved) {
+        if (decode_scan(
+                logger,
+                reader,
+                d_image_data,
+                d_image_data_destuffed,
+                d_out,
+                d_tmp,
+                tmp_size,
+                info.scans[0],
+                stream) != JPEGGPU_SUCCESS) {
+            return JPEGGPU_INTERNAL_ERROR;
+        }
+
+        std::vector<std::vector<int16_t>> data(info.num_components);
+        for (int c = 0; c < info.num_components; ++c) {
+            data[c].resize(info.data_sizes_x[c] * info.data_sizes_y[c]);
+        }
+
+        // TODO replace with GPU transpose
+        // TODO also handle writing to correct component plane here.
+        std::vector<int16_t> h_out(total_data_size);
+        CHECK_CUDA(cudaMemcpyAsync(
+            h_out.data(),
+            d_out,
+            total_data_size * sizeof(int16_t),
+            cudaMemcpyDeviceToHost,
+            stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+
+        int data_unit_idx = 0;
+        for (int y = 0; y < info.num_mcus_y; ++y) {
+            for (int x = 0; x < info.num_mcus_x; ++x) {
+                constexpr size_t data_unit_bytes = jpeggpu::data_unit_size * sizeof(int16_t);
+                for (int c = 0; c < info.num_components; ++c) {
+                    for (int ssy = 0; ssy < info.css.y[c]; ++ssy) {
+                        for (int ssx = 0; ssx < info.css.x[c]; ++ssx) {
+                            const int y_block = y * info.css.y[c] + ssy;
+                            const int x_block = x * info.css.x[c] + ssx;
+                            const size_t idx = y_block * jpeggpu::block_size * info.mcu_sizes_x[c] *
+                                                   info.num_mcus_x +
+                                               x_block * jpeggpu::block_size * jpeggpu::block_size;
+                            std::memcpy(
+                                data[c].data() + idx,
+                                h_out.data() + (data_unit_idx++) * jpeggpu::data_unit_size,
+                                data_unit_bytes);
+                        }
+                    }
+                }
+            }
+        }
+
+        // TODO do on GPU, in decode_scan
+        // undo DC difference encoding
+        int dc[jpeggpu::max_comp_count] = {};
+        int mcu_count                   = 0;
+        for (int y_mcu = 0; y_mcu < info.num_mcus_y; ++y_mcu) {
+            for (int x_mcu = 0; x_mcu < info.num_mcus_x; ++x_mcu) {
+                if (info.restart_interval != 0 && mcu_count % info.restart_interval == 0) {
+                    for (int c = 0; c < jpeggpu::max_comp_count; ++c) {
+                        dc[c] = 0;
+                    }
+                }
+
+                // one MCU
+                for (int c = 0; c < info.num_components; ++c) {
+                    for (int y_ss = 0; y_ss < info.css.y[c]; ++y_ss) {
+                        for (int x_ss = 0; x_ss < info.css.x[c]; ++x_ss) {
+                            const int y_block = y_mcu * info.css.y[c] + y_ss;
+                            const int x_block = x_mcu * info.css.x[c] + x_ss;
+                            const size_t idx = y_block * jpeggpu::block_size * info.mcu_sizes_x[c] *
+                                                   info.num_mcus_x +
+                                               x_block * jpeggpu::block_size * jpeggpu::block_size;
+                            int16_t* dst = &(data[c][idx]);
+                            dst[0]       = dc[c] += dst[0];
+                        }
+                    }
+                }
+                ++mcu_count;
+            }
+        }
+
+        for (int c = 0; c < info.num_components; ++c) {
+            CHECK_CUDA(cudaMemcpy(
+                d_image_qdct[c],
+                data[c].data(),
+                info.data_sizes_x[c] * info.data_sizes_y[c] * sizeof(int16_t),
+                cudaMemcpyHostToDevice));
+        }
+    } else {
+        size_t offset = 0;
+        for (int c = 0; c < info.num_scans; ++c) {
+            const scan& scan = info.scans[c];
+            decode_scan(
+                logger,
+                reader,
+                d_image_data,
+                d_image_data_destuffed,
+                d_out + offset,
+                d_tmp,
+                tmp_size,
+                scan,
+                stream);
+            const int comp_id = scan.ids[0];
+            offset += info.data_sizes_x[comp_id] * info.data_sizes_y[comp_id];
+
+            // TODO undo DC difference in decode_scan
+            // TODO undo planar "transpose"
+        }
+    }
+
+    // TODO do DC diff or after transposing?
     return JPEGGPU_SUCCESS;
 }
 

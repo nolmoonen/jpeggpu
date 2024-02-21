@@ -26,13 +26,13 @@ struct segment_info {
 /// \param[out] num_subsequences The maximum amount of subsequences.
 /// \param[out] d_segment_infos For each segment, a range in `d_scan`.
 /// \param[out] d_segment_indices For each data byte, the segment index.
-jpeggpu_status destuff(
+jpeggpu_status destuff_scan(
     reader& reader,
-    uint8_t*& d_scan,
-    int& scan_size,
-    int& num_subsequences,
     segment_info*& d_segment_infos,
     int*& d_segment_indices,
+    const uint8_t* d_image_data,
+    uint8_t* d_image_data_destuffed,
+    const scan& scan,
     cudaStream_t stream);
 
 } // namespace jpeggpu

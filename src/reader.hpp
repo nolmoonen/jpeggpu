@@ -18,10 +18,6 @@ struct huffman_table {
     int maxcode[18];
     /// Huffval[] index of 1st symbol of length k
     int valptr[17];
-    /// # bits, or 0 if too long
-    int look_nbits[256];
-    /// Symbol, or unused
-    unsigned char look_sym[256];
 
     /// These two fields directly represent the contents of a JPEG DHT marker
     /// bits[k] = # of symbols with codes of
@@ -30,7 +26,28 @@ struct huffman_table {
     uint8_t huffval[256];
 };
 
+struct scan {
+    uint8_t ids[max_comp_count];
+
+    int begin; ///< index, relative to image data, of first byte in scan
+    int end; ///< index, relative to image data, of first byte not in scan
+
+    int num_subsequences;
+    int num_segments;
+};
+
+struct component {
+    uint8_t id;
+    uint8_t qtable_idx;
+    uint8_t dc_idx;
+    uint8_t ac_idx;
+};
+
 struct reader {
+    [[nodiscard]] jpeggpu_status startup();
+
+    void cleanup();
+
     uint8_t read_uint8();
     uint16_t read_uint16();
 
@@ -54,54 +71,61 @@ struct reader {
 
     void reset(const uint8_t* image, const uint8_t* image_end, struct logger* logger);
 
+    /// cleared with memset
+    struct jpeg_stream {
+        scan scans[max_comp_count];
+
+        int size_x; ///< Image width.
+        int size_y; ///< Image height.
+        int num_components; ///< Number of image components.
+
+        // subsampling as defined in the header. 1, 2, or 4
+        jpeggpu_subsampling css;
+        // max of header-defined ss for each component, to calculate MCU size. 1, 2, or 4
+        int ss_x_max;
+        int ss_y_max;
+
+        component components[max_comp_count];
+
+        jpeggpu_color_format color_fmt;
+        jpeggpu_pixel_format pixel_fmt;
+
+        // TODO place in `components`?
+        int sizes_x[max_comp_count];
+        int sizes_y[max_comp_count];
+        int mcu_sizes_x[max_comp_count]; // TODO make this in number of data units
+        int mcu_sizes_y[max_comp_count];
+        int data_sizes_x[max_comp_count];
+        int data_sizes_y[max_comp_count];
+        int num_mcus_x;
+        int num_mcus_y;
+
+        bool is_interleaved;
+
+        /// \brief Restart interval for differential DC encoding, in number of MCUs.
+        ///   Zero if no restart interval is defined.
+        int restart_interval;
+        int num_scans;
+    } jpeg_stream; // TODO name it info?
+
+    struct reader_state {
+        int scan_idx; ///< Index of next scan.
+    } reader_state;
+
     struct logger* logger;
 
-    const uint8_t* image;
+    // TODO move into reader_state
+    const uint8_t* image; ///< Modifiable pointer to parsing head.
+    const uint8_t* image_begin;
     const uint8_t* image_end;
 
     // TODO include a `seen_dht` etc and check if exactly one such segment is
     //   seen, else return error
 
-    int size_x;
-    int size_y;
-    int num_components;
-
-    // subsampling as defined in the header. 1, 2, or 4
-    jpeggpu_subsampling css;
-    // max header-defined ss, to calculate MCU size. 1, 2, or 4
-    int ss_x_max;
-    int ss_y_max;
-
-    int qtable_idx[max_comp_count]; // the qtable for each comp
-    // in natural order
-    qtable qtables[max_comp_count];
-    huffman_table huff_tables[max_comp_count][HUFF_COUNT];
-    int huff_map[max_comp_count][HUFF_COUNT];
-
-    jpeggpu_color_format color_fmt;
-    jpeggpu_pixel_format pixel_fmt;
-
-    // TODO AoS
-    int sizes_x[max_comp_count];
-    int sizes_y[max_comp_count];
-    int mcu_sizes_x[max_comp_count];
-    int mcu_sizes_y[max_comp_count];
-    int data_sizes_x[max_comp_count];
-    int data_sizes_y[max_comp_count];
-    int num_mcus_x;
-    int num_mcus_y;
-    int num_segments;
-
-    bool is_interleaved;
-
-    // TODO what if non-interleaved?
-    const uint8_t* scan_start;
-    size_t scan_size;
-
-    /// \brief Whether a restart interval has been defined.
-    bool seen_dri;
-    /// \brief Restart interval for differential DC encoding, in number of MCUs.
-    int restart_interval;
+    // pinned. in natural order
+    qtable* h_qtables[max_comp_count];
+    // pinned.
+    huffman_table* h_huff_tables[max_comp_count][HUFF_COUNT];
 };
 
 inline int get_size(int size, int ss, int ss_max)

@@ -9,6 +9,10 @@
 #include <cassert>
 #include <stdint.h>
 
+using namespace jpeggpu;
+
+namespace {
+
 __device__ bool is_byte_data(bool prev_is_stuffing, uint8_t byte, uint8_t& byte_write)
 {
     // register 0xff00 as 0xff at the position of the 0x00, do not register at the position of 0xff
@@ -157,28 +161,22 @@ __global__ void destuff_write3(
     }
 }
 
-// TODO is a version without memcpies possible?
-jpeggpu_status jpeggpu::destuff(
+} // namespace
+
+jpeggpu_status jpeggpu::destuff_scan(
     reader& reader,
-    uint8_t*& d_scan,
-    int& scan_size,
-    int& num_subsequences,
     segment_info*& d_segment_infos,
     int*& d_segment_indices,
+    const uint8_t* d_image_data,
+    uint8_t* d_image_data_destuffed,
+    const scan& scan,
     cudaStream_t stream)
 {
-    assert(reader.scan_size < INT_MAX);
-
-    const int stuffed_scan_size      = reader.scan_size;
+    const int stuffed_scan_size = scan.end - scan.begin;
+    assert(stuffed_scan_size < INT_MAX);
     constexpr int block_size_destuff = 256;
     const int num_blocks_destuff =
         ceiling_div(stuffed_scan_size, static_cast<unsigned int>(block_size_destuff));
-
-    // stuffed input
-    uint8_t* d_stuffed_scan = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_stuffed_scan, stuffed_scan_size));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_stuffed_scan, reader.scan_start, stuffed_scan_size, cudaMemcpyHostToDevice, stream));
 
     // exclusive prefix scan of encoded data bytes
     int* d_offset_data = nullptr;
@@ -190,9 +188,8 @@ jpeggpu_status jpeggpu::destuff(
 
     // write `d_offset_data` and `d_offset_segment`
     destuff_categorize<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
-        d_stuffed_scan, stuffed_scan_size, d_offset_data, d_offset_segment);
+        d_image_data, stuffed_scan_size, d_offset_data, d_offset_segment);
     CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaDeviceSynchronize()); // FIXME debug
 
     { // scan `d_offset_data`
         void* d_tmp_storage     = nullptr;
@@ -235,80 +232,43 @@ jpeggpu_status jpeggpu::destuff(
         CHECK_CUDA(cudaFree(d_tmp_storage));
     }
 
-    // TODO interleaved
-    const int num_segments = reader.num_segments;
-    if (is_debug) {
-        int num_segments_found = 0;
-        CHECK_CUDA(cudaMemcpy(
-            &num_segments_found,
-            &d_offset_segment[stuffed_scan_size - 1],
-            sizeof(int),
-            cudaMemcpyDeviceToHost));
-        ++num_segments_found;
-
-        if (num_segments != num_segments_found) {
-            (*reader.logger)(
-                "num segments calculated: %d, num segments found: %d\n",
-                num_segments,
-                num_segments_found);
-            return JPEGGPU_INTERNAL_ERROR;
-        }
-
-        int destuffed_scan_size = 0;
-        CHECK_CUDA(cudaMemcpy(
-            &destuffed_scan_size,
-            &d_offset_data[stuffed_scan_size - 1],
-            sizeof(int),
-            cudaMemcpyDeviceToHost));
-        // scan is exclusive, so if final byte is data, manually add it
-        if (reader.scan_size >= 2 && reader.scan_start[reader.scan_size - 2] == 0xff &&
-            reader.scan_start[reader.scan_size - 1] == 0) {
-            ++destuffed_scan_size;
-        }
-
-        if (destuffed_scan_size > reader.scan_size) {
-            std::cout << "destuffed scan size: " << destuffed_scan_size
-                      << ", stuffed scan size: " << reader.scan_size << "\n";
-            return JPEGGPU_INTERNAL_ERROR;
-        }
-    }
-    (*reader.logger)("num segments %d\n", num_segments);
-
-    // destuffed output
-    d_scan = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_scan, reader.scan_size));
-
     d_segment_infos = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_segment_infos, num_segments * sizeof(jpeggpu::segment_info)));
+    CHECK_CUDA(cudaMalloc(&d_segment_infos, scan.num_segments * sizeof(jpeggpu::segment_info)));
 
     // completes data and segment infos
     destuff_write<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
-        d_stuffed_scan,
+        d_image_data,
         stuffed_scan_size,
         d_offset_data,
         d_offset_segment,
-        d_scan,
+        d_image_data_destuffed,
         d_segment_infos);
     CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaDeviceSynchronize()); // FIXME debug
 
-    std::vector<segment_info> h_segment_infos(num_segments);
-    CHECK_CUDA(cudaMemcpy(
-        h_segment_infos.data(),
-        d_segment_infos,
-        num_segments * sizeof(segment_info),
-        cudaMemcpyDeviceToHost));
-    num_subsequences = 0;
-    for (int i = 0; i < num_segments; ++i) {
-        if (jpeggpu::is_debug && h_segment_infos[i].end <= h_segment_infos[i].begin) {
-            (*reader.logger)(
-                "segment %d begin: %d, end: %d\n",
-                i,
-                h_segment_infos[i].begin,
-                h_segment_infos[i].end);
+    if (jpeggpu::is_debug) {
+        std::vector<segment_info> h_segment_infos(scan.num_segments);
+        CHECK_CUDA(cudaMemcpy(
+            h_segment_infos.data(),
+            d_segment_infos,
+            scan.num_segments * sizeof(segment_info),
+            cudaMemcpyDeviceToHost));
+        int num_subsequences_gpu = 0;
+        for (int i = 0; i < scan.num_segments; ++i) {
+            if (jpeggpu::is_debug && h_segment_infos[i].end <= h_segment_infos[i].begin) {
+                (*reader.logger)(
+                    "segment %d begin: %d, end: %d\n",
+                    i,
+                    h_segment_infos[i].begin,
+                    h_segment_infos[i].end);
+                return JPEGGPU_INTERNAL_ERROR;
+            }
+            num_subsequences_gpu += ceiling_div(
+                h_segment_infos[i].end - h_segment_infos[i].begin,
+                static_cast<unsigned int>(subsequence_size_bytes));
+        }
+        if (num_subsequences_gpu != scan.num_subsequences) {
             return JPEGGPU_INTERNAL_ERROR;
         }
-        num_subsequences += ceiling_div(h_segment_infos[i].end - h_segment_infos[i].begin, 32u);
     }
 
     // for each destuffed byte, its subsequence
@@ -316,15 +276,14 @@ jpeggpu_status jpeggpu::destuff(
     CHECK_CUDA(cudaMalloc(&d_offset_subsequence, stuffed_scan_size * sizeof(int)));
 
     destuff_write2<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
-        d_stuffed_scan,
+        d_image_data,
         stuffed_scan_size,
         d_offset_data,
         d_offset_segment,
-        d_scan,
+        d_image_data_destuffed,
         d_segment_infos,
         d_offset_subsequence);
     CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaDeviceSynchronize()); // FIXME debug
 
     { // scan `d_offset_subsequence`
         void* d_tmp_storage     = nullptr;
@@ -349,44 +308,40 @@ jpeggpu_status jpeggpu::destuff(
 
     // for each subsequence, its segment
     d_segment_indices = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_segment_indices, num_subsequences * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_segment_indices, scan.num_subsequences * sizeof(int)));
 
     destuff_write3<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
-        d_stuffed_scan,
+        d_image_data,
         stuffed_scan_size,
         d_offset_data,
         d_offset_segment,
-        d_scan,
+        d_image_data_destuffed,
         d_segment_infos,
         d_offset_subsequence,
         d_segment_indices);
     CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaDeviceSynchronize()); // FIXME debug
 
     if (jpeggpu::is_debug) {
-        std::vector<int> h_segment_indices(num_subsequences);
+        std::vector<int> h_segment_indices(scan.num_subsequences);
         CHECK_CUDA(cudaMemcpy(
             h_segment_indices.data(),
             d_segment_indices,
-            num_subsequences * sizeof(int),
+            scan.num_subsequences * sizeof(int),
             cudaMemcpyDeviceToHost));
-        for (int i = 0; i < num_subsequences; ++i) {
-            if (h_segment_indices[i] < 0 || h_segment_indices[i] >= num_segments) {
+        for (int i = 0; i < scan.num_subsequences; ++i) {
+            if (h_segment_indices[i] < 0 || h_segment_indices[i] >= scan.num_segments) {
                 (*reader.logger)(
                     "subquence %d invalid segment index %d\n", i, h_segment_indices[i]);
             }
         }
     }
 
-    CHECK_CUDA(cudaFree(d_offset_subsequence));
     CHECK_CUDA(cudaFree(d_offset_segment));
     CHECK_CUDA(cudaFree(d_offset_data));
-    CHECK_CUDA(cudaFree(d_stuffed_scan));
 
     return JPEGGPU_SUCCESS;
 }
 
-// clang-format off
 // markers are d0 through d7
 //          00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
 //          ?? ?? ?? ff 00 ?? ff 00 ?? ?? ?? ff d0 ?? ff 00 ?? ff d1 ?? ?? ff d2 ?? ff 00 ?? ?? ff d3 ?? ??
@@ -399,4 +354,3 @@ jpeggpu_status jpeggpu::destuff(
 // off_seg   0  0  0  0  0  0  0  0  0  0  0  0  1  1  1  1  1  1  2  2  2  2  3  3  3  3  3  3  3  4  4  4
 // pass 2
 // seg_idx   0  0  0     0  0     0  0  0  0        1     1  1        2  2        3     3  3  3        4  4
-// clang-format on

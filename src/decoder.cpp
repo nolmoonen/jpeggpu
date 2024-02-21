@@ -1,6 +1,5 @@
 #include "decoder.hpp"
 #include "convert.hpp"
-#include "decode_cpu.hpp"
 #include "decode_gpu.hpp"
 #include "defs.hpp"
 #include "idct.hpp"
@@ -14,14 +13,31 @@
 #include <cassert>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdint.h>
-#include <stdio.h>
 #include <type_traits>
 #include <vector>
+
+/// TODO place in some development document
+/// stream
+///   The JPEG file defining an image with multiple components (color channels).
+/// scan
+///   A stream contains scans. Either a single scan contains all components (interleaved mode)
+///     or there are multiple scans that each contain a single component.
+/// segment
+///   Within a scan, there can be restart markers that define segments. The DC difference decoding does
+///     not cross segment boundaries. Between segments there may be sub-byte padding to ensure each
+///     segments starts at a byte-boundary. The size of segments is arbitrary and is defined by the
+///     encoding process.
+/// sequence
+///   For the purposes of GPU decoding, each thread handles a single subsequence, and all subsequences
+///     handled by a thread block are grouped together as a sequence. Sequences may cover multiple segments.
+/// subsequence
+///   Practical fixed-sizes chunk of data that each thread handles. Subsequences do not cross segment boundaries.
 
 using namespace jpeggpu;
 
@@ -31,6 +47,11 @@ jpeggpu_status jpeggpu::decoder::init()
         CHECK_CUDA(cudaMalloc(&d_qtables[c], sizeof(uint8_t) * data_unit_size));
     }
 
+    jpeggpu_status stat = JPEGGPU_SUCCESS;
+    if ((stat = reader.startup()) != JPEGGPU_SUCCESS) {
+        return stat;
+    }
+
     logger.do_logging = false;
 
     return JPEGGPU_SUCCESS;
@@ -38,6 +59,8 @@ jpeggpu_status jpeggpu::decoder::init()
 
 void jpeggpu::decoder::cleanup()
 {
+    reader.cleanup();
+
     for (int c = 0; c < max_comp_count; ++c) {
         cudaFree(d_qtables[c]);
         d_qtables[c] = nullptr;
@@ -55,26 +78,26 @@ jpeggpu_status jpeggpu::decoder::parse_header(
 
     // TODO check reader consistency
 
-    img_info.size_x = reader.size_x;
-    img_info.size_y = reader.size_y;
+    img_info.size_x = reader.jpeg_stream.size_x;
+    img_info.size_y = reader.jpeg_stream.size_y;
     // TODO read metadata to determine color formats
-    switch (reader.num_components) {
+    switch (reader.jpeg_stream.num_components) {
     case 1:
-        reader.color_fmt = JPEGGPU_GRAY;
-        reader.pixel_fmt = JPEGGPU_P0;
+        reader.jpeg_stream.color_fmt = JPEGGPU_GRAY;
+        reader.jpeg_stream.pixel_fmt = JPEGGPU_P0;
         break;
     case 3:
-        reader.color_fmt = JPEGGPU_YCBCR;
-        reader.pixel_fmt = JPEGGPU_P0P1P2;
+        reader.jpeg_stream.color_fmt = JPEGGPU_YCBCR;
+        reader.jpeg_stream.pixel_fmt = JPEGGPU_P0P1P2;
         break;
     case 4:
-        reader.color_fmt = JPEGGPU_CMYK;
-        reader.pixel_fmt = JPEGGPU_P0P1P2P3;
+        reader.jpeg_stream.color_fmt = JPEGGPU_CMYK;
+        reader.jpeg_stream.pixel_fmt = JPEGGPU_P0P1P2P3;
         break;
     default:
         return JPEGGPU_NOT_SUPPORTED;
     }
-    img_info.subsampling = reader.css;
+    img_info.subsampling = reader.jpeg_stream.css;
 
     return JPEGGPU_SUCCESS;
 }
@@ -97,14 +120,16 @@ inline bool operator!=(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling
 size_t calculate_gpu_memory(const jpeggpu::reader& reader)
 {
     size_t required = 0;
-    for (int c = 0; c < reader.num_components; ++c) {
-        const size_t size = reader.data_sizes_x[c] * reader.data_sizes_y[c];
+    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
+        const size_t size = reader.jpeg_stream.data_sizes_x[c] * reader.jpeg_stream.data_sizes_y[c];
         required += jpeggpu::gpu_alloc_size(size * sizeof(int16_t)); // d_image_qdct
         required += jpeggpu::gpu_alloc_size(size * sizeof(uint8_t)); // d_image
     }
-    if (is_gpu_decode_possible(reader)) {
-        required += jpeggpu::calculate_gpu_decode_memory(reader);
-    }
+    const size_t file_size = reader.image_end - reader.image_begin;
+    required += jpeggpu::gpu_alloc_size(file_size); // image data
+    required += jpeggpu::gpu_alloc_size(file_size); // destuffed image data
+    required += jpeggpu::calculate_gpu_decode_memory(reader);
+
     return required;
 }
 
@@ -138,27 +163,45 @@ jpeggpu_status jpeggpu::decoder::decode(
 
     void* d_tmp     = d_tmp_param;
     size_t tmp_size = tmp_size_param;
-    for (int c = 0; c < reader.num_components; ++c) {
-        const size_t size = reader.data_sizes_x[c] * reader.data_sizes_y[c];
+    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
+        const size_t size = reader.jpeg_stream.data_sizes_x[c] * reader.jpeg_stream.data_sizes_y[c];
         CHECK_STAT(jpeggpu::gpu_alloc_reserve(
             reinterpret_cast<void**>(&(d_image_qdct[c])), size * sizeof(int16_t), d_tmp, tmp_size));
         CHECK_STAT(jpeggpu::gpu_alloc_reserve(
             reinterpret_cast<void**>(&(d_image[c])), size * sizeof(uint8_t), d_tmp, tmp_size));
     }
+    const size_t file_size = reader.image_end - reader.image_begin;
+    uint8_t* d_image_data  = nullptr;
+    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+        reinterpret_cast<void**>(&d_image_data), file_size, d_tmp, tmp_size));
+    uint8_t* d_image_data_destuffed = nullptr;
+    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+        reinterpret_cast<void**>(&d_image_data_destuffed), file_size, d_tmp, tmp_size));
 
-    if (is_gpu_decode_possible(reader)) {
-        process_scan(logger, reader, d_image_qdct, d_tmp, tmp_size, stream);
-    } else {
-        logger("falling back to CPU decode\n");
-        process_scan_legacy(reader, d_image_qdct);
+    CHECK_CUDA(cudaMemcpyAsync( // TODO put in separate API function
+        d_image_data,
+        reader.image_begin,
+        file_size,
+        cudaMemcpyHostToDevice,
+        stream));
+
+    if (jpeggpu::decode(
+            logger,
+            reader,
+            d_image_data,
+            d_image_data_destuffed,
+            d_image_qdct,
+            d_tmp,
+            tmp_size,
+            stream) != JPEGGPU_SUCCESS) {
+        return JPEGGPU_INTERNAL_ERROR;
     }
 
-    for (int c = 0; c < reader.num_components; ++c) {
-        constexpr int qtable_bytes = sizeof(uint8_t) * data_unit_size;
+    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
         CHECK_CUDA(cudaMemcpyAsync(
             d_qtables[c],
-            reader.qtables[reader.qtable_idx[c]],
-            qtable_bytes,
+            reader.h_qtables[reader.jpeg_stream.components[c].qtable_idx],
+            sizeof(*reader.h_qtables[reader.jpeg_stream.components[c].qtable_idx]),
             cudaMemcpyHostToDevice,
             stream));
     }
@@ -166,26 +209,26 @@ jpeggpu_status jpeggpu::decoder::decode(
     // TODO check that the number of scans seen is equal to the number of components
 
     // jpeggpu::idct_cpu(reader, d_image_qdct, d_image);
-    jpeggpu::idct(reader, d_image_qdct, d_image, d_qtables, stream);
+    idct(reader, d_image_qdct, d_image, d_qtables, stream);
 
     // data will be planar, may be subsampled, may be RGB, YCbCr, CYMK, anything else
-    if (reader.color_fmt != color_fmt || reader.pixel_fmt != pixel_fmt ||
-        reader.css != subsampling) {
-        jpeggpu::convert(
-            reader.size_x,
-            reader.size_y,
+    const struct reader::jpeg_stream& info = reader.jpeg_stream;
+    if (info.color_fmt != color_fmt || info.pixel_fmt != pixel_fmt || info.css != subsampling) {
+        convert(
+            info.size_x,
+            info.size_y,
             jpeggpu::image_desc{
                 d_image[0],
-                reader.data_sizes_x[0],
+                info.data_sizes_x[0],
                 d_image[1],
-                reader.data_sizes_x[1],
+                info.data_sizes_x[1],
                 d_image[2],
-                reader.data_sizes_x[2],
+                info.data_sizes_x[2],
                 d_image[3],
-                reader.data_sizes_x[3]},
-            reader.color_fmt,
-            reader.pixel_fmt,
-            reader.css,
+                info.data_sizes_x[3]},
+            info.color_fmt,
+            info.pixel_fmt,
+            info.css,
             jpeggpu::image_desc{
                 img.image[0],
                 img.pitch[0],

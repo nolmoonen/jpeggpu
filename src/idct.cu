@@ -191,16 +191,17 @@ jpeggpu_status jpeggpu::idct(
     uint8_t* (&d_qtable)[max_comp_count], // TODO can be 16 bit?
     cudaStream_t stream)
 {
-    for (int c = 0; c < reader.num_components; ++c) {
+    const struct reader::jpeg_stream& info = reader.jpeg_stream;
+    for (int c = 0; c < info.num_components; ++c) {
         const dim3 num_blocks(
-            ceiling_div(reader.data_sizes_x[c], static_cast<unsigned int>(num_data_x_block)),
-            ceiling_div(reader.data_sizes_y[c], static_cast<unsigned int>(num_data_y_block)));
+            ceiling_div(info.data_sizes_x[c], static_cast<unsigned int>(num_data_x_block)),
+            ceiling_div(info.data_sizes_y[c], static_cast<unsigned int>(num_data_y_block)));
         const dim3 kernel_block_size(block_size, num_data_units_x_block, num_data_units_y_block);
         idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
             d_image_qdct[c],
             d_image[c],
-            reader.data_sizes_x[c],
-            reader.data_sizes_y[c],
+            info.data_sizes_x[c],
+            info.data_sizes_y[c],
             d_qtable[c]);
         CHECK_CUDA(cudaGetLastError());
     }

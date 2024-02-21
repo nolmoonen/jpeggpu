@@ -29,7 +29,7 @@ namespace jpeggpu {
 /// TODO more descriptive name?
 constexpr int block_size     = 8;
 constexpr int data_unit_size = 64;
-/// components
+/// as defined by jpeg spec
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
@@ -50,6 +50,7 @@ __device__ constexpr int order_natural[64 + 16] = {
     63, 63, 63, 63, 63, 63, 63, 63};
 // clang-format on
 
+// make this non-constexpr so it does not get compiled out, make it a hidden toggle
 constexpr bool is_debug = true;
 
 } // namespace jpeggpu

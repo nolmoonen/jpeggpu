@@ -29,6 +29,8 @@ const char* jpeggpu_get_status_string(enum jpeggpu_status stat)
         return "internal jpeggpu error";
     case JPEGGPU_NOT_SUPPORTED:
         return "jpeg is not supported";
+    case JPEGGPU_OUT_OF_HOST_MEMORY:
+        return "out of host memory";
     }
     return "unknown status";
 }
