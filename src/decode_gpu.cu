@@ -738,6 +738,7 @@ size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
 //   there is only one scan
 // TODO reuse allocations to use less memory
 jpeggpu_status jpeggpu::process_scan(
+    logger& logger,
     jpeggpu::reader& reader,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
     void*& d_tmp,
@@ -787,8 +788,7 @@ jpeggpu_status jpeggpu::process_scan(
     constexpr int block_size = 256; // "b", size in subsequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
-    std::cout << "num_subsequences: " << num_subsequences << " num_sequences: " << num_sequences
-              << "\n";
+    logger("num_subsequences: %d num_sequences: %d\n", num_subsequences, num_sequences);
 
     // alg-1:01
     size_t total_data_size = 0;
@@ -876,7 +876,7 @@ jpeggpu_status jpeggpu::process_scan(
                     d_segment_infos,
                     d_segment_indices);
                 CHECK_CUDA(cudaGetLastError());
-                std::cout << "inter sequence sync done\n";
+                logger("inter sequence sync done\n");
 
                 CHECK_CUDA(cub::DeviceReduce::Sum(
                     d_tmp_storage,
@@ -891,7 +891,7 @@ jpeggpu_status jpeggpu::process_scan(
                     sizeof(int),
                     cudaMemcpyDeviceToHost));
 
-                std::cout << "unsynced: " << h_num_unsynced_sequence << "\n";
+                logger("unsynced: %d\n", h_num_unsynced_sequence);
             } while (h_num_unsynced_sequence);
         }
     }

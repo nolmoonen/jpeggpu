@@ -44,6 +44,17 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
     return (*decoder)->decoder.init();
 }
 
+enum jpeggpu_status jpeggpu_toggle_logging(jpeggpu_decoder_t decoder)
+{
+    if (!decoder) {
+        return JPEGGPU_INVALID_ARGUMENT;
+    }
+
+    decoder->decoder.logger.do_logging = !decoder->decoder.logger.do_logging;
+
+    return JPEGGPU_SUCCESS;
+}
+
 enum jpeggpu_status jpeggpu_decoder_parse_header(
     jpeggpu_decoder_t decoder, struct jpeggpu_img_info* img_info, const uint8_t* data, size_t size)
 {

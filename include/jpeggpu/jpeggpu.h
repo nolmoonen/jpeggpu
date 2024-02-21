@@ -1,6 +1,8 @@
 #ifndef JPEGGPU_JPEGGPU_H_
 #define JPEGGPU_JPEGGPU_H_
 
+#include <cuda_runtime.h>
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -25,6 +27,9 @@ enum jpeggpu_status {
 const char* jpeggpu_get_status_string(enum jpeggpu_status stat);
 
 enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder);
+
+/// \brief Toggle logging. It is off by default.
+enum jpeggpu_status jpeggpu_toggle_logging(jpeggpu_decoder_t decoder);
 
 enum jpeggpu_color_format {
     JPEGGPU_GRAY, /// grayscale

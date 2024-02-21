@@ -27,3 +27,6 @@ target_link_libraries(jpeggpu PUBLIC CUDA::cudart_static)
 
 add_executable(example_tool example_tool.c)
 target_link_libraries(example_tool PRIVATE jpeggpu)
+
+add_executable(benchmark benchmark.cpp)
+target_link_libraries(benchmark PRIVATE jpeggpu CUDA::nvjpeg)

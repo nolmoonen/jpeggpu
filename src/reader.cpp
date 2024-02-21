@@ -54,7 +54,7 @@ jpeggpu_status jpeggpu::reader::read_sof0()
     const uint8_t num_img_components    = read_uint8();
     num_components                      = num_img_components;
 
-    DBG_PRINT(
+    (*logger)(
         "\tsize_x: %" PRIu16 ", size_y: %" PRIu16 ", num_components: %" PRIu8 "\n",
         size_x,
         size_y,
@@ -85,7 +85,7 @@ jpeggpu_status jpeggpu::reader::read_sof0()
         css.y[c]         = ss_y_c;
         const uint8_t qi = read_uint8();
         qtable_idx[c]    = qi;
-        DBG_PRINT(
+        (*logger)(
             "\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
             component_id,
             css.x[c],
@@ -258,7 +258,7 @@ jpeggpu_status jpeggpu::reader::read_sos()
         const uint8_t acdc_selector = read_uint8();
         const int id_dc             = acdc_selector >> 4;
         const int id_ac             = acdc_selector & 0xf;
-        DBG_PRINT("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
+        (*logger)("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
         huff_map[i][jpeggpu::HUFF_DC] = id_dc;
         huff_map[i][jpeggpu::HUFF_AC] = id_ac;
     }
@@ -337,8 +337,8 @@ jpeggpu_status jpeggpu::reader::read_sos()
             image -= 2;
             break;
         } else {
-            DBG_PRINT("marker %s\n", jpeggpu::get_marker_string(marker));
-            DBG_PRINT("unexpected");
+            (*logger)("marker %s\n", jpeggpu::get_marker_string(marker));
+            (*logger)("unexpected");
             return JPEGGPU_INVALID_JPEG;
         }
     } while (image < image_end);
@@ -400,7 +400,7 @@ jpeggpu_status jpeggpu::reader::read_dri()
     seen_dri            = true;
     const uint16_t rsti = read_uint16();
     restart_interval    = rsti;
-    DBG_PRINT("\trestart_interval: %" PRIu16 "\n", restart_interval);
+    (*logger)("\trestart_interval: %" PRIu16 "\n", restart_interval);
 
     return JPEGGPU_SUCCESS;
 }
@@ -416,7 +416,7 @@ jpeggpu_status jpeggpu::reader::skip_segment()
         return JPEGGPU_INVALID_JPEG;
     }
 
-    DBG_PRINT("\twarning: skipping this segment\n");
+    (*logger)("\twarning: skipping this segment\n");
 
     image += length;
     return JPEGGPU_SUCCESS;
@@ -434,7 +434,7 @@ jpeggpu_status jpeggpu::reader::read()
 {
     uint8_t marker_soi{};
     JPEGGPU_CHECK_STATUS(read_marker(marker_soi));
-    DBG_PRINT("marker %s\n", jpeggpu::get_marker_string(marker_soi));
+    (*logger)("marker %s\n", jpeggpu::get_marker_string(marker_soi));
     if (marker_soi != jpeggpu::MARKER_SOI) {
         return JPEGGPU_INVALID_JPEG;
     }
@@ -442,7 +442,7 @@ jpeggpu_status jpeggpu::reader::read()
     uint8_t marker{};
     do {
         JPEGGPU_CHECK_STATUS(read_marker(marker));
-        DBG_PRINT("marker %s\n", get_marker_string(marker));
+        (*logger)("marker %s\n", get_marker_string(marker));
         switch (marker) {
         case jpeggpu::MARKER_SOF0:
             read_sof0();
@@ -459,7 +459,7 @@ jpeggpu_status jpeggpu::reader::read()
         case jpeggpu::MARKER_SOF13:
         case jpeggpu::MARKER_SOF14:
         case jpeggpu::MARKER_SOF15:
-            DBG_PRINT("unsupported JPEG type %s\n", get_marker_string(marker));
+            (*logger)("unsupported JPEG type %s\n", get_marker_string(marker));
             return JPEGGPU_NOT_SUPPORTED;
         case jpeggpu::MARKER_DHT:
             read_dht();
@@ -484,11 +484,12 @@ jpeggpu_status jpeggpu::reader::read()
     return JPEGGPU_SUCCESS;
 }
 
-void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
+void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end, struct logger* logger)
 {
     std::memset(this, 0, sizeof(reader));
     this->image     = image;
     this->image_end = image_end;
+    this->logger    = logger;
 }
 
 #undef JPEGGPU_CHECK_STATUS

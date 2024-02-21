@@ -15,8 +15,6 @@
 
 namespace jpeggpu {
 
-#define DBG_PRINT(...) printf(__VA_ARGS__);
-
 // FIXME prepend with JPEGGPU_ ?
 #define CHECK_CUDA(call)                                                                           \
     do {                                                                                           \

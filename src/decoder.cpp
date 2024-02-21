@@ -30,6 +30,9 @@ jpeggpu_status jpeggpu::decoder::init()
     for (int c = 0; c < max_comp_count; ++c) {
         CHECK_CUDA(cudaMalloc(&d_qtables[c], sizeof(uint8_t) * data_unit_size));
     }
+
+    logger.do_logging = false;
+
     return JPEGGPU_SUCCESS;
 }
 
@@ -44,7 +47,7 @@ void jpeggpu::decoder::cleanup()
 jpeggpu_status jpeggpu::decoder::parse_header(
     jpeggpu_img_info& img_info, const uint8_t* data, size_t size)
 {
-    reader.reset(data, data + size);
+    reader.reset(data, data + size, &logger);
     jpeggpu_status stat = reader.read();
     if (stat != JPEGGPU_SUCCESS) {
         return stat;
@@ -144,9 +147,9 @@ jpeggpu_status jpeggpu::decoder::decode(
     }
 
     if (is_gpu_decode_possible(reader)) {
-        process_scan(reader, d_image_qdct, d_tmp, tmp_size, stream);
+        process_scan(logger, reader, d_image_qdct, d_tmp, tmp_size, stream);
     } else {
-        DBG_PRINT("falling back to CPU decode\n");
+        logger("falling back to CPU decode\n");
         process_scan_legacy(reader, d_image_qdct);
     }
 

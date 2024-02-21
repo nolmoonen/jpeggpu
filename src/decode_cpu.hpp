@@ -84,7 +84,7 @@ void huffman_cpu_decoder_decode_fill_bit_buffer(coder_state& state)
                     // Found FF/00, which represents an FF data byte
                     uc = 0xFF;
                 } else if (jpeggpu::MARKER_RST0 <= uc && uc <= jpeggpu::MARKER_RST7) {
-                    DBG_PRINT("marker?? %s\n", jpeggpu::get_marker_string(uc));
+                    // DBG_PRINT("marker?? %s\n", jpeggpu::get_marker_string(uc));
 
                     // just get the next byte
                     // TODO there may not be a next byte if mcu_count % rsti == 0

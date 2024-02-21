@@ -1,7 +1,8 @@
-#ifndef JPEGPUG_READER_HPP_
-#define JPEGPUG_READER_HPP_
+#ifndef JPEGGPU_READER_HPP_
+#define JPEGGPU_READER_HPP_
 
 #include "defs.hpp"
+#include "logger.hpp"
 #include "util.hpp"
 
 #include <jpeggpu/jpeggpu.h>
@@ -51,7 +52,9 @@ struct reader {
 
     jpeggpu_status read();
 
-    void reset(const uint8_t* image, const uint8_t* image_end);
+    void reset(const uint8_t* image, const uint8_t* image_end, struct logger* logger);
+
+    struct logger* logger;
 
     const uint8_t* image;
     const uint8_t* image_end;
@@ -108,4 +111,4 @@ inline int get_size(int size, int ss, int ss_max)
 
 }; // namespace jpeggpu
 
-#endif // JPEGPUG_READER_HPP_
+#endif // JPEGGPU_READER_HPP_

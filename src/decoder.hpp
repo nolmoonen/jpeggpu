@@ -1,10 +1,12 @@
 #ifndef JPEGGPU_DECODER_HPP_
 #define JPEGGPU_DECODER_HPP_
 
+#include "logger.hpp"
 #include "reader.hpp"
 
 #include <jpeggpu/jpeggpu.h>
 
+#include <cstdarg>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -26,6 +28,8 @@ struct decoder {
         void* d_tmp,
         size_t& tmp_size,
         cudaStream_t stream);
+
+    struct logger logger;
 
     struct reader reader;
 

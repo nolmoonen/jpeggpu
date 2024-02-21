@@ -35,9 +35,8 @@
         if (err != cudaSuccess) {                                                                  \
             fprintf(                                                                               \
                 stderr,                                                                            \
-                "CUDA error \"%s\" at: %s:%d\n",                                                   \
+                "CUDA error \"%s\" at: " __FILE__ ":%d\n",                                         \
                 cudaGetErrorString(err),                                                           \
-                __FILE__,                                                                          \
                 __LINE__);                                                                         \
             exit(EXIT_FAILURE);                                                                    \
         }                                                                                          \
@@ -71,6 +70,7 @@ int main(int argc, char* argv[])
 
     jpeggpu_decoder_t decoder;
     CHECK_JPEGGPU(jpeggpu_decoder_startup(&decoder));
+    CHECK_JPEGGPU(jpeggpu_toggle_logging(decoder)); // enable logging on stdout
 
     struct jpeggpu_img_info img_info;
     CHECK_JPEGGPU(jpeggpu_decoder_parse_header(decoder, &img_info, data, off));

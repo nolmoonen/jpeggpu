@@ -247,8 +247,10 @@ jpeggpu_status jpeggpu::destuff(
         ++num_segments_found;
 
         if (num_segments != num_segments_found) {
-            std::cout << "num segments calculated: " << num_segments
-                      << ", num segments found: " << num_segments_found << "\n";
+            (*reader.logger)(
+                "num segments calculated: %d, num segments found: %d\n",
+                num_segments,
+                num_segments_found);
             return JPEGGPU_INTERNAL_ERROR;
         }
 
@@ -270,7 +272,7 @@ jpeggpu_status jpeggpu::destuff(
             return JPEGGPU_INTERNAL_ERROR;
         }
     }
-    std::cout << "num segments: " << num_segments << "\n";
+    (*reader.logger)("num segments %d\n", num_segments);
 
     // destuffed output
     d_scan = nullptr;
@@ -299,8 +301,11 @@ jpeggpu_status jpeggpu::destuff(
     num_subsequences = 0;
     for (int i = 0; i < num_segments; ++i) {
         if (jpeggpu::is_debug && h_segment_infos[i].end <= h_segment_infos[i].begin) {
-            std::cout << "segment " << i << " begin: " << h_segment_infos[i].begin
-                      << ", end: " << h_segment_infos[i].end << "\n";
+            (*reader.logger)(
+                "segment %d begin: %d, end: %d\n",
+                i,
+                h_segment_infos[i].begin,
+                h_segment_infos[i].end);
             return JPEGGPU_INTERNAL_ERROR;
         }
         num_subsequences += ceiling_div(h_segment_infos[i].end - h_segment_infos[i].begin, 32u);
@@ -367,8 +372,8 @@ jpeggpu_status jpeggpu::destuff(
             cudaMemcpyDeviceToHost));
         for (int i = 0; i < num_subsequences; ++i) {
             if (h_segment_indices[i] < 0 || h_segment_indices[i] >= num_segments) {
-                std::cout << "subquence " << i << " invalid segment index " << h_segment_indices[i]
-                          << "\n";
+                (*reader.logger)(
+                    "subquence %d invalid segment index %d\n", i, h_segment_indices[i]);
             }
         }
     }
