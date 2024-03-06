@@ -145,11 +145,11 @@ __global__ void idct_kernel(
     // TODO load two values at once
     if (is_inside) {
         for (int i = 0; i < block_size; ++i) {
-            const int data_unit_off =
-                data_unit_y * data_size_x * block_size + data_unit_x * data_unit_size;
+            const int off = (data_unit_y * block_size + i) * data_size_x +
+                            data_unit_x * block_size + threadIdx.x;
             const int data_idx_in_data_unit = i * block_size + threadIdx.x;
             int16_t* bl_ptr                 = &block[shared_y * shared_stride + shared_x];
-            const int16_t val               = d_image_qdct[data_unit_off + data_idx_in_data_unit];
+            const int16_t val               = d_image_qdct[off];
             const int8_t qval               = qtable[data_idx_in_data_unit];
             bl_ptr[i * shared_stride]       = val * qval;
         }
@@ -198,11 +198,7 @@ jpeggpu_status jpeggpu::idct(
             ceiling_div(info.data_sizes_y[c], static_cast<unsigned int>(num_data_y_block)));
         const dim3 kernel_block_size(block_size, num_data_units_x_block, num_data_units_y_block);
         idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
-            d_image_qdct[c],
-            d_image[c],
-            info.data_sizes_x[c],
-            info.data_sizes_y[c],
-            d_qtable[c]);
+            d_image_qdct[c], d_image[c], info.data_sizes_x[c], info.data_sizes_y[c], d_qtable[c]);
         CHECK_CUDA(cudaGetLastError());
     }
     return JPEGGPU_SUCCESS;

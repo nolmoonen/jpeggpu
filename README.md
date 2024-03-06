@@ -4,7 +4,7 @@
 - Add support for non-interleaved scans. Full baseline mode.
 - Add support for other SOFs?
 - Remove CPU decoder (by removing assumptions in GPU kernel) and replace CPU IDCT by a GPU version.
-- Implement full baseline.
+- Implement full baseline. With the restriction of only supporting the popular subsamplings and 8 bits data.
 - Switch to host-based segment detection.
 - Implement GPU transpose.
 - Fix temp memory calculation.
