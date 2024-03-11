@@ -1,6 +1,6 @@
 #include "decoder.hpp"
 #include "convert.hpp"
-#include "decode_gpu.hpp"
+#include "decode_huffman.hpp"
 #include "defs.hpp"
 #include "idct.hpp"
 #include "idct_cpu.hpp"

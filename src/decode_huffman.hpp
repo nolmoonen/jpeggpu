@@ -1,5 +1,5 @@
-#ifndef JPEGGPU_DECODE_GPU_HPP_
-#define JPEGGPU_DECODE_GPU_HPP_
+#ifndef JPEGGPU_DECODE_HUFFMAN_HPP_
+#define JPEGGPU_DECODE_HUFFMAN_HPP_
 
 #include "reader.hpp"
 
@@ -27,4 +27,4 @@ jpeggpu_status decode(
 
 } // namespace jpeggpu
 
-#endif // JPEGGPU_DECODE_GPU_HPP_
+#endif // JPEGGPU_DECODE_HUFFMAN_HPP_
