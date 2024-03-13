@@ -1,5 +1,5 @@
+#include "decode_destuff.hpp"
 #include "decoder_defs.hpp"
-#include "destuff.hpp"
 #include "marker.hpp"
 
 #include <cub/device/device_scan.cuh>
@@ -48,7 +48,7 @@ __global__ void destuff_categorize(
     assert(!(is_data && is_restart_marker));
 }
 
-/// \brief
+/// \brief Write data bytes and fill in segment info.
 ///
 /// \param[in] scan_stuffed
 /// \param[in] offset_data For each stuffed byte: if it is encoded scan data, its index.
@@ -96,6 +96,7 @@ __global__ void destuff_write(
     }
 }
 
+/// \brief Map for each stuffed byte whether it is the first data byte of the subsequence.
 __global__ void destuff_write2(
     const uint8_t* scan_stuffed,
     int scan_size,
@@ -123,6 +124,7 @@ __global__ void destuff_write2(
     offset_subsequence[tid] = is_first;
 }
 
+/// \brief Fill in subsequence offset for each segment info.
 __global__ void destuff_write3(
     const uint8_t* scan_stuffed,
     int scan_size,
@@ -165,8 +167,8 @@ __global__ void destuff_write3(
 
 jpeggpu_status jpeggpu::destuff_scan(
     reader& reader,
-    segment_info*& d_segment_infos,
-    int*& d_segment_indices,
+    segment_info* d_segment_infos,
+    int* d_segment_indices,
     const uint8_t* d_image_data,
     uint8_t* d_image_data_destuffed,
     const scan& scan,
@@ -231,9 +233,6 @@ jpeggpu_status jpeggpu::destuff_scan(
             stream));
         CHECK_CUDA(cudaFree(d_tmp_storage));
     }
-
-    d_segment_infos = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_segment_infos, scan.num_segments * sizeof(jpeggpu::segment_info)));
 
     // completes data and segment infos
     destuff_write<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
@@ -305,10 +304,6 @@ jpeggpu_status jpeggpu::destuff_scan(
             stream));
         CHECK_CUDA(cudaFree(d_tmp_storage));
     }
-
-    // for each subsequence, its segment
-    d_segment_indices = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_segment_indices, scan.num_subsequences * sizeof(int)));
 
     destuff_write3<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
         d_image_data,

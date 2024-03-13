@@ -8,3 +8,4 @@
 - Switch to host-based segment detection.
 - Implement GPU transpose.
 - Fix temp memory calculation.
+- Log all cuda errors through the logger.

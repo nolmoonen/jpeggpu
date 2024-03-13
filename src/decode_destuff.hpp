@@ -28,8 +28,8 @@ struct segment_info {
 /// \param[out] d_segment_indices For each data byte, the segment index.
 jpeggpu_status destuff_scan(
     reader& reader,
-    segment_info*& d_segment_infos,
-    int*& d_segment_indices,
+    segment_info* d_segment_infos,
+    int* d_segment_indices,
     const uint8_t* d_image_data,
     uint8_t* d_image_data_destuffed,
     const scan& scan,

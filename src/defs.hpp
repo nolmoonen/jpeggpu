@@ -26,6 +26,14 @@ namespace jpeggpu {
         }                                                                                          \
     } while (0)
 
+#define JPEGGPU_CHECK_STAT(call)                                                                   \
+    do {                                                                                           \
+        jpeggpu_status stat = call;                                                                \
+        if (stat != JPEGGPU_SUCCESS) {                                                             \
+            return JPEGGPU_INTERNAL_ERROR;                                                         \
+        }                                                                                          \
+    } while (0)
+
 /// TODO more descriptive name?
 constexpr int block_size     = 8;
 constexpr int data_unit_size = 64;

@@ -1,9 +1,9 @@
 #include "decode_dc.hpp"
+#include "decode_destuff.hpp"
 #include "decode_huffman.hpp"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
-#include "destuff.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
 #include "util.hpp"
@@ -649,41 +649,24 @@ __global__ void assign_sinfo_n(
     dst[lid].n = src[lid].n;
 }
 
-#define CHECK_STAT(call)                                                                           \
-    do {                                                                                           \
-        jpeggpu_status stat = call;                                                                \
-        if (stat != JPEGGPU_SUCCESS) {                                                             \
-            return JPEGGPU_INTERNAL_ERROR;                                                         \
-        }                                                                                          \
-    } while (0)
+} // namespace
 
 // TODO reuse allocations to use less memory
-jpeggpu_status decode_scan(
+jpeggpu_status jpeggpu::decode_scan(
     jpeggpu::logger& logger,
     jpeggpu::reader& reader,
-    const uint8_t* d_image_data,
-    uint8_t* d_image_data_destuffed,
+    uint8_t* d_scan_destuffed,
+    segment_info* d_segment_infos,
+    int* d_segment_indices,
     int16_t* d_out,
     void*& d_tmp,
     size_t& tmp_size,
     const struct jpeggpu::scan& scan,
     cudaStream_t stream)
 {
-    const uint8_t* d_scan     = d_image_data + scan.begin;
-    uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
-
-    jpeggpu::segment_info* d_segment_infos;
-    int* d_segment_indices;
-    // FIXME update calculate_gpu_decode_memory according to changes in `gpu_alloc_reserve`
-    const jpeggpu_status stat = destuff_scan(
-        reader, d_segment_infos, d_segment_indices, d_scan, d_scan_destuffed, scan, stream);
-    if (stat != JPEGGPU_SUCCESS) {
-        return stat;
-    }
-
     // TODO pick the right huffman table
     jpeggpu::huffman_table* d_huff;
-    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+    JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
         reinterpret_cast<void**>(&d_huff), 4 * sizeof(jpeggpu::huffman_table), d_tmp, tmp_size));
     CHECK_CUDA(cudaMemcpyAsync(
         d_huff + 0,
@@ -727,7 +710,7 @@ jpeggpu_status decode_scan(
 
     // alg-1:05
     subsequence_info* d_s_info;
-    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+    JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
         reinterpret_cast<void**>(&d_s_info),
         num_subsequences * sizeof(subsequence_info),
         d_tmp,
@@ -758,7 +741,7 @@ jpeggpu_status decode_scan(
             // the meaning of this array is flipped w.r.t. the paper,
             //   a one is produced if not synced
             uint8_t* d_sequence_not_synced;
-            CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+            JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
                 reinterpret_cast<void**>(&d_sequence_not_synced),
                 (num_sequences - 1) * sizeof(uint8_t),
                 d_tmp,
@@ -770,7 +753,7 @@ jpeggpu_status decode_scan(
                 stream));
 
             int* d_num_unsynced_sequence;
-            CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+            JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
                 reinterpret_cast<void**>(&d_num_unsynced_sequence), sizeof(int), d_tmp, tmp_size));
 
             void* d_tmp_storage      = nullptr;
@@ -783,7 +766,7 @@ jpeggpu_status decode_scan(
                 num_sequences - 1,
                 stream));
 
-            CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+            JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
                 reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
 
             int h_num_unsynced_sequence;
@@ -824,7 +807,7 @@ jpeggpu_status decode_scan(
     // alg-1:07-08
     {
         subsequence_info* d_reduce_out;
-        CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+        JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
             reinterpret_cast<void**>(&d_reduce_out),
             num_subsequences * sizeof(subsequence_info),
             d_tmp,
@@ -848,7 +831,7 @@ jpeggpu_status decode_scan(
             cub::Equality{},
             stream));
 
-        CHECK_STAT(jpeggpu::gpu_alloc_reserve(
+        JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
             reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
         // TODO debug to satisfy initcheck
         CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
@@ -883,8 +866,6 @@ jpeggpu_status decode_scan(
 
     return JPEGGPU_SUCCESS;
 }
-
-} // namespace
 
 size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
 {
@@ -936,66 +917,3 @@ size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
 
     return required;
 }
-
-jpeggpu_status jpeggpu::decode(
-    logger& logger,
-    jpeggpu::reader& reader, // TODO pass only jpeg_stream?
-    const uint8_t* d_image_data,
-    uint8_t* d_image_data_destuffed,
-    int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
-    void*& d_tmp,
-    size_t& tmp_size,
-    cudaStream_t stream)
-{
-    const struct reader::jpeg_stream& info = reader.jpeg_stream;
-    size_t total_data_size                 = 0;
-    for (int c = 0; c < info.num_components; ++c) {
-        total_data_size += info.data_sizes_x[c] * info.data_sizes_y[c];
-    }
-    int16_t* d_out;
-    CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-        reinterpret_cast<void**>(&d_out), total_data_size * sizeof(int16_t), d_tmp, tmp_size));
-    // initialize to zero, since only non-zeros are written
-    CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
-
-    if (info.is_interleaved) {
-        if (decode_scan(
-                logger,
-                reader,
-                d_image_data,
-                d_image_data_destuffed,
-                d_out,
-                d_tmp,
-                tmp_size,
-                info.scans[0],
-                stream) != JPEGGPU_SUCCESS) {
-            return JPEGGPU_INTERNAL_ERROR;
-        }
-    } else {
-        size_t offset = 0;
-        for (int c = 0; c < info.num_scans; ++c) {
-            const scan& scan = info.scans[c];
-            decode_scan( // FIXME special attention to temporary memory!
-                logger,
-                reader,
-                d_image_data,
-                d_image_data_destuffed,
-                d_out + offset,
-                d_tmp,
-                tmp_size,
-                scan,
-                stream);
-            const int comp_id = scan.ids[0];
-            offset += info.data_sizes_x[comp_id] * info.data_sizes_y[comp_id];
-        }
-    }
-
-    // data is now as it appears in the encoded stream: one data unit at a time, possibly interleaved
-    decode_dc(logger, reader, d_out, d_tmp, tmp_size, stream);
-    // data is not in image order
-    decode_transpose(logger, reader, d_out, d_image_qdct, stream);
-
-    return JPEGGPU_SUCCESS;
-}
-
-#undef CHECK_STAT

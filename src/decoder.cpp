@@ -1,6 +1,8 @@
 #include "decoder.hpp"
 #include "convert.hpp"
+#include "decode_dc.hpp"
 #include "decode_huffman.hpp"
+#include "decode_transpose.hpp"
 #include "defs.hpp"
 #include "idct.hpp"
 #include "idct_cpu.hpp"
@@ -185,17 +187,89 @@ jpeggpu_status jpeggpu::decoder::decode(
         cudaMemcpyHostToDevice,
         stream));
 
-    if (jpeggpu::decode(
+    const struct reader::jpeg_stream& info = reader.jpeg_stream;
+    size_t total_data_size                 = 0;
+    for (int c = 0; c < info.num_components; ++c) {
+        total_data_size += info.data_sizes_x[c] * info.data_sizes_y[c];
+    }
+    int16_t* d_out;
+    CHECK_STAT(gpu_alloc_reserve(
+        reinterpret_cast<void**>(&d_out), total_data_size * sizeof(int16_t), d_tmp, tmp_size));
+    // initialize to zero, since only non-zeros are written
+    CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
+
+    if (info.is_interleaved) {
+        const scan& scan = info.scans[0];
+
+        segment_info* d_segment_infos;
+        CHECK_CUDA(cudaMalloc(&d_segment_infos, scan.num_segments * sizeof(segment_info)));
+
+        // for each subsequence, its segment
+        int* d_segment_indices;
+        CHECK_CUDA(cudaMalloc(&d_segment_indices, scan.num_subsequences * sizeof(int)));
+
+        const uint8_t* d_scan     = d_image_data + scan.begin;
+        uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
+
+        JPEGGPU_CHECK_STAT(destuff_scan(
+            reader, d_segment_infos, d_segment_indices, d_scan, d_scan_destuffed, scan, stream));
+
+        JPEGGPU_CHECK_STAT(decode_scan(
             logger,
             reader,
-            d_image_data,
-            d_image_data_destuffed,
-            d_image_qdct,
+            d_scan_destuffed,
+            d_segment_infos,
+            d_segment_indices,
+            d_out,
             d_tmp,
             tmp_size,
-            stream) != JPEGGPU_SUCCESS) {
-        return JPEGGPU_INTERNAL_ERROR;
+            scan,
+            stream));
+    } else {
+        size_t offset = 0;
+        for (int c = 0; c < info.num_scans; ++c) {
+            const scan& scan = info.scans[c];
+
+            segment_info* d_segment_infos;
+            CHECK_CUDA(cudaMalloc(&d_segment_infos, scan.num_segments * sizeof(segment_info)));
+
+            // for each subsequence, its segment
+            int* d_segment_indices;
+            CHECK_CUDA(cudaMalloc(&d_segment_indices, scan.num_subsequences * sizeof(int)));
+
+            const uint8_t* d_scan     = d_image_data + scan.begin;
+            uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
+
+            JPEGGPU_CHECK_STAT(destuff_scan(
+                reader,
+                d_segment_infos,
+                d_segment_indices,
+                d_scan,
+                d_scan_destuffed,
+                scan,
+                stream));
+
+            JPEGGPU_CHECK_STAT(decode_scan( // FIXME special attention to temporary memory!
+                logger,
+                reader,
+                d_scan_destuffed,
+                d_segment_infos,
+                d_segment_indices,
+                d_out + offset,
+                d_tmp,
+                tmp_size,
+                scan,
+                stream));
+
+            const int comp_id = scan.ids[0];
+            offset += info.data_sizes_x[comp_id] * info.data_sizes_y[comp_id];
+        }
     }
+
+    // data is now as it appears in the encoded stream: one data unit at a time, possibly interleaved
+    decode_dc(logger, reader, d_out, d_tmp, tmp_size, stream);
+    // data is not in image order
+    decode_transpose(logger, reader, d_out, d_image_qdct, stream);
 
     for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
         CHECK_CUDA(cudaMemcpyAsync(
@@ -212,7 +286,6 @@ jpeggpu_status jpeggpu::decoder::decode(
     idct(reader, d_image_qdct, d_image, d_qtables, stream);
 
     // data will be planar, may be subsampled, may be RGB, YCbCr, CYMK, anything else
-    const struct reader::jpeg_stream& info = reader.jpeg_stream;
     if (info.color_fmt != color_fmt || info.pixel_fmt != pixel_fmt || info.css != subsampling) {
         convert(
             info.size_x,
