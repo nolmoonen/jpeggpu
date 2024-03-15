@@ -651,7 +651,7 @@ __global__ void assign_sinfo_n(
 
 } // namespace
 
-// TODO reuse allocations to use less memory
+template <bool do_it>
 jpeggpu_status jpeggpu::decode_scan(
     jpeggpu::logger& logger,
     jpeggpu::reader& reader,
@@ -659,45 +659,49 @@ jpeggpu_status jpeggpu::decode_scan(
     segment_info* d_segment_infos,
     int* d_segment_indices,
     int16_t* d_out,
-    void*& d_tmp,
-    size_t& tmp_size,
     const struct jpeggpu::scan& scan,
+    stack_allocator& allocator,
     cudaStream_t stream)
 {
+    // TODO move allocations to decoder init
+    // TODO move copy to separate function
     // TODO pick the right huffman table
     jpeggpu::huffman_table* d_huff;
-    JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-        reinterpret_cast<void**>(&d_huff), 4 * sizeof(jpeggpu::huffman_table), d_tmp, tmp_size));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_huff + 0,
-        reader.h_huff_tables[0][jpeggpu::HUFF_DC],
-        sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_DC]),
-        cudaMemcpyHostToDevice,
-        stream));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_huff + 1,
-        reader.h_huff_tables[0][jpeggpu::HUFF_AC],
-        sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_AC]),
-        cudaMemcpyHostToDevice,
-        stream));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_huff + 2,
-        reader.h_huff_tables[1][jpeggpu::HUFF_DC],
-        sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_DC]),
-        cudaMemcpyHostToDevice,
-        stream));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_huff + 3,
-        reader.h_huff_tables[1][jpeggpu::HUFF_AC],
-        sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_AC]),
-        cudaMemcpyHostToDevice,
-        stream));
+    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_huff, 4 * sizeof(jpeggpu::huffman_table)));
+    if (do_it) {
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_huff + 0,
+            reader.h_huff_tables[0][jpeggpu::HUFF_DC],
+            sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_DC]),
+            cudaMemcpyHostToDevice,
+            stream));
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_huff + 1,
+            reader.h_huff_tables[0][jpeggpu::HUFF_AC],
+            sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_AC]),
+            cudaMemcpyHostToDevice,
+            stream));
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_huff + 2,
+            reader.h_huff_tables[1][jpeggpu::HUFF_DC],
+            sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_DC]),
+            cudaMemcpyHostToDevice,
+            stream));
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_huff + 3,
+            reader.h_huff_tables[1][jpeggpu::HUFF_AC],
+            sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_AC]),
+            cudaMemcpyHostToDevice,
+            stream));
+    }
 
     const int num_subsequences = scan.num_subsequences; // "N"
     constexpr int block_size   = 256; // "b", size in subsequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
-    logger("num_subsequences: %d num_sequences: %d\n", num_subsequences, num_sequences);
+    if (do_it) {
+        logger("num_subsequences: %d num_sequences: %d\n", num_subsequences, num_sequences);
+    }
 
     // alg-1:01
     size_t total_data_size = 0;
@@ -710,11 +714,8 @@ jpeggpu_status jpeggpu::decode_scan(
 
     // alg-1:05
     subsequence_info* d_s_info;
-    JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-        reinterpret_cast<void**>(&d_s_info),
-        num_subsequences * sizeof(subsequence_info),
-        d_tmp,
-        tmp_size));
+    JPEGGPU_CHECK_STAT(
+        allocator.reserve<do_it>(&d_s_info, num_subsequences * sizeof(subsequence_info)));
 
     const const_state cstate = {
         d_scan_destuffed,
@@ -733,28 +734,28 @@ jpeggpu_status jpeggpu::decode_scan(
             : reader.jpeg_stream.num_mcus_x * reader.jpeg_stream.num_mcus_y};
 
     { // sync_decoders (Algorithm 3)
-        sync_intra_sequence<block_size><<<num_sequences, block_size, 0, stream>>>(
-            d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
-        CHECK_CUDA(cudaGetLastError());
+        if (do_it) {
+            sync_intra_sequence<block_size><<<num_sequences, block_size, 0, stream>>>(
+                d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
+            CHECK_CUDA(cudaGetLastError());
+        }
 
         if (num_sequences > 1) {
             // the meaning of this array is flipped w.r.t. the paper,
             //   a one is produced if not synced
-            uint8_t* d_sequence_not_synced;
-            JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-                reinterpret_cast<void**>(&d_sequence_not_synced),
-                (num_sequences - 1) * sizeof(uint8_t),
-                d_tmp,
-                tmp_size));
-            CHECK_CUDA(cudaMemsetAsync( // all are initialized to "not synced"
-                d_sequence_not_synced,
-                static_cast<uint8_t>(true),
-                (num_sequences - 1) * sizeof(uint8_t),
-                stream));
+            uint8_t* d_sequence_not_synced = nullptr;
+            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
+                &d_sequence_not_synced, (num_sequences - 1) * sizeof(uint8_t)));
+            if (do_it) {
+                CHECK_CUDA(cudaMemsetAsync( // all are initialized to "not synced"
+                    d_sequence_not_synced,
+                    static_cast<uint8_t>(true),
+                    (num_sequences - 1) * sizeof(uint8_t),
+                    stream));
+            }
 
-            int* d_num_unsynced_sequence;
-            JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-                reinterpret_cast<void**>(&d_num_unsynced_sequence), sizeof(int), d_tmp, tmp_size));
+            int* d_num_unsynced_sequence = nullptr;
+            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_num_unsynced_sequence, sizeof(int)));
 
             void* d_tmp_storage      = nullptr;
             size_t tmp_storage_bytes = 0;
@@ -766,40 +767,44 @@ jpeggpu_status jpeggpu::decode_scan(
                 num_sequences - 1,
                 stream));
 
-            JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-                reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
+            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes));
 
             int h_num_unsynced_sequence;
             do {
                 constexpr int block_size_inter = 256; // does not need to be `block_size`
                 const int num_inter_blocks =
                     ceiling_div(num_sequences, static_cast<unsigned int>(block_size_inter));
-                sync_inter_sequence<block_size><<<num_inter_blocks, block_size_inter, 0, stream>>>(
-                    d_s_info,
-                    num_subsequences,
-                    cstate,
-                    d_sequence_not_synced,
-                    num_sequences,
-                    d_segment_infos,
-                    d_segment_indices);
-                CHECK_CUDA(cudaGetLastError());
-                logger("inter sequence sync done\n");
+                if (do_it) {
+                    sync_inter_sequence<block_size>
+                        <<<num_inter_blocks, block_size_inter, 0, stream>>>(
+                            d_s_info,
+                            num_subsequences,
+                            cstate,
+                            d_sequence_not_synced,
+                            num_sequences,
+                            d_segment_infos,
+                            d_segment_indices);
+                    CHECK_CUDA(cudaGetLastError());
+                    logger("inter sequence sync done\n");
+                }
 
-                CHECK_CUDA(cub::DeviceReduce::Sum(
-                    d_tmp_storage,
-                    tmp_storage_bytes,
-                    d_sequence_not_synced,
-                    d_num_unsynced_sequence,
-                    num_sequences - 1,
-                    stream));
-                CHECK_CUDA(cudaMemcpy(
-                    &h_num_unsynced_sequence,
-                    d_num_unsynced_sequence,
-                    sizeof(int),
-                    cudaMemcpyDeviceToHost));
-
-                logger("unsynced: %d\n", h_num_unsynced_sequence);
-            } while (h_num_unsynced_sequence);
+                if (do_it) {
+                    CHECK_CUDA(cub::DeviceReduce::Sum(
+                        d_tmp_storage,
+                        tmp_storage_bytes,
+                        d_sequence_not_synced,
+                        d_num_unsynced_sequence,
+                        num_sequences - 1,
+                        stream));
+                    // TODO this requires synchronization, try kernel that uses atomics to perform inter sequence sync
+                    CHECK_CUDA(cudaMemcpy(
+                        &h_num_unsynced_sequence,
+                        d_num_unsynced_sequence,
+                        sizeof(int),
+                        cudaMemcpyDeviceToHost));
+                    logger("unsynced: %d\n", h_num_unsynced_sequence);
+                }
+            } while (!do_it && h_num_unsynced_sequence);
         }
     }
 
@@ -807,14 +812,13 @@ jpeggpu_status jpeggpu::decode_scan(
     // alg-1:07-08
     {
         subsequence_info* d_reduce_out;
-        JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-            reinterpret_cast<void**>(&d_reduce_out),
-            num_subsequences * sizeof(subsequence_info),
-            d_tmp,
-            tmp_size));
-        // TODO debug to satisfy initcheck
-        CHECK_CUDA(
-            cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
+        JPEGGPU_CHECK_STAT(
+            allocator.reserve<do_it>(&d_reduce_out, num_subsequences * sizeof(subsequence_info)));
+        if (do_it) {
+            // TODO debug to satisfy initcheck
+            CHECK_CUDA(cudaMemsetAsync(
+                d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
+        }
 
         const subsequence_info init_value{0, 0, 0, 0};
         void* d_tmp_storage      = nullptr;
@@ -831,89 +835,64 @@ jpeggpu_status jpeggpu::decode_scan(
             cub::Equality{},
             stream));
 
-        JPEGGPU_CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-            reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
-        // TODO debug to satisfy initcheck
-        CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes));
+        if (do_it) {
+            // TODO debug to satisfy initcheck
+            CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
+        }
 
-        CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
-            d_tmp_storage,
-            tmp_storage_bytes,
-            d_segment_indices, // d_keys_in
-            d_s_info,
-            d_reduce_out,
-            sum_subsequence_info{},
-            init_value,
-            num_subsequences,
-            cub::Equality{},
-            stream));
+        if (do_it) {
+            CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
+                d_tmp_storage,
+                tmp_storage_bytes,
+                d_segment_indices, // d_keys_in
+                d_s_info,
+                d_reduce_out,
+                sum_subsequence_info{},
+                init_value,
+                num_subsequences,
+                cub::Equality{},
+                stream));
+        }
 
         constexpr int block_size_assign = 256;
         const int grid_dim =
             ceiling_div(num_subsequences, static_cast<unsigned int>(block_size_assign));
-        assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
-            num_subsequences, d_s_info, d_reduce_out);
-        CHECK_CUDA(cudaGetLastError());
+        if (do_it) {
+            assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
+                num_subsequences, d_s_info, d_reduce_out);
+            CHECK_CUDA(cudaGetLastError());
+        }
     }
 
-    // alg-1:09-15
-    decode_write<<<num_sequences, block_size, 0, stream>>>(
-        d_out, d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
-    CHECK_CUDA(cudaGetLastError());
-
-    CHECK_CUDA(cudaFree(d_segment_indices));
-    CHECK_CUDA(cudaFree(d_segment_infos));
+    if (do_it) {
+        // alg-1:09-15
+        decode_write<<<num_sequences, block_size, 0, stream>>>(
+            d_out, d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
+        CHECK_CUDA(cudaGetLastError());
+    }
 
     return JPEGGPU_SUCCESS;
 }
 
-size_t jpeggpu::calculate_gpu_decode_memory(const jpeggpu::reader& reader)
-{
-    size_t required = 0;
-    // // d_scan (can be less due to destuffing)
-    // required += gpu_alloc_size(reader.scan_size);
-    // // d_huff
-    // required += gpu_alloc_size(4 * sizeof(jpeggpu::huffman_table));
-    // // d_out
-    // size_t total_data_size = 0;
-    // for (int c = 0; c < reader.num_components; ++c) {
-    //     total_data_size += reader.data_sizes_x[c] * reader.data_sizes_y[c];
-    // }
-    // required += gpu_alloc_size(total_data_size * sizeof(int16_t));
-    // // d_s_info
-    // const size_t scan_bit_size = reader.scan_size * 8;
-    // const int num_subsequences =
-    //     ceiling_div(scan_bit_size, static_cast<unsigned int>(subsequence_size));
-    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
-    // // d_sequence_not_synced
-    // constexpr int block_size = 256;
-    // const int num_sequences  = ceiling_div(num_subsequences, static_cast<unsigned
-    // int>(block_size)); required += gpu_alloc_size((num_sequences - 1) * sizeof(uint8_t));
-    // // d_num_unsynced_sequence
-    // required += gpu_alloc_size(sizeof(int));
-    // // d_tmp_storage (reduction)
-    // size_t tmp_storage_bytes_reduction = 0;
-    // CHECK_CUDA(cub::DeviceReduce::Sum(
-    //     nullptr,
-    //     tmp_storage_bytes_reduction,
-    //     reinterpret_cast<uint8_t*>(0),
-    //     reinterpret_cast<int*>(0),
-    //     num_sequences - 1,
-    //     cudaStreamDefault));
-    // required += gpu_alloc_size(tmp_storage_bytes_reduction);
-    // // d_reduce_out
-    // required += gpu_alloc_size(num_subsequences * sizeof(subsequence_info));
-    // // d_tmp_storage (scan)
-    // size_t tmp_storage_bytes_scan = 0;
-    // CHECK_CUDA(cub::DeviceScan::ExclusiveScan(
-    //     nullptr,
-    //     tmp_storage_bytes_scan,
-    //     reinterpret_cast<subsequence_info*>(0),
-    //     reinterpret_cast<subsequence_info*>(0),
-    //     sum_subsequence_info{},
-    //     subsequence_info{},
-    //     num_subsequences,
-    //     cudaStreamDefault));
+template jpeggpu_status jpeggpu::decode_scan<false>(
+    jpeggpu::logger&,
+    jpeggpu::reader&,
+    uint8_t*,
+    segment_info*,
+    int*,
+    int16_t*,
+    const struct jpeggpu::scan&,
+    stack_allocator&,
+    cudaStream_t);
 
-    return required;
-}
+template jpeggpu_status jpeggpu::decode_scan<true>(
+    jpeggpu::logger&,
+    jpeggpu::reader&,
+    uint8_t*,
+    segment_info*,
+    int*,
+    int16_t*,
+    const struct jpeggpu::scan&,
+    stack_allocator&,
+    cudaStream_t);

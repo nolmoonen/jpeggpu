@@ -11,11 +11,10 @@
 
 namespace jpeggpu {
 
-size_t calculate_gpu_decode_memory(const jpeggpu::reader& reader);
-
 /// \brief Unregarded of whether the scan is interleaved or non-interleaved,
 ///   this function will output the quantized-cosine-transformed pixel data
 ///   in planar format.
+template<bool do_it>
 jpeggpu_status decode_scan(
     logger& logger,
     reader& reader,
@@ -23,9 +22,8 @@ jpeggpu_status decode_scan(
     segment_info* d_segment_infos,
     int* d_segment_indices,
     int16_t* d_out,
-    void*& d_tmp,
-    size_t& tmp_size,
     const struct jpeggpu::scan& scan,
+    stack_allocator& allocator,
     cudaStream_t stream);
 
 } // namespace jpeggpu

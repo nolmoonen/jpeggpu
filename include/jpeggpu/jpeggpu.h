@@ -75,6 +75,7 @@ struct jpeggpu_img {
 };
 
 // TODO split out copy and kernel. maybe separate function for tmp size
+/// \param[in] d_tmp Temporary device memory, should be aligned to 256 byte boundary.
 enum jpeggpu_status jpeggpu_decoder_decode(
     jpeggpu_decoder_t decoder,
     struct jpeggpu_img* img,

@@ -2,6 +2,7 @@
 #define JPEGGPU_UTIL_HPP_
 
 #include <type_traits>
+#include <vector>
 
 template <
     typename T,
@@ -21,31 +22,54 @@ inline size_t gpu_alloc_size(size_t bytes)
     return ceiling_div(bytes, gpu_alignment) * gpu_alignment;
 }
 
-/// \brief
-///
-/// Mimic cudaMalloc:
-/// \param[out] d_ptr_alloc Pointer to new allocation.
-/// \param[in] size_alloc Amount of bytes that need to be allocated.
-/// Extra info:
-/// \param[inout] d_ptr Pointer to device memory.
-/// \param[inout] size_ptr Size of `d_ptr`.
-inline jpeggpu_status gpu_alloc_reserve(
-    void** d_ptr_alloc, size_t size_alloc, void*& d_ptr, size_t& size_ptr)
-{
-    // FIXME restore
-    (void)d_ptr, (void)size_ptr;
-    CHECK_CUDA(cudaMalloc(d_ptr_alloc, size_alloc));
-    // // padding before the allocation
-    // const size_t padding     = gpu_alignment - (reinterpret_cast<uintptr_t>(d_ptr) %
-    // gpu_alignment); const size_t alloc_bytes = gpu_alloc_size(size_alloc); if (size_ptr < padding
-    // + alloc_bytes) {
-    //     return JPEGGPU_INVALID_ARGUMENT;
-    // }
-    // *d_ptr_alloc = static_cast<char*>(d_ptr) + padding;
-    // d_ptr        = static_cast<char*>(d_ptr) + padding + alloc_bytes;
-    // size_ptr -= padding + alloc_bytes;
-    return JPEGGPU_SUCCESS;
-}
+struct allocation {
+    char* data;
+    size_t size;
+};
+
+/// \brief Does not actually do allocations.
+///   Stack as to not have to deal with fragmentation.
+struct stack_allocator {
+    void reset()
+    {
+        alloc.data = nullptr;
+        alloc.size = 0;
+        stack.clear();
+        size = 0;
+    }
+
+    template <bool do_it, typename T>
+    jpeggpu_status reserve(T** d_ptr_alloc, size_t size_alloc)
+    {
+        const size_t alloc_bytes = gpu_alloc_size(size_alloc);
+        if (do_it && alloc_bytes > alloc.size) {
+            // TODO log
+            return JPEGGPU_INTERNAL_ERROR;
+        }
+
+        if (do_it) {
+            *d_ptr_alloc = reinterpret_cast<T*>(alloc.data);
+        } else {
+            *d_ptr_alloc = nullptr;
+        }
+
+        allocation this_alloc;
+        this_alloc.data = reinterpret_cast<char*>(*d_ptr_alloc);
+        this_alloc.size = alloc_bytes;
+        if (do_it) {
+            alloc.data += alloc_bytes;
+        }
+        stack.push_back(this_alloc);
+        size += alloc_bytes;
+
+        return JPEGGPU_SUCCESS;
+    }
+
+    allocation alloc; /// Device allocation
+
+    std::vector<allocation> stack;
+    size_t size; /// Current size of stack.
+};
 
 } // namespace jpeggpu
 

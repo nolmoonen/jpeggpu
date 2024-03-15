@@ -214,22 +214,33 @@ void bench_jpeggpu(char* file_data, size_t file_size, cudaStream_t stream)
         image_bytes += plane_bytes;
     }
 
+    void* d_tmp     = nullptr;
+    size_t tmp_size = 0;
+
     const auto run_iter = [&]() {
         CHECK_JPEGGPU(jpeggpu_decoder_parse_header(
             decoder, &img_info, reinterpret_cast<const uint8_t*>(file_data), file_size));
 
-        size_t tmp_size = 0;
+        size_t this_tmp_size = 0;
         CHECK_JPEGGPU(jpeggpu_decoder_decode(
             decoder,
             &img,
             JPEGGPU_YCBCR,
             JPEGGPU_P0P1P2,
             img_info.subsampling,
-            NULL,
-            &tmp_size,
+            nullptr,
+            &this_tmp_size,
             stream));
 
-        void* d_tmp = (void*)1; // FIXME not used but cannot be nullptr
+        if (this_tmp_size > tmp_size) {
+            if (d_tmp) {
+                CHECK_CUDA(cudaFree(d_tmp));
+            }
+            d_tmp = nullptr;
+            CHECK_CUDA(cudaMalloc(&d_tmp, this_tmp_size));
+            tmp_size = this_tmp_size;
+        }
+
         CHECK_JPEGGPU(jpeggpu_decoder_decode(
             decoder,
             &img,
@@ -237,7 +248,7 @@ void bench_jpeggpu(char* file_data, size_t file_size, cudaStream_t stream)
             JPEGGPU_P0P1P2,
             img_info.subsampling,
             d_tmp,
-            &tmp_size,
+            &this_tmp_size,
             stream));
     };
 
@@ -256,11 +267,12 @@ void bench_jpeggpu(char* file_data, size_t file_size, cudaStream_t stream)
 
     const size_t total_bytes = image_bytes + file_size;
     std::cout << std::setprecision(2) << (total_bytes >> 20) / elapsed << " MiB/s "
-              << 0 / static_cast<double>(image_bytes) << " device tmp " // TODO
+              << tmp_size / static_cast<double>(image_bytes) << " device tmp "
               << 0 / static_cast<double>(image_bytes) << " pinned tmp\n"; // TODO
 
     // TODO optionally output image for checking purposes
 
+    if (d_tmp) CHECK_CUDA(cudaFree(d_tmp));
     for (int c = 0; c < 3; ++c) {
         CHECK_CUDA(cudaFree(img.image[c]));
     }
@@ -272,6 +284,7 @@ int main(int argc, const char* argv[])
 {
     if (argc != 2) {
         std::cerr << "usage: benchmark <jpeg file>\n";
+        return EXIT_FAILURE;
     }
 
     std::ifstream file(argv[1]);

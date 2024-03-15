@@ -570,5 +570,3 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end, stru
         }
     }
 }
-
-#undef JPEGGPU_CHECK_STATUS

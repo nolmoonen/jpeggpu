@@ -44,22 +44,38 @@ struct interleaved_functor {
     int data_units_in_mcu_component;
 };
 
+struct interleaved_transform_functor {
+    interleaved_transform_functor(
+        int data_units_in_mcu_component, int off_in_mcu, int data_units_in_mcu)
+        : data_units_in_mcu_component(data_units_in_mcu_component),
+          off_in_mcu(off_in_mcu),
+          data_units_in_mcu(data_units_in_mcu)
+    {
+    }
+
+    __device__ __host__ int operator()(int i)
+    {
+        const int mcu_idx    = i / data_units_in_mcu_component;
+        const int idx_in_mcu = off_in_mcu + i % data_units_in_mcu_component;
+
+        const int data_unit_idx = mcu_idx * data_units_in_mcu + idx_in_mcu;
+        const int data_idx      = data_unit_idx * data_unit_size;
+        return data_idx;
+    }
+
+    int data_units_in_mcu_component;
+    int off_in_mcu;
+    int data_units_in_mcu;
+};
+
 } // namespace
 
-#define CHECK_STAT(call)                                                                           \
-    do {                                                                                           \
-        jpeggpu_status stat = call;                                                                \
-        if (stat != JPEGGPU_SUCCESS) {                                                             \
-            return JPEGGPU_INTERNAL_ERROR;                                                         \
-        }                                                                                          \
-    } while (0)
-
+template <bool do_it>
 jpeggpu_status jpeggpu::decode_dc(
     logger& logger,
     jpeggpu::reader& reader, // TODO pass only jpeg_stream?
     int16_t* d_out,
-    void*& d_tmp,
-    size_t& tmp_size,
+    stack_allocator& allocator,
     cudaStream_t stream)
 {
     // TODO this calculation only works for 4:4:4, 4:2:0, etc.
@@ -72,18 +88,11 @@ jpeggpu_status jpeggpu::decode_dc(
         const int data_units_in_mcu_component =
             reader.jpeg_stream.css.x[c] * reader.jpeg_stream.css.y[c];
 
-        const auto interleaved_transform = [=] __device__ __host__(int i) -> int {
-            const int mcu_idx    = i / data_units_in_mcu_component;
-            const int idx_in_mcu = off_in_mcu + i % data_units_in_mcu_component;
-
-            const int data_unit_idx = mcu_idx * data_units_in_mcu + idx_in_mcu;
-            const int data_idx      = data_unit_idx * data_unit_size;
-            return data_idx;
-        };
-
-        auto counting_iter = thrust::make_counting_iterator(int{0});
-        auto interleaved_index_iter =
-            thrust::make_transform_iterator(counting_iter, interleaved_transform);
+        auto counting_iter          = thrust::make_counting_iterator(int{0});
+        auto interleaved_index_iter = thrust::make_transform_iterator(
+            counting_iter,
+            interleaved_transform_functor(
+                data_units_in_mcu_component, off_in_mcu, data_units_in_mcu));
         auto iter_interleaved = thrust::make_permutation_iterator(d_out, interleaved_index_iter);
 
         auto non_interleaved_index_iter =
@@ -130,10 +139,9 @@ jpeggpu_status jpeggpu::decode_dc(
 
             dispatch();
 
-            CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-                reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
+            allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes);
 
-            dispatch();
+            if (do_it) dispatch();
         } else {
             const auto dispatch = [&]() {
                 if (reader.jpeg_stream.is_interleaved) {
@@ -157,10 +165,9 @@ jpeggpu_status jpeggpu::decode_dc(
 
             dispatch();
 
-            CHECK_STAT(jpeggpu::gpu_alloc_reserve(
-                reinterpret_cast<void**>(&d_tmp_storage), tmp_storage_bytes, d_tmp, tmp_size));
+            allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes);
 
-            dispatch();
+            if (do_it) dispatch();
         }
 
         off_in_mcu += data_units_in_mcu_component;
@@ -170,4 +177,7 @@ jpeggpu_status jpeggpu::decode_dc(
     return JPEGGPU_SUCCESS;
 }
 
-#undef CHECK_STAT
+template jpeggpu_status jpeggpu::decode_dc<false>(
+    logger&, jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);
+template jpeggpu_status jpeggpu::decode_dc<true>(
+    logger&, jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);

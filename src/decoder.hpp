@@ -20,6 +20,14 @@ struct decoder {
 
     jpeggpu_status parse_header(jpeggpu_img_info& img_info, const uint8_t* data, size_t size);
 
+    template <bool do_it>
+    jpeggpu_status decode_impl(
+        jpeggpu_img& img,
+        jpeggpu_color_format color_fmt,
+        jpeggpu_pixel_format pixel_fmt,
+        jpeggpu_subsampling subsampling,
+        cudaStream_t stream);
+
     jpeggpu_status decode(
         jpeggpu_img& img,
         jpeggpu_color_format color_fmt,
@@ -40,6 +48,8 @@ struct decoder {
 
     // output of dequantize and idct, the output image
     uint8_t* d_image[max_comp_count];
+
+    stack_allocator allocator;
 };
 
 } // namespace jpeggpu

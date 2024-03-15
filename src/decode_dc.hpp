@@ -12,12 +12,12 @@
 
 namespace jpeggpu {
 
+template<bool do_it>
 jpeggpu_status decode_dc(
     logger& logger,
     jpeggpu::reader& reader,
     int16_t* d_out,
-    void*& d_tmp,
-    size_t& tmp_size,
+    stack_allocator& allocator,
     cudaStream_t stream);
 
 }
