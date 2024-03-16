@@ -45,7 +45,12 @@ using namespace jpeggpu;
 jpeggpu_status jpeggpu::decoder::init()
 {
     for (int c = 0; c < max_comp_count; ++c) {
-        JPEGGPU_CHECK_CUDA(cudaMalloc(&d_qtables[c], sizeof(uint8_t) * data_unit_size));
+        JPEGGPU_CHECK_CUDA(cudaMalloc(&(d_qtables[c]), sizeof(uint8_t) * data_unit_size));
+    }
+    for (int i = 0; i < max_huffman_count; ++i) {
+        for (int j = 0; j < HUFF_COUNT; ++j) {
+            JPEGGPU_CHECK_CUDA(cudaMalloc(&(d_huff_tables[i][j]), sizeof(*d_huff_tables[i][j])));
+        }
     }
 
     jpeggpu_status stat = JPEGGPU_SUCCESS;
@@ -62,6 +67,12 @@ void jpeggpu::decoder::cleanup()
 {
     reader.cleanup();
 
+    for (int i = 0; i < max_huffman_count; ++i) {
+        for (int j = 0; j < HUFF_COUNT; ++j) {
+            cudaFree(d_huff_tables[i][j]);
+            d_huff_tables[i][j] = nullptr;
+        }
+    }
     for (int c = 0; c < max_comp_count; ++c) {
         cudaFree(d_qtables[c]);
         d_qtables[c] = nullptr;
@@ -100,8 +111,10 @@ jpeggpu_status jpeggpu::decoder::parse_header(
     }
 
     for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        img_info.subsampling.x[c] = reader.jpeg_stream.ss_x_max / reader.jpeg_stream.css.x[c];
-        img_info.subsampling.y[c] = reader.jpeg_stream.ss_y_max / reader.jpeg_stream.css.y[c];
+        img_info.subsampling.x[c] =
+            reader.jpeg_stream.ss_x_max / reader.jpeg_stream.components[c].ss_x;
+        img_info.subsampling.y[c] =
+            reader.jpeg_stream.ss_y_max / reader.jpeg_stream.components[c].ss_y;
     }
     for (int c = reader.jpeg_stream.num_components; c < max_comp_count; ++c) {
         img_info.subsampling.x[c] = 0;
@@ -140,8 +153,9 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
     jpeggpu_subsampling subsampling,
     cudaStream_t stream)
 {
-    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        const size_t size = reader.jpeg_stream.data_sizes_x[c] * reader.jpeg_stream.data_sizes_y[c];
+    const jpeg_stream& info = reader.jpeg_stream;
+    for (int c = 0; c < info.num_components; ++c) {
+        const size_t size = info.components[c].data_size_x * info.components[c].data_size_y;
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image[c]), size * sizeof(uint8_t)));
     }
@@ -155,12 +169,29 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
     if (do_it) {
         JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_image_data, reader.image_begin, file_size, cudaMemcpyHostToDevice, stream));
+        for (int i = 0; i < max_huffman_count; ++i) {
+            for (int j = 0; j < HUFF_COUNT; ++j) {
+                JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+                    d_huff_tables[i][j],
+                    reader.h_huff_tables[i][j],
+                    sizeof(*reader.h_huff_tables[i][j]),
+                    cudaMemcpyHostToDevice,
+                    stream));
+            }
+        }
+        for (int c = 0; c < info.num_components; ++c) {
+            JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+                d_qtables[c],
+                reader.h_qtables[info.components[c].qtable_idx],
+                sizeof(*reader.h_qtables[info.components[c].qtable_idx]),
+                cudaMemcpyHostToDevice,
+                stream));
+        }
     }
 
-    const struct reader::jpeg_stream& info = reader.jpeg_stream;
-    size_t total_data_size                 = 0;
+    size_t total_data_size = 0;
     for (int c = 0; c < info.num_components; ++c) {
-        total_data_size += info.data_sizes_x[c] * info.data_sizes_y[c];
+        total_data_size += info.components[c].data_size_x * info.components[c].data_size_y;
     }
     int16_t* d_out;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
@@ -185,7 +216,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
         uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
 
         JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
-            reader,
+            info,
             d_segment_infos,
             d_segment_indices,
             d_scan,
@@ -195,12 +226,13 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
             stream));
 
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
-            reader,
+            info,
             d_scan_destuffed,
             d_segment_infos,
             d_segment_indices,
             d_out,
             scan,
+            d_huff_tables,
             allocator,
             stream));
     } else {
@@ -222,7 +254,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
             uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
 
             JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
-                reader,
+                info,
                 d_segment_infos,
                 d_segment_indices,
                 d_scan,
@@ -232,60 +264,55 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
                 stream));
 
             JPEGGPU_CHECK_STAT(decode_scan<do_it>(
-                reader,
+                info,
                 d_scan_destuffed,
                 d_segment_infos,
                 d_segment_indices,
                 d_out + offset,
                 scan,
+                d_huff_tables,
                 allocator,
                 stream));
 
             const int comp_id = scan.ids[0];
-            offset += info.data_sizes_x[comp_id] * info.data_sizes_y[comp_id];
+            offset += info.components[comp_id].data_size_x * info.components[comp_id].data_size_y;
         }
     }
 
     // data is now as it appears in the encoded stream: one data unit at a time, possibly interleaved
-    decode_dc<do_it>(reader, d_out, allocator, stream);
+    decode_dc<do_it>(info, d_out, allocator, stream);
     if (do_it) {
         // data is not in image order
-        decode_transpose(reader, d_out, d_image_qdct, stream);
-    }
-
-    if (do_it) {
-        for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-            JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-                d_qtables[c],
-                reader.h_qtables[reader.jpeg_stream.components[c].qtable_idx],
-                sizeof(*reader.h_qtables[reader.jpeg_stream.components[c].qtable_idx]),
-                cudaMemcpyHostToDevice,
-                stream));
-        }
-    }
-
-    if (do_it) {
-        idct(reader, d_image_qdct, d_image, d_qtables, stream);
+        decode_transpose(info, d_out, d_image_qdct, stream);
+        idct(info, d_image_qdct, d_image, d_qtables, stream);
     }
 
     // data will be planar, may be subsampled, may be RGB, YCbCr, CYMK, anything else
-    if (info.color_fmt != color_fmt || info.pixel_fmt != pixel_fmt || info.css != subsampling) {
+    const bool is_matching_css = false; // TODO find a good way to pass CSS to this function
+    if (info.color_fmt != color_fmt || info.pixel_fmt != pixel_fmt || !is_matching_css) {
         if (do_it) {
             convert(
                 info.size_x,
                 info.size_y,
                 jpeggpu::image_desc{
                     d_image[0],
-                    info.data_sizes_x[0],
+                    info.components[0].data_size_x,
                     d_image[1],
-                    info.data_sizes_x[1],
+                    info.components[1].data_size_x,
                     d_image[2],
-                    info.data_sizes_x[2],
+                    info.components[2].data_size_x,
                     d_image[3],
-                    info.data_sizes_x[3]},
+                    info.components[3].data_size_x},
                 info.color_fmt,
                 info.pixel_fmt,
-                info.css,
+                {{info.components[0].ss_x,
+                  info.components[1].ss_x,
+                  info.components[2].ss_x,
+                  info.components[3].ss_x},
+                 {info.components[0].ss_y,
+                  info.components[1].ss_y,
+                  info.components[2].ss_y,
+                  info.components[3].ss_y}},
                 jpeggpu::image_desc{
                     img.image[0],
                     img.pitch[0],

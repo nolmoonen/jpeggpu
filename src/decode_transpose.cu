@@ -190,25 +190,24 @@ __global__ void transpose_non_interleaved(
 } // namespace
 
 jpeggpu_status jpeggpu::decode_transpose(
-    jpeggpu::reader& reader,
+    const jpeg_stream& info,
     int16_t* d_out,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
     cudaStream_t stream)
 {
-    const size_t total_data_size =
-        reader.jpeg_stream.data_sizes_x[0] * reader.jpeg_stream.data_sizes_y[0] +
-        reader.jpeg_stream.data_sizes_x[1] * reader.jpeg_stream.data_sizes_y[1] +
-        reader.jpeg_stream.data_sizes_x[2] * reader.jpeg_stream.data_sizes_y[2] +
-        reader.jpeg_stream.data_sizes_x[3] * reader.jpeg_stream.data_sizes_y[3];
+    const size_t total_data_size = info.components[0].data_size_x * info.components[0].data_size_y +
+                                   info.components[1].data_size_x * info.components[1].data_size_y +
+                                   info.components[2].data_size_x * info.components[2].data_size_y +
+                                   info.components[3].data_size_x * info.components[3].data_size_y;
     const dim3 transpose_block_dim(256);
     const dim3 transpose_grid_dim(
         ceiling_div(total_data_size, static_cast<unsigned int>(transpose_block_dim.x)));
 
-    if (reader.jpeg_stream.is_interleaved) {
-        const int data_units_in_mcu = reader.jpeg_stream.css.x[0] * reader.jpeg_stream.css.y[0] +
-                                      reader.jpeg_stream.css.x[1] * reader.jpeg_stream.css.y[1] +
-                                      reader.jpeg_stream.css.x[2] * reader.jpeg_stream.css.y[2] +
-                                      reader.jpeg_stream.css.x[3] * reader.jpeg_stream.css.y[3];
+    if (info.is_interleaved) {
+        const int data_units_in_mcu = info.components[0].ss_x * info.components[0].ss_y +
+                                      info.components[1].ss_x * info.components[1].ss_y +
+                                      info.components[2].ss_x * info.components[2].ss_y +
+                                      info.components[3].ss_x * info.components[3].ss_y;
         transpose_interleaved<<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(
             d_out,
             d_image_qdct[0],
@@ -216,16 +215,16 @@ jpeggpu_status jpeggpu::decode_transpose(
             d_image_qdct[2],
             d_image_qdct[3],
             total_data_size,
-            make_int2(reader.jpeg_stream.data_sizes_x[0], reader.jpeg_stream.data_sizes_y[0]),
-            make_int2(reader.jpeg_stream.data_sizes_x[1], reader.jpeg_stream.data_sizes_y[1]),
-            make_int2(reader.jpeg_stream.data_sizes_x[2], reader.jpeg_stream.data_sizes_y[2]),
-            make_int2(reader.jpeg_stream.data_sizes_x[3], reader.jpeg_stream.data_sizes_y[3]),
+            make_int2(info.components[0].data_size_x, info.components[0].data_size_y),
+            make_int2(info.components[1].data_size_x, info.components[1].data_size_y),
+            make_int2(info.components[2].data_size_x, info.components[2].data_size_y),
+            make_int2(info.components[3].data_size_x, info.components[3].data_size_y),
             data_units_in_mcu,
-            reader.jpeg_stream.num_mcus_x,
-            make_int2(reader.jpeg_stream.css.x[0], reader.jpeg_stream.css.y[0]),
-            make_int2(reader.jpeg_stream.css.x[1], reader.jpeg_stream.css.y[1]),
-            make_int2(reader.jpeg_stream.css.x[2], reader.jpeg_stream.css.y[2]),
-            make_int2(reader.jpeg_stream.css.x[3], reader.jpeg_stream.css.y[3]));
+            info.num_mcus_x,
+            make_int2(info.components[0].ss_x, info.components[0].ss_y),
+            make_int2(info.components[1].ss_x, info.components[1].ss_y),
+            make_int2(info.components[2].ss_x, info.components[2].ss_y),
+            make_int2(info.components[3].ss_x, info.components[3].ss_y));
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     } else {
         transpose_non_interleaved<<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(
@@ -235,10 +234,10 @@ jpeggpu_status jpeggpu::decode_transpose(
             d_image_qdct[2],
             d_image_qdct[3],
             total_data_size,
-            make_int2(reader.jpeg_stream.data_sizes_x[0], reader.jpeg_stream.data_sizes_y[0]),
-            make_int2(reader.jpeg_stream.data_sizes_x[1], reader.jpeg_stream.data_sizes_y[1]),
-            make_int2(reader.jpeg_stream.data_sizes_x[2], reader.jpeg_stream.data_sizes_y[2]),
-            make_int2(reader.jpeg_stream.data_sizes_x[3], reader.jpeg_stream.data_sizes_y[3]));
+            make_int2(info.components[0].data_size_x, info.components[0].data_size_y),
+            make_int2(info.components[1].data_size_x, info.components[1].data_size_y),
+            make_int2(info.components[2].data_size_x, info.components[2].data_size_y),
+            make_int2(info.components[3].data_size_x, info.components[3].data_size_y));
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 

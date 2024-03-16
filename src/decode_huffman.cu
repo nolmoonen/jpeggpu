@@ -303,44 +303,52 @@ enum class component {
     k // k (CMYK)
 };
 
-/// \brief Infer image components based on data unit index `c` (in MCU).
-__device__ component calc_component(int ssx, int ssy, int c, int num_components)
-{
-    const int num_luma_data_units = ssx * ssy;
-
-    if (c < num_luma_data_units) {
-        return component::y;
-    }
-
-    assert(num_components > 1);
-
-    if (c == num_luma_data_units) {
-        return component::cb;
-    }
-
-    assert(num_components > 2);
-
-    if (c == num_luma_data_units + 1) {
-        return component::cr;
-    }
-
-    assert(num_components > 3);
-    return component::k;
-}
-
 struct const_state {
     const uint8_t* scan;
     const uint8_t* scan_end;
-    const jpeggpu::huffman_table* table_luma_dc;
-    const jpeggpu::huffman_table* table_luma_ac;
-    const jpeggpu::huffman_table* table_chroma_dc;
-    const jpeggpu::huffman_table* table_chroma_ac;
-    int ssx;
-    int ssy;
+    const jpeggpu::huffman_table* dc_0;
+    const jpeggpu::huffman_table* ac_0;
+    const jpeggpu::huffman_table* dc_1;
+    const jpeggpu::huffman_table* ac_1;
+    const jpeggpu::huffman_table* dc_2;
+    const jpeggpu::huffman_table* ac_2;
+    const jpeggpu::huffman_table* dc_3;
+    const jpeggpu::huffman_table* ac_3;
+    int2 ss_0;
+    int2 ss_1;
+    int2 ss_2;
+    int2 ss_3;
+    int num_data_units_in_mcu;
     int num_components;
     int num_data_units;
     int num_mcus_in_segment;
 };
+
+/// \brief Infer image components based on data unit index `c` (in MCU).
+__device__ component calc_component(const const_state& cstate, int c)
+{
+    const int num_in_0 = cstate.ss_0.x * cstate.ss_0.y;
+    if (c < num_in_0) {
+        return component::y;
+    }
+    c -= num_in_0;
+    const int num_in_1 = cstate.ss_1.x * cstate.ss_1.y;
+    if (c < num_in_1) {
+        return component::cb;
+    }
+    c -= num_in_1;
+    const int num_in_2 = cstate.ss_2.x * cstate.ss_2.y;
+    if (c < num_in_2) {
+        return component::cr;
+    }
+    c -= num_in_2;
+    const int num_in_3 = cstate.ss_3.x * cstate.ss_3.y;
+    if (c < num_in_3) {
+        return component::k;
+    }
+    assert(false);
+    return component::k;
+}
 
 static_assert(std::is_trivially_copyable_v<const_state>);
 
@@ -377,12 +385,11 @@ __device__ subsequence_info decode_subsequence(
     rstate.cache          = 0;
     rstate.cache_num_bits = 0;
 
-    const int num_data_units_in_mcu = cstate.ssx * cstate.ssy + cstate.num_components - 1;
-
     int position_in_output = 0;
     if constexpr (do_write) {
         position_in_output = s_info[i].n + segment_idx * cstate.num_mcus_in_segment *
-                                               num_data_units_in_mcu * jpeggpu::data_unit_size;
+                                               cstate.num_data_units_in_mcu *
+                                               jpeggpu::data_unit_size;
     }
     if constexpr (is_overflow) {
         info.p = s_info[i - 1].p;
@@ -410,26 +417,39 @@ __device__ subsequence_info decode_subsequence(
         //   (so info.p cannot reliably be used to determine if the loop should break)
         //   this problem is excerbated by restart intevals, where padding occurs more frequently
         if (do_write && position_in_output >= (segment_idx + 1) * cstate.num_mcus_in_segment *
-                                                  num_data_units_in_mcu * jpeggpu::data_unit_size) {
+                                                  cstate.num_data_units_in_mcu *
+                                                  jpeggpu::data_unit_size) {
             break;
         }
 
         last_symbol = info;
 
-        const component comp =
-            calc_component(cstate.ssx, cstate.ssy, info.c, cstate.num_components);
-        int length     = 0;
-        int symbol     = 0;
-        int run_length = 0;
+        const component comp    = calc_component(cstate, info.c);
+        int length              = 0;
+        int symbol              = 0;
+        int run_length          = 0;
+        const huffman_table* dc = nullptr;
+        const huffman_table* ac = nullptr;
+        switch (comp) {
+        case component::y:
+            dc = cstate.dc_0;
+            ac = cstate.ac_0;
+            break;
+        case component::cb:
+            dc = cstate.dc_1;
+            ac = cstate.ac_1;
+            break;
+        case component::cr:
+            dc = cstate.dc_2;
+            ac = cstate.ac_2;
+            break;
+        case component::k:
+            dc = cstate.dc_3;
+            ac = cstate.ac_3;
+            break;
+        }
         // always returns length > 0 if there are bits in `rstate` to ensure progress
-        decode_next_symbol(
-            rstate,
-            length,
-            symbol,
-            run_length,
-            comp == component::y ? *cstate.table_luma_dc : *cstate.table_chroma_dc,
-            comp == component::y ? *cstate.table_luma_ac : *cstate.table_chroma_ac,
-            info.z);
+        decode_next_symbol(rstate, length, symbol, run_length, *dc, *ac, info.z);
         if (do_write) {
             // TODO could make a separate kernel for this
             out[position_in_output / 64 * 64 + jpeggpu::order_natural[position_in_output % 64]] =
@@ -447,9 +467,7 @@ __device__ subsequence_info decode_subsequence(
             info.z = 0;
             ++info.c;
 
-            // ass-1
-            const int num_data_units_in_mcu = cstate.ssx * cstate.ssy + (cstate.num_components - 1);
-            if (info.c >= num_data_units_in_mcu) {
+            if (info.c >= cstate.num_data_units_in_mcu) {
                 // mcu is complete
                 info.c = 0;
             }
@@ -648,46 +666,17 @@ __global__ void assign_sinfo_n(
 
 template <bool do_it>
 jpeggpu_status jpeggpu::decode_scan(
-    jpeggpu::reader& reader,
+    const jpeg_stream& info,
     uint8_t* d_scan_destuffed,
     segment_info* d_segment_infos,
     int* d_segment_indices,
     int16_t* d_out,
     const struct jpeggpu::scan& scan,
+    huffman_table* (&d_huff_tables)[max_huffman_count][HUFF_COUNT],
     stack_allocator& allocator,
     cudaStream_t stream)
 {
-    // TODO move allocations to decoder init
-    // TODO move copy to separate function
     // TODO pick the right huffman table
-    jpeggpu::huffman_table* d_huff;
-    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_huff, 4 * sizeof(jpeggpu::huffman_table)));
-    if (do_it) {
-        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-            d_huff + 0,
-            reader.h_huff_tables[0][jpeggpu::HUFF_DC],
-            sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_DC]),
-            cudaMemcpyHostToDevice,
-            stream));
-        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-            d_huff + 1,
-            reader.h_huff_tables[0][jpeggpu::HUFF_AC],
-            sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_AC]),
-            cudaMemcpyHostToDevice,
-            stream));
-        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-            d_huff + 2,
-            reader.h_huff_tables[1][jpeggpu::HUFF_DC],
-            sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_DC]),
-            cudaMemcpyHostToDevice,
-            stream));
-        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-            d_huff + 3,
-            reader.h_huff_tables[1][jpeggpu::HUFF_AC],
-            sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_AC]),
-            cudaMemcpyHostToDevice,
-            stream));
-    }
 
     const int num_subsequences = scan.num_subsequences; // "N"
     constexpr int block_size   = 256; // "b", size in subsequences
@@ -698,12 +687,10 @@ jpeggpu_status jpeggpu::decode_scan(
     }
 
     // alg-1:01
-    size_t total_data_size = 0;
-    int num_data_units     = 0;
-    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        total_data_size += reader.jpeg_stream.data_sizes_x[c] * reader.jpeg_stream.data_sizes_y[c];
-        num_data_units +=
-            (reader.jpeg_stream.data_sizes_x[c] / 8) * (reader.jpeg_stream.data_sizes_y[c] / 8);
+    int num_data_units = 0;
+    for (int c = 0; c < info.num_components; ++c) {
+        num_data_units += (info.components[c].data_size_x / jpeggpu::block_size) *
+                          (info.components[c].data_size_y / jpeggpu::block_size);
     }
 
     // alg-1:05
@@ -715,17 +702,22 @@ jpeggpu_status jpeggpu::decode_scan(
         d_scan_destuffed,
         // TODO this is not the end of data, but the end of allocation. the final subsequence may read garbage.
         d_scan_destuffed + (scan.end - scan.begin),
-        d_huff + 0,
-        d_huff + 1,
-        d_huff + 2,
-        d_huff + 3,
-        reader.jpeg_stream.css.x[0],
-        reader.jpeg_stream.css.y[0],
-        reader.jpeg_stream.num_components,
+        d_huff_tables[info.components[0].dc_idx][HUFF_DC],
+        d_huff_tables[info.components[0].ac_idx][HUFF_AC],
+        d_huff_tables[info.components[1].dc_idx][HUFF_DC],
+        d_huff_tables[info.components[1].ac_idx][HUFF_AC],
+        d_huff_tables[info.components[2].dc_idx][HUFF_DC],
+        d_huff_tables[info.components[2].ac_idx][HUFF_AC],
+        d_huff_tables[info.components[3].dc_idx][HUFF_DC],
+        d_huff_tables[info.components[3].ac_idx][HUFF_AC],
+        make_int2(info.components[0].ss_x, info.components[0].ss_y),
+        make_int2(info.components[1].ss_x, info.components[1].ss_y),
+        make_int2(info.components[2].ss_x, info.components[2].ss_y),
+        make_int2(info.components[3].ss_x, info.components[3].ss_y),
+        info.num_data_units_in_mcu,
+        info.num_components,
         num_data_units,
-        reader.jpeg_stream.restart_interval != 0
-            ? reader.jpeg_stream.restart_interval
-            : reader.jpeg_stream.num_mcus_x * reader.jpeg_stream.num_mcus_y};
+        info.restart_interval != 0 ? info.restart_interval : info.num_mcus_x * info.num_mcus_y};
 
     { // sync_decoders (Algorithm 3)
         if (do_it) {
@@ -798,7 +790,7 @@ jpeggpu_status jpeggpu::decode_scan(
                         cudaMemcpyDeviceToHost));
                     log("unsynced: %d\n", h_num_unsynced_sequence);
                 }
-            } while (!do_it && h_num_unsynced_sequence);
+            } while (do_it && h_num_unsynced_sequence);
         }
     }
 
@@ -870,21 +862,23 @@ jpeggpu_status jpeggpu::decode_scan(
 }
 
 template jpeggpu_status jpeggpu::decode_scan<false>(
-    jpeggpu::reader&,
+    const jpeg_stream&,
     uint8_t*,
     segment_info*,
     int*,
     int16_t*,
     const struct jpeggpu::scan&,
+    huffman_table* (&)[max_huffman_count][HUFF_COUNT],
     stack_allocator&,
     cudaStream_t);
 
 template jpeggpu_status jpeggpu::decode_scan<true>(
-    jpeggpu::reader&,
+    const jpeg_stream&,
     uint8_t*,
     segment_info*,
     int*,
     int16_t*,
     const struct jpeggpu::scan&,
+    huffman_table* (&)[max_huffman_count][HUFF_COUNT],
     stack_allocator&,
     cudaStream_t);

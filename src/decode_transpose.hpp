@@ -13,7 +13,7 @@
 namespace jpeggpu {
 
 jpeggpu_status decode_transpose(
-    jpeggpu::reader& reader,
+    const jpeg_stream& info,
     int16_t* d_out,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
     cudaStream_t stream);

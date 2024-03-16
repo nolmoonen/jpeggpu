@@ -22,9 +22,10 @@ jpeggpu_status reader::startup()
             cudaSuccess) {
             return JPEGGPU_OUT_OF_HOST_MEMORY;
         }
-
-        for (int h = 0; h < HUFF_COUNT; ++h) {
-            if (cudaMallocHost(&h_huff_tables[c][h], sizeof(*(h_huff_tables[c][h]))) !=
+    }
+    for (int i = 0; i < max_huffman_count; ++i) {
+        for (int j = 0; j < HUFF_COUNT; ++j) {
+            if (cudaMallocHost(&h_huff_tables[i][j], sizeof(*(h_huff_tables[i][j]))) !=
                 cudaSuccess) {
                 return JPEGGPU_OUT_OF_HOST_MEMORY;
             }
@@ -36,12 +37,15 @@ jpeggpu_status reader::startup()
 
 void reader::cleanup()
 {
+    for (int i = 0; i < max_huffman_count; ++i) {
+        for (int j = 0; j < HUFF_COUNT; ++j) {
+            cudaFreeHost(h_huff_tables[i][j]);
+            h_huff_tables[i][j] = nullptr;
+        }
+    }
     for (int c = 0; c < max_comp_count; ++c) {
         cudaFreeHost(h_qtables[c]);
-
-        for (int h = 0; h < HUFF_COUNT; ++h) {
-            cudaFreeHost(h_huff_tables[c][h]);
-        }
+        h_qtables[c] = nullptr;
     }
 }
 
@@ -100,8 +104,9 @@ jpeggpu_status jpeggpu::reader::read_sof0()
     jpeg_stream.ss_x_max = 0;
     jpeg_stream.ss_y_max = 0;
     for (uint8_t c = 0; c < jpeg_stream.num_components; ++c) {
+        component& comp                = jpeg_stream.components[c];
         const uint8_t component_id     = read_uint8();
-        jpeg_stream.components[c].id   = component_id;
+        comp.id                        = component_id;
         const uint8_t sampling_factors = read_uint8();
         const int ss_x_c               = sampling_factors >> 4;
         if (ss_x_c < 1 && ss_x_c > 4) {
@@ -111,8 +116,8 @@ jpeggpu_status jpeggpu::reader::read_sof0()
             // fairly annoying to handle, and extremely uncommon
             return JPEGGPU_NOT_SUPPORTED;
         }
-        jpeg_stream.css.x[c] = ss_x_c;
-        const int ss_y_c     = sampling_factors & 0xf;
+        comp.ss_x        = ss_x_c;
+        const int ss_y_c = sampling_factors & 0xf;
         if (ss_y_c < 1 && ss_y_c > 4) {
             return JPEGGPU_INVALID_JPEG;
         }
@@ -120,16 +125,16 @@ jpeggpu_status jpeggpu::reader::read_sof0()
             // fairly annoying to handle, and extremely uncommon
             return JPEGGPU_NOT_SUPPORTED;
         }
-        jpeg_stream.css.y[c]                 = ss_y_c;
-        const uint8_t qi                     = read_uint8();
-        jpeg_stream.components[c].qtable_idx = qi;
+        comp.ss_y        = ss_y_c;
+        const uint8_t qi = read_uint8();
+        comp.qtable_idx  = qi;
         log("\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
             component_id,
-            jpeg_stream.css.x[c],
-            jpeg_stream.css.y[c],
+            comp.ss_x,
+            comp.ss_y,
             qi);
-        jpeg_stream.ss_x_max = std::max(jpeg_stream.ss_x_max, jpeg_stream.css.x[c]);
-        jpeg_stream.ss_y_max = std::max(jpeg_stream.ss_y_max, jpeg_stream.css.y[c]);
+        jpeg_stream.ss_x_max = std::max(jpeg_stream.ss_x_max, comp.ss_x);
+        jpeg_stream.ss_y_max = std::max(jpeg_stream.ss_y_max, comp.ss_y);
     }
 
     return JPEGGPU_SUCCESS;
@@ -504,45 +509,43 @@ jpeggpu_status jpeggpu::reader::read()
 
     // TODO check that all qtables are found
 
+    // TODO check that all huffman tables are found
+
     jpeg_stream.num_scans = reader_state.scan_idx;
 
-    for (int i = 0; i < jpeg_stream.num_components; ++i) {
-        jpeg_stream.sizes_x[i] =
-            get_size(jpeg_stream.size_x, jpeg_stream.css.x[i], jpeg_stream.ss_x_max);
-        jpeg_stream.sizes_y[i] =
-            get_size(jpeg_stream.size_y, jpeg_stream.css.y[i], jpeg_stream.ss_y_max);
+    jpeg_stream.num_data_units_in_mcu = 0;
+    jpeg_stream.total_data_size       = 0;
+    for (int c = 0; c < jpeg_stream.num_components; ++c) {
+        component& comp = jpeg_stream.components[c];
 
-        jpeg_stream.mcu_sizes_x[i] =
-            jpeg_stream.is_interleaved ? block_size * jpeg_stream.css.x[i] : block_size;
-        jpeg_stream.mcu_sizes_y[i] =
-            jpeg_stream.is_interleaved ? block_size * jpeg_stream.css.y[i] : block_size;
+        comp.size_x = get_size(jpeg_stream.size_x, comp.ss_x, jpeg_stream.ss_x_max);
+        comp.size_y = get_size(jpeg_stream.size_y, comp.ss_y, jpeg_stream.ss_y_max);
 
-        jpeg_stream.data_sizes_x[i] =
-            ceiling_div(
-                jpeg_stream.sizes_x[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_x[i])) *
-            jpeg_stream.mcu_sizes_x[i];
-        jpeg_stream.data_sizes_y[i] =
-            ceiling_div(
-                jpeg_stream.sizes_y[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_y[i])) *
-            jpeg_stream.mcu_sizes_y[i];
+        comp.mcu_size_x = jpeg_stream.is_interleaved ? block_size * comp.ss_x : block_size;
+        comp.mcu_size_y = jpeg_stream.is_interleaved ? block_size * comp.ss_y : block_size;
 
-        if (i == 0) {
-            jpeg_stream.num_mcus_x = ceiling_div(
-                jpeg_stream.data_sizes_x[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_x[i]));
-            jpeg_stream.num_mcus_y = ceiling_div(
-                jpeg_stream.data_sizes_y[i], static_cast<unsigned int>(jpeg_stream.mcu_sizes_y[i]));
+        comp.data_size_x =
+            ceiling_div(comp.size_x, static_cast<unsigned int>(comp.mcu_size_x)) * comp.mcu_size_x;
+        comp.data_size_y =
+            ceiling_div(comp.size_y, static_cast<unsigned int>(comp.mcu_size_y)) * comp.mcu_size_y;
+
+        // TODO assumption 3: assumes first component is not subsampled
+        if (c == 0) {
+            jpeg_stream.num_mcus_x =
+                ceiling_div(comp.data_size_x, static_cast<unsigned int>(comp.mcu_size_x));
+            jpeg_stream.num_mcus_y =
+                ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_y));
         } else {
             assert(
-                ceiling_div(
-                    jpeg_stream.data_sizes_x[i],
-                    static_cast<unsigned int>(jpeg_stream.mcu_sizes_x[i])) ==
+                ceiling_div(comp.data_size_x, static_cast<unsigned int>(comp.mcu_size_x)) ==
                 static_cast<unsigned int>(jpeg_stream.num_mcus_x));
             assert(
-                ceiling_div(
-                    jpeg_stream.data_sizes_y[i],
-                    static_cast<unsigned int>(jpeg_stream.mcu_sizes_y[i])) ==
+                ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_y)) ==
                 static_cast<unsigned int>(jpeg_stream.num_mcus_y));
         }
+
+        jpeg_stream.num_data_units_in_mcu += comp.ss_x * comp.ss_y;
+        jpeg_stream.total_data_size += comp.data_size_x * comp.data_size_y;
     }
 
     return JPEGGPU_SUCCESS;
@@ -557,12 +560,12 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
     // clear remaining state
     std::memset(&jpeg_stream, 0, sizeof(jpeg_stream));
     std::memset(&reader_state, 0, sizeof(reader_state));
-    // std::memset(segments, 0, max_num_segments * sizeof(segment));
     for (int c = 0; c < max_comp_count; ++c) {
         std::memset(h_qtables[c], 0, data_unit_size * sizeof(*(h_qtables[c])));
-
-        for (int h = 0; h < HUFF_COUNT; ++h) {
-            std::memset(h_huff_tables[c][h], 0, sizeof(*(h_huff_tables[c][h])));
+    }
+    for (int i = 0; i < max_huffman_count; ++i) {
+        for (int j = 0; j < HUFF_COUNT; ++j) {
+            std::memset(h_huff_tables[i][j], 0, sizeof(*(h_huff_tables[i][j])));
         }
     }
 }

@@ -23,5 +23,4 @@ jpeggpu 996.6 GB/s 7.537 device tmp 0 pinned tmp
 - Separate copy functions in API interface and make threaded benchmark.
 - Add subsamplings and color formats to convert function and interface
 - Add some test.
-- Can do some refactors and renames guided by TODOs.
 - Add thread-safe logging.

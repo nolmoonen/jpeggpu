@@ -11,7 +11,7 @@ namespace jpeggpu {
 ///
 /// \param[in] d_image_qdct Planar data, each 64 consecutive elements form one data unit.
 jpeggpu_status idct(
-    const reader& reader,
+    const jpeg_stream& info,
     int16_t* (&d_image_qdct)[max_comp_count],
     uint8_t* (&d_image)[max_comp_count],
     uint8_t* (&d_qtable)[max_comp_count],

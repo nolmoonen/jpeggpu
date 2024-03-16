@@ -169,7 +169,7 @@ __global__ void destuff_write3(
 //   why does it need to many kernels (to avoid sync)
 template <bool do_it>
 jpeggpu_status jpeggpu::destuff_scan(
-    reader& reader,
+    const jpeg_stream& info,
     segment_info* d_segment_infos,
     int* d_segment_indices,
     const uint8_t* d_image_data,
@@ -350,7 +350,7 @@ jpeggpu_status jpeggpu::destuff_scan(
 }
 
 template jpeggpu_status jpeggpu::destuff_scan<false>(
-    reader&,
+    const jpeg_stream&,
     segment_info*,
     int*,
     const uint8_t*,
@@ -359,7 +359,7 @@ template jpeggpu_status jpeggpu::destuff_scan<false>(
     stack_allocator&,
     cudaStream_t);
 template jpeggpu_status jpeggpu::destuff_scan<true>(
-    reader&,
+    const jpeg_stream&,
     segment_info*,
     int*,
     const uint8_t*,

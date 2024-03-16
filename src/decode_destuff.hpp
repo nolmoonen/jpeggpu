@@ -28,7 +28,7 @@ struct segment_info {
 /// \param[out] d_segment_indices For each data byte, the segment index.
 template<bool do_it>
 jpeggpu_status destuff_scan(
-    reader& reader,
+    const jpeg_stream& info,
     segment_info* d_segment_infos,
     int* d_segment_indices,
     const uint8_t* d_image_data,

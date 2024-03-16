@@ -72,26 +72,20 @@ struct interleaved_transform_functor {
 
 template <bool do_it>
 jpeggpu_status jpeggpu::decode_dc(
-    jpeggpu::reader& reader, // TODO pass only jpeg_stream?
-    int16_t* d_out,
-    stack_allocator& allocator,
-    cudaStream_t stream)
+    const jpeg_stream& info, int16_t* d_out, stack_allocator& allocator, cudaStream_t stream)
 {
-    // TODO this calculation only works for 4:4:4, 4:2:0, etc.
-    int off_in_mcu              = 0; // number of data units, only used for interleaved
-    int off_in_data             = 0; // number of data elements, only used for non-interleaved
-    const int data_units_in_mcu = reader.jpeg_stream.css.x[0] * reader.jpeg_stream.css.y[0] +
-                                  reader.jpeg_stream.num_components - 1;
+    // TODO assumption 3: this calculation only works for 4:4:4, 4:2:0, etc.?
+    int off_in_mcu  = 0; // number of data units, only used for interleaved
+    int off_in_data = 0; // number of data elements, only used for non-interleaved
 
-    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        const int data_units_in_mcu_component =
-            reader.jpeg_stream.css.x[c] * reader.jpeg_stream.css.y[c];
+    for (int c = 0; c < info.num_components; ++c) {
+        const int data_units_in_mcu_component = info.components[c].ss_x * info.components[c].ss_y;
 
         auto counting_iter          = thrust::make_counting_iterator(int{0});
         auto interleaved_index_iter = thrust::make_transform_iterator(
             counting_iter,
             interleaved_transform_functor(
-                data_units_in_mcu_component, off_in_mcu, data_units_in_mcu));
+                data_units_in_mcu_component, off_in_mcu, info.num_data_units_in_mcu));
         auto iter_interleaved = thrust::make_permutation_iterator(d_out, interleaved_index_iter);
 
         auto non_interleaved_index_iter =
@@ -102,18 +96,18 @@ jpeggpu_status jpeggpu::decode_dc(
         void* d_tmp_storage      = nullptr;
         size_t tmp_storage_bytes = 0;
 
-        const int num_data_units_component = reader.jpeg_stream.data_sizes_x[c] *
-                                             reader.jpeg_stream.data_sizes_y[c] / data_unit_size;
+        const int num_data_units_component =
+            info.components[c].data_size_x * info.components[c].data_size_y / data_unit_size;
 
-        if (reader.jpeg_stream.restart_interval != 0) {
+        if (info.restart_interval != 0) {
             auto counting_iter_key     = thrust::make_counting_iterator(int{0});
-            const int restart_interval = reader.jpeg_stream.restart_interval;
+            const int restart_interval = info.restart_interval;
             auto iter_key              = thrust::make_transform_iterator(
                 counting_iter_key,
                 interleaved_functor(restart_interval, data_units_in_mcu_component));
 
             const auto dispatch = [&]() -> cudaError_t {
-                if (reader.jpeg_stream.is_interleaved) {
+                if (info.is_interleaved) {
                     return cub::DeviceScan::InclusiveSumByKey(
                         d_tmp_storage,
                         tmp_storage_bytes,
@@ -143,7 +137,7 @@ jpeggpu_status jpeggpu::decode_dc(
             if (do_it) JPEGGPU_CHECK_CUDA(dispatch());
         } else {
             const auto dispatch = [&]() -> cudaError_t {
-                if (reader.jpeg_stream.is_interleaved) {
+                if (info.is_interleaved) {
                     return cub::DeviceScan::InclusiveSum(
                         d_tmp_storage,
                         tmp_storage_bytes,
@@ -170,13 +164,13 @@ jpeggpu_status jpeggpu::decode_dc(
         }
 
         off_in_mcu += data_units_in_mcu_component;
-        off_in_data += reader.jpeg_stream.data_sizes_x[c] * reader.jpeg_stream.data_sizes_y[c];
+        off_in_data += info.components[c].data_size_x * info.components[c].data_size_y;
     }
 
     return JPEGGPU_SUCCESS;
 }
 
 template jpeggpu_status jpeggpu::decode_dc<false>(
-    jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);
+    const jpeg_stream&, int16_t*, stack_allocator&, cudaStream_t);
 template jpeggpu_status jpeggpu::decode_dc<true>(
-    jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);
+    const jpeg_stream&, int16_t*, stack_allocator&, cudaStream_t);

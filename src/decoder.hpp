@@ -40,6 +40,7 @@ struct decoder {
     struct reader reader;
 
     uint8_t* d_qtables[max_comp_count];
+    huffman_table* d_huff_tables[max_huffman_count][HUFF_COUNT];
 
     // output of decoding, quantized and cosine-transformed image data
     int16_t* d_image_qdct[max_comp_count];

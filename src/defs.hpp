@@ -38,8 +38,10 @@ namespace jpeggpu {
 /// TODO more descriptive name?
 constexpr int block_size     = 8;
 constexpr int data_unit_size = 64;
+
+constexpr int max_huffman_count = 2;
 /// as defined by jpeg spec
-constexpr int max_comp_count = JPEGGPU_MAX_COMP;
+constexpr int max_comp_count    = JPEGGPU_MAX_COMP;
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
