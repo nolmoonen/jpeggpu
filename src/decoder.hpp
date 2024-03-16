@@ -37,8 +37,6 @@ struct decoder {
         size_t& tmp_size,
         cudaStream_t stream);
 
-    struct logger logger;
-
     struct reader reader;
 
     uint8_t* d_qtables[max_comp_count];

@@ -92,8 +92,7 @@ jpeggpu_status jpeggpu::reader::read_sof0()
     }
     jpeg_stream.num_components = num_img_components;
 
-    (*logger)(
-        "\tsize_x: %" PRIu16 ", size_y: %" PRIu16 ", num_components: %" PRIu8 "\n",
+    log("\tsize_x: %" PRIu16 ", size_y: %" PRIu16 ", num_components: %" PRIu8 "\n",
         jpeg_stream.size_x,
         jpeg_stream.size_y,
         jpeg_stream.num_components);
@@ -124,8 +123,7 @@ jpeggpu_status jpeggpu::reader::read_sof0()
         jpeg_stream.css.y[c]                 = ss_y_c;
         const uint8_t qi                     = read_uint8();
         jpeg_stream.components[c].qtable_idx = qi;
-        (*logger)(
-            "\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
+        log("\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
             component_id,
             jpeg_stream.css.x[c],
             jpeg_stream.css.y[c],
@@ -279,8 +277,7 @@ jpeggpu_status jpeggpu::reader::read_sos()
             }
         }
         if (comp_idx == -1) {
-            (*logger)(
-                "scan component %" PRIu8 " does not match any frame components (" PRIu8 " " PRIu8
+            log("scan component %" PRIu8 " does not match any frame components (" PRIu8 " " PRIu8
                 " " PRIu8 " " PRIu8 ")\n",
                 selector,
                 jpeg_stream.components[0].id,
@@ -296,7 +293,7 @@ jpeggpu_status jpeggpu::reader::read_sos()
         if (id_dc > 3 || id_ac > 3) {
             return JPEGGPU_INVALID_JPEG;
         }
-        (*logger)("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
+        log("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
         // TODO check if these Huffman indices are found
         jpeg_stream.components[comp_idx].dc_idx = id_dc;
         jpeg_stream.components[comp_idx].ac_idx = id_ac;
@@ -352,8 +349,8 @@ jpeggpu_status jpeggpu::reader::read_sos()
             break;
         }
 
-        (*logger)("marker %s\n", jpeggpu::get_marker_string(marker));
-        (*logger)("unexpected\n");
+        log("marker %s\n", jpeggpu::get_marker_string(marker));
+        log("unexpected\n");
         return JPEGGPU_INVALID_JPEG;
     } while (image < image_end);
     scan.begin = scan_begin;
@@ -422,7 +419,7 @@ jpeggpu_status jpeggpu::reader::read_dri()
         return JPEGGPU_NOT_SUPPORTED;
     }
     jpeg_stream.restart_interval = rsti;
-    (*logger)("\trestart_interval: %" PRIu16 "\n", jpeg_stream.restart_interval);
+    log("\trestart_interval: %" PRIu16 "\n", jpeg_stream.restart_interval);
 
     return JPEGGPU_SUCCESS;
 }
@@ -438,7 +435,7 @@ jpeggpu_status jpeggpu::reader::skip_segment()
         return JPEGGPU_INVALID_JPEG;
     }
 
-    (*logger)("\twarning: skipping this segment\n");
+    log("\twarning: skipping this segment\n");
 
     image += length;
     return JPEGGPU_SUCCESS;
@@ -456,7 +453,7 @@ jpeggpu_status jpeggpu::reader::read()
 {
     uint8_t marker_soi{};
     JPEGGPU_CHECK_STATUS(read_marker(marker_soi));
-    (*logger)("marker %s\n", jpeggpu::get_marker_string(marker_soi));
+    log("marker %s\n", jpeggpu::get_marker_string(marker_soi));
     if (marker_soi != jpeggpu::MARKER_SOI) {
         return JPEGGPU_INVALID_JPEG;
     }
@@ -464,7 +461,7 @@ jpeggpu_status jpeggpu::reader::read()
     uint8_t marker{};
     do {
         JPEGGPU_CHECK_STATUS(read_marker(marker));
-        (*logger)("marker %s\n", get_marker_string(marker));
+        log("marker %s\n", get_marker_string(marker));
         switch (marker) {
         case jpeggpu::MARKER_SOF0:
             read_sof0();
@@ -481,7 +478,7 @@ jpeggpu_status jpeggpu::reader::read()
         case jpeggpu::MARKER_SOF13:
         case jpeggpu::MARKER_SOF14:
         case jpeggpu::MARKER_SOF15:
-            (*logger)("unsupported JPEG type %s\n", get_marker_string(marker));
+            log("unsupported JPEG type %s\n", get_marker_string(marker));
             return JPEGGPU_NOT_SUPPORTED;
         case jpeggpu::MARKER_DHT:
             read_dht();
@@ -551,12 +548,11 @@ jpeggpu_status jpeggpu::reader::read()
     return JPEGGPU_SUCCESS;
 }
 
-void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end, struct logger* logger)
+void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
 {
     this->image       = image;
     this->image_begin = image;
     this->image_end   = image_end;
-    this->logger      = logger;
 
     // clear remaining state
     std::memset(&jpeg_stream, 0, sizeof(jpeg_stream));

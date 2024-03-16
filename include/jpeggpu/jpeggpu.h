@@ -29,8 +29,8 @@ const char* jpeggpu_get_status_string(enum jpeggpu_status stat);
 
 enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder);
 
-/// \brief Toggle logging. It is off by default.
-enum jpeggpu_status jpeggpu_toggle_logging(jpeggpu_decoder_t decoder);
+/// \brief Set whether to do logging. It is off by default.
+enum jpeggpu_status jpeggpu_set_logging(jpeggpu_decoder_t decoder, int do_logging);
 
 enum jpeggpu_color_format {
     JPEGGPU_GRAY, /// grayscale

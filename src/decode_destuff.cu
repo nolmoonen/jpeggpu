@@ -197,13 +197,13 @@ jpeggpu_status jpeggpu::destuff_scan(
         // write `d_offset_data` and `d_offset_segment`
         destuff_categorize<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
             d_image_data, stuffed_scan_size, d_offset_data, d_offset_segment);
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
     { // scan `d_offset_data`
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
-        CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
             d_tmp_storage,
             tmp_storage_size,
             d_offset_data,
@@ -212,7 +212,7 @@ jpeggpu_status jpeggpu::destuff_scan(
             stream));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
         if (do_it) {
-            CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
                 d_tmp_storage,
                 tmp_storage_size,
                 d_offset_data,
@@ -224,7 +224,7 @@ jpeggpu_status jpeggpu::destuff_scan(
     { // scan `d_offset_segment`
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
-        CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
             d_tmp_storage,
             tmp_storage_size,
             d_offset_segment,
@@ -233,7 +233,7 @@ jpeggpu_status jpeggpu::destuff_scan(
             stream));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
         if (do_it) {
-            CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
                 d_tmp_storage,
                 tmp_storage_size,
                 d_offset_segment,
@@ -252,12 +252,12 @@ jpeggpu_status jpeggpu::destuff_scan(
             d_offset_segment,
             d_image_data_destuffed,
             d_segment_infos);
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
     if (do_it && jpeggpu::is_debug) {
         std::vector<segment_info> h_segment_infos(scan.num_segments);
-        CHECK_CUDA(cudaMemcpy(
+        JPEGGPU_CHECK_CUDA(cudaMemcpy(
             h_segment_infos.data(),
             d_segment_infos,
             scan.num_segments * sizeof(segment_info),
@@ -265,8 +265,7 @@ jpeggpu_status jpeggpu::destuff_scan(
         int num_subsequences_gpu = 0;
         for (int i = 0; i < scan.num_segments; ++i) {
             if (jpeggpu::is_debug && h_segment_infos[i].end <= h_segment_infos[i].begin) {
-                (*reader.logger)(
-                    "segment %d begin: %d, end: %d\n",
+                log("segment %d begin: %d, end: %d\n",
                     i,
                     h_segment_infos[i].begin,
                     h_segment_infos[i].end);
@@ -295,13 +294,13 @@ jpeggpu_status jpeggpu::destuff_scan(
             d_image_data_destuffed,
             d_segment_infos,
             d_offset_subsequence);
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
     { // scan `d_offset_subsequence`
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
-        CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
             d_tmp_storage,
             tmp_storage_size,
             d_offset_subsequence,
@@ -310,7 +309,7 @@ jpeggpu_status jpeggpu::destuff_scan(
             stream));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
         if (do_it) {
-            CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
                 d_tmp_storage,
                 tmp_storage_size,
                 d_offset_subsequence,
@@ -330,20 +329,19 @@ jpeggpu_status jpeggpu::destuff_scan(
             d_segment_infos,
             d_offset_subsequence,
             d_segment_indices);
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
     if (do_it && jpeggpu::is_debug) {
         std::vector<int> h_segment_indices(scan.num_subsequences);
-        CHECK_CUDA(cudaMemcpy(
+        JPEGGPU_CHECK_CUDA(cudaMemcpy(
             h_segment_indices.data(),
             d_segment_indices,
             scan.num_subsequences * sizeof(int),
             cudaMemcpyDeviceToHost));
         for (int i = 0; i < scan.num_subsequences; ++i) {
             if (h_segment_indices[i] < 0 || h_segment_indices[i] >= scan.num_segments) {
-                (*reader.logger)(
-                    "subquence %d invalid segment index %d\n", i, h_segment_indices[i]);
+                log("subquence %d invalid segment index %d\n", i, h_segment_indices[i]);
             }
         }
     }

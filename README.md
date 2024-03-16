@@ -8,7 +8,4 @@
 - Add some test.
 - Add documentation in this file: what it does, references to papers, some benchmark results
 - Can do some refactors and renames guided by TODOs.
-- Improve logger, TODO:
-  - Log all CUDA errors through the logger.
-  - Make it so logger does not need to be passed around.
-  - Log allocation sizes.
+- Should be thread-safe, except logging.

@@ -325,12 +325,7 @@ __device__ component calc_component(int ssx, int ssy, int c, int num_components)
     }
 
     assert(num_components > 3);
-
-    if (c == num_luma_data_units + 2) {
-        return component::k;
-    }
-
-    assert(false);
+    return component::k;
 }
 
 struct const_state {
@@ -653,7 +648,6 @@ __global__ void assign_sinfo_n(
 
 template <bool do_it>
 jpeggpu_status jpeggpu::decode_scan(
-    jpeggpu::logger& logger,
     jpeggpu::reader& reader,
     uint8_t* d_scan_destuffed,
     segment_info* d_segment_infos,
@@ -669,25 +663,25 @@ jpeggpu_status jpeggpu::decode_scan(
     jpeggpu::huffman_table* d_huff;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_huff, 4 * sizeof(jpeggpu::huffman_table)));
     if (do_it) {
-        CHECK_CUDA(cudaMemcpyAsync(
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_huff + 0,
             reader.h_huff_tables[0][jpeggpu::HUFF_DC],
             sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_DC]),
             cudaMemcpyHostToDevice,
             stream));
-        CHECK_CUDA(cudaMemcpyAsync(
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_huff + 1,
             reader.h_huff_tables[0][jpeggpu::HUFF_AC],
             sizeof(*reader.h_huff_tables[0][jpeggpu::HUFF_AC]),
             cudaMemcpyHostToDevice,
             stream));
-        CHECK_CUDA(cudaMemcpyAsync(
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_huff + 2,
             reader.h_huff_tables[1][jpeggpu::HUFF_DC],
             sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_DC]),
             cudaMemcpyHostToDevice,
             stream));
-        CHECK_CUDA(cudaMemcpyAsync(
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_huff + 3,
             reader.h_huff_tables[1][jpeggpu::HUFF_AC],
             sizeof(*reader.h_huff_tables[1][jpeggpu::HUFF_AC]),
@@ -700,7 +694,7 @@ jpeggpu_status jpeggpu::decode_scan(
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
     if (do_it) {
-        logger("num_subsequences: %d num_sequences: %d\n", num_subsequences, num_sequences);
+        log("num_subsequences: %d num_sequences: %d\n", num_subsequences, num_sequences);
     }
 
     // alg-1:01
@@ -737,7 +731,7 @@ jpeggpu_status jpeggpu::decode_scan(
         if (do_it) {
             sync_intra_sequence<block_size><<<num_sequences, block_size, 0, stream>>>(
                 d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
-            CHECK_CUDA(cudaGetLastError());
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
         }
 
         if (num_sequences > 1) {
@@ -747,7 +741,7 @@ jpeggpu_status jpeggpu::decode_scan(
             JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
                 &d_sequence_not_synced, (num_sequences - 1) * sizeof(uint8_t)));
             if (do_it) {
-                CHECK_CUDA(cudaMemsetAsync( // all are initialized to "not synced"
+                JPEGGPU_CHECK_CUDA(cudaMemsetAsync( // all are initialized to "not synced"
                     d_sequence_not_synced,
                     static_cast<uint8_t>(true),
                     (num_sequences - 1) * sizeof(uint8_t),
@@ -759,7 +753,7 @@ jpeggpu_status jpeggpu::decode_scan(
 
             void* d_tmp_storage      = nullptr;
             size_t tmp_storage_bytes = 0;
-            CHECK_CUDA(cub::DeviceReduce::Sum(
+            JPEGGPU_CHECK_CUDA(cub::DeviceReduce::Sum(
                 d_tmp_storage,
                 tmp_storage_bytes,
                 d_sequence_not_synced,
@@ -784,12 +778,12 @@ jpeggpu_status jpeggpu::decode_scan(
                             num_sequences,
                             d_segment_infos,
                             d_segment_indices);
-                    CHECK_CUDA(cudaGetLastError());
-                    logger("inter sequence sync done\n");
+                    JPEGGPU_CHECK_CUDA(cudaGetLastError());
+                    log("inter sequence sync done\n");
                 }
 
                 if (do_it) {
-                    CHECK_CUDA(cub::DeviceReduce::Sum(
+                    JPEGGPU_CHECK_CUDA(cub::DeviceReduce::Sum(
                         d_tmp_storage,
                         tmp_storage_bytes,
                         d_sequence_not_synced,
@@ -797,12 +791,12 @@ jpeggpu_status jpeggpu::decode_scan(
                         num_sequences - 1,
                         stream));
                     // TODO this requires synchronization, try kernel that uses atomics to perform inter sequence sync
-                    CHECK_CUDA(cudaMemcpy(
+                    JPEGGPU_CHECK_CUDA(cudaMemcpy(
                         &h_num_unsynced_sequence,
                         d_num_unsynced_sequence,
                         sizeof(int),
                         cudaMemcpyDeviceToHost));
-                    logger("unsynced: %d\n", h_num_unsynced_sequence);
+                    log("unsynced: %d\n", h_num_unsynced_sequence);
                 }
             } while (!do_it && h_num_unsynced_sequence);
         }
@@ -816,14 +810,14 @@ jpeggpu_status jpeggpu::decode_scan(
             allocator.reserve<do_it>(&d_reduce_out, num_subsequences * sizeof(subsequence_info)));
         if (do_it) {
             // TODO debug to satisfy initcheck
-            CHECK_CUDA(cudaMemsetAsync(
+            JPEGGPU_CHECK_CUDA(cudaMemsetAsync(
                 d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
         }
 
         const subsequence_info init_value{0, 0, 0, 0};
         void* d_tmp_storage      = nullptr;
         size_t tmp_storage_bytes = 0;
-        CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
+        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
             d_tmp_storage,
             tmp_storage_bytes,
             d_segment_indices, // d_keys_in
@@ -838,11 +832,11 @@ jpeggpu_status jpeggpu::decode_scan(
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes));
         if (do_it) {
             // TODO debug to satisfy initcheck
-            CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
+            JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
         }
 
         if (do_it) {
-            CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
+            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
                 d_tmp_storage,
                 tmp_storage_bytes,
                 d_segment_indices, // d_keys_in
@@ -861,7 +855,7 @@ jpeggpu_status jpeggpu::decode_scan(
         if (do_it) {
             assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
                 num_subsequences, d_s_info, d_reduce_out);
-            CHECK_CUDA(cudaGetLastError());
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
         }
     }
 
@@ -869,14 +863,13 @@ jpeggpu_status jpeggpu::decode_scan(
         // alg-1:09-15
         decode_write<<<num_sequences, block_size, 0, stream>>>(
             d_out, d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
     return JPEGGPU_SUCCESS;
 }
 
 template jpeggpu_status jpeggpu::decode_scan<false>(
-    jpeggpu::logger&,
     jpeggpu::reader&,
     uint8_t*,
     segment_info*,
@@ -887,7 +880,6 @@ template jpeggpu_status jpeggpu::decode_scan<false>(
     cudaStream_t);
 
 template jpeggpu_status jpeggpu::decode_scan<true>(
-    jpeggpu::logger&,
     jpeggpu::reader&,
     uint8_t*,
     segment_info*,

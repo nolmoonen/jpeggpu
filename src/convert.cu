@@ -255,7 +255,7 @@ jpeggpu_status jpeggpu::convert(
         out_color_fmt,
         out_pixel_fmt,
         out_css);
-    CHECK_CUDA(cudaGetLastError());
+    JPEGGPU_CHECK_CUDA(cudaGetLastError());
 
     return JPEGGPU_SUCCESS;
 }

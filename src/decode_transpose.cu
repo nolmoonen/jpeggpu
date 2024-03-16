@@ -190,7 +190,6 @@ __global__ void transpose_non_interleaved(
 } // namespace
 
 jpeggpu_status jpeggpu::decode_transpose(
-    logger& logger,
     jpeggpu::reader& reader,
     int16_t* d_out,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
@@ -227,7 +226,7 @@ jpeggpu_status jpeggpu::decode_transpose(
             make_int2(reader.jpeg_stream.css.x[1], reader.jpeg_stream.css.y[1]),
             make_int2(reader.jpeg_stream.css.x[2], reader.jpeg_stream.css.y[2]),
             make_int2(reader.jpeg_stream.css.x[3], reader.jpeg_stream.css.y[3]));
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     } else {
         transpose_non_interleaved<<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(
             d_out,
@@ -240,7 +239,7 @@ jpeggpu_status jpeggpu::decode_transpose(
             make_int2(reader.jpeg_stream.data_sizes_x[1], reader.jpeg_stream.data_sizes_y[1]),
             make_int2(reader.jpeg_stream.data_sizes_x[2], reader.jpeg_stream.data_sizes_y[2]),
             make_int2(reader.jpeg_stream.data_sizes_x[3], reader.jpeg_stream.data_sizes_y[3]));
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
     return JPEGGPU_SUCCESS;

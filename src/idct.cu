@@ -199,7 +199,7 @@ jpeggpu_status jpeggpu::idct(
         const dim3 kernel_block_size(block_size, num_data_units_x_block, num_data_units_y_block);
         idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
             d_image_qdct[c], d_image[c], info.data_sizes_x[c], info.data_sizes_y[c], d_qtable[c]);
-        CHECK_CUDA(cudaGetLastError());
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
     return JPEGGPU_SUCCESS;
 }

@@ -15,15 +15,16 @@ message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 
 set(SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_library(jpeggpu STATIC
+    "${SOURCE_DIR}/convert.cu"
     "${SOURCE_DIR}/jpeggpu.cpp"
-    "${SOURCE_DIR}/reader.cpp"
-    "${SOURCE_DIR}/idct.cu"
+    "${SOURCE_DIR}/decode_dc.cu"
+    "${SOURCE_DIR}/decode_destuff.cu"
     "${SOURCE_DIR}/decode_huffman.cu"
     "${SOURCE_DIR}/decode_transpose.cu"
-    "${SOURCE_DIR}/decode_destuff.cu"
-    "${SOURCE_DIR}/convert.cu"
-    "${SOURCE_DIR}/decode_dc.cu"
-    "${SOURCE_DIR}/decoder.cpp")
+    "${SOURCE_DIR}/decoder.cpp"
+    "${SOURCE_DIR}/idct.cu"
+    "${SOURCE_DIR}/logger.cpp"
+    "${SOURCE_DIR}/reader.cpp")
 target_include_directories(jpeggpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(jpeggpu PUBLIC CUDA::cudart_static)
 

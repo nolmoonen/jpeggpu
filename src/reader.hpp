@@ -69,7 +69,7 @@ struct reader {
 
     jpeggpu_status read();
 
-    void reset(const uint8_t* image, const uint8_t* image_end, struct logger* logger);
+    void reset(const uint8_t* image, const uint8_t* image_end);
 
     /// cleared with memset
     struct jpeg_stream {
@@ -111,8 +111,6 @@ struct reader {
     struct reader_state {
         int scan_idx; ///< Index of next scan.
     } reader_state;
-
-    struct logger* logger;
 
     // TODO move into reader_state
     const uint8_t* image; ///< Modifiable pointer to parsing head.

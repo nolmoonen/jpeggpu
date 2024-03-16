@@ -16,7 +16,6 @@ namespace jpeggpu {
 ///   in planar format.
 template<bool do_it>
 jpeggpu_status decode_scan(
-    logger& logger,
     reader& reader,
     uint8_t* d_scan_destuffed,
     segment_info* d_segment_infos,

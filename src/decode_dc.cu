@@ -72,7 +72,6 @@ struct interleaved_transform_functor {
 
 template <bool do_it>
 jpeggpu_status jpeggpu::decode_dc(
-    logger& logger,
     jpeggpu::reader& reader, // TODO pass only jpeg_stream?
     int16_t* d_out,
     stack_allocator& allocator,
@@ -113,9 +112,9 @@ jpeggpu_status jpeggpu::decode_dc(
                 counting_iter_key,
                 interleaved_functor(restart_interval, data_units_in_mcu_component));
 
-            const auto dispatch = [&]() {
+            const auto dispatch = [&]() -> cudaError_t {
                 if (reader.jpeg_stream.is_interleaved) {
-                    CHECK_CUDA(cub::DeviceScan::InclusiveSumByKey(
+                    return cub::DeviceScan::InclusiveSumByKey(
                         d_tmp_storage,
                         tmp_storage_bytes,
                         iter_key,
@@ -123,9 +122,9 @@ jpeggpu_status jpeggpu::decode_dc(
                         iter_interleaved,
                         num_data_units_component,
                         cub::Equality{},
-                        stream));
+                        stream);
                 } else {
-                    CHECK_CUDA(cub::DeviceScan::InclusiveSumByKey(
+                    return cub::DeviceScan::InclusiveSumByKey(
                         d_tmp_storage,
                         tmp_storage_bytes,
                         iter_key,
@@ -133,41 +132,41 @@ jpeggpu_status jpeggpu::decode_dc(
                         iter_non_interleaved,
                         num_data_units_component,
                         cub::Equality{},
-                        stream));
+                        stream);
                 }
             };
 
-            dispatch();
+            JPEGGPU_CHECK_CUDA(dispatch());
 
             allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes);
 
-            if (do_it) dispatch();
+            if (do_it) JPEGGPU_CHECK_CUDA(dispatch());
         } else {
-            const auto dispatch = [&]() {
+            const auto dispatch = [&]() -> cudaError_t {
                 if (reader.jpeg_stream.is_interleaved) {
-                    CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+                    return cub::DeviceScan::InclusiveSum(
                         d_tmp_storage,
                         tmp_storage_bytes,
                         iter_interleaved,
                         iter_interleaved,
                         num_data_units_component,
-                        stream));
+                        stream);
                 } else {
-                    CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+                    return cub::DeviceScan::InclusiveSum(
                         d_tmp_storage,
                         tmp_storage_bytes,
                         iter_non_interleaved,
                         iter_non_interleaved,
                         num_data_units_component,
-                        stream));
+                        stream);
                 }
             };
 
-            dispatch();
+            JPEGGPU_CHECK_CUDA(dispatch());
 
             allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes);
 
-            if (do_it) dispatch();
+            if (do_it) JPEGGPU_CHECK_CUDA(dispatch());
         }
 
         off_in_mcu += data_units_in_mcu_component;
@@ -178,6 +177,6 @@ jpeggpu_status jpeggpu::decode_dc(
 }
 
 template jpeggpu_status jpeggpu::decode_dc<false>(
-    logger&, jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);
+    jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);
 template jpeggpu_status jpeggpu::decode_dc<true>(
-    logger&, jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);
+    jpeggpu::reader&, int16_t*, stack_allocator&, cudaStream_t);

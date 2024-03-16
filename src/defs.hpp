@@ -1,8 +1,11 @@
 #ifndef JPEGGPU_DEFS_HPP_
 #define JPEGGPU_DEFS_HPP_
 
-#include <cuda_runtime.h>
+#include "logger.hpp"
+
 #include <jpeggpu/jpeggpu.h>
+
+#include <cuda_runtime.h>
 
 #include <array>
 #include <cstdio>
@@ -15,14 +18,12 @@
 
 namespace jpeggpu {
 
-// FIXME prepend with JPEGGPU_ ?
-#define CHECK_CUDA(call)                                                                           \
+#define JPEGGPU_CHECK_CUDA(call)                                                                   \
     do {                                                                                           \
         cudaError_t err = call;                                                                    \
         if (err != cudaSuccess) {                                                                  \
-            std::cerr << "CUDA error \"" << cudaGetErrorString(err) << "\" at: " __FILE__ ":"      \
-                      << __LINE__ << "\n";                                                         \
-            std::exit(EXIT_FAILURE);                                                               \
+            log("CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__);     \
+            return JPEGGPU_INTERNAL_ERROR;                                                         \
         }                                                                                          \
     } while (0)
 

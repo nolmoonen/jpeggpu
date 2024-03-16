@@ -6,23 +6,9 @@
 
 namespace jpeggpu {
 
-struct logger {
+void log(const char* t_format, ...);
 
-    // TODO improve semantics for pointer types,
-    //   how to make it accessible from everywhere
-    void operator()(const char* t_format, ...)
-    {
-        if (!do_logging) {
-            return;
-        }
-        va_list argptr;
-        va_start(argptr, t_format);
-        vprintf(t_format, argptr);
-        va_end(argptr);
-    }
-
-    bool do_logging;
-};
+void set_logging(bool do_logging);
 
 } // namespace jpeggpu
 

@@ -5,7 +5,6 @@
 #include "decode_transpose.hpp"
 #include "defs.hpp"
 #include "idct.hpp"
-#include "idct_cpu.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
 
@@ -46,7 +45,7 @@ using namespace jpeggpu;
 jpeggpu_status jpeggpu::decoder::init()
 {
     for (int c = 0; c < max_comp_count; ++c) {
-        CHECK_CUDA(cudaMalloc(&d_qtables[c], sizeof(uint8_t) * data_unit_size));
+        JPEGGPU_CHECK_CUDA(cudaMalloc(&d_qtables[c], sizeof(uint8_t) * data_unit_size));
     }
 
     jpeggpu_status stat = JPEGGPU_SUCCESS;
@@ -54,7 +53,6 @@ jpeggpu_status jpeggpu::decoder::init()
         return stat;
     }
 
-    logger.do_logging = false;
     new (&allocator.stack) std::vector<jpeggpu::allocation>();
 
     return JPEGGPU_SUCCESS;
@@ -73,7 +71,7 @@ void jpeggpu::decoder::cleanup()
 jpeggpu_status jpeggpu::decoder::parse_header(
     jpeggpu_img_info& img_info, const uint8_t* data, size_t size)
 {
-    reader.reset(data, data + size, &logger);
+    reader.reset(data, data + size);
     jpeggpu_status stat = reader.read();
     if (stat != JPEGGPU_SUCCESS) {
         return stat;
@@ -147,7 +145,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
 
     // TODO put in separate API function
     if (do_it) {
-        CHECK_CUDA(cudaMemcpyAsync(
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_image_data, reader.image_begin, file_size, cudaMemcpyHostToDevice, stream));
     }
 
@@ -160,7 +158,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
     if (do_it) {
         // initialize to zero, since only non-zeros are written
-        CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
+        JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
     }
 
     if (info.is_interleaved) {
@@ -189,7 +187,6 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
             stream));
 
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
-            logger,
             reader,
             d_scan_destuffed,
             d_segment_infos,
@@ -227,7 +224,6 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
                 stream));
 
             JPEGGPU_CHECK_STAT(decode_scan<do_it>(
-                logger,
                 reader,
                 d_scan_destuffed,
                 d_segment_infos,
@@ -243,15 +239,15 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
     }
 
     // data is now as it appears in the encoded stream: one data unit at a time, possibly interleaved
-    decode_dc<do_it>(logger, reader, d_out, allocator, stream);
+    decode_dc<do_it>(reader, d_out, allocator, stream);
     if (do_it) {
         // data is not in image order
-        decode_transpose(logger, reader, d_out, d_image_qdct, stream);
+        decode_transpose(reader, d_out, d_image_qdct, stream);
     }
 
     if (do_it) {
         for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-            CHECK_CUDA(cudaMemcpyAsync(
+            JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
                 d_qtables[c],
                 reader.h_qtables[reader.jpeg_stream.components[c].qtable_idx],
                 sizeof(*reader.h_qtables[reader.jpeg_stream.components[c].qtable_idx]),

@@ -1,5 +1,7 @@
 #include "decoder.hpp"
+#include "logger.hpp"
 #include "marker.hpp"
+
 #include <jpeggpu/jpeggpu.h>
 
 #include <array>
@@ -10,7 +12,6 @@
 #include <fstream>
 #include <iostream>
 #include <stdint.h>
-#include <stdio.h> // only for DBG_PRINT
 #include <type_traits>
 #include <vector>
 
@@ -46,13 +47,13 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
     return (*decoder)->decoder.init();
 }
 
-enum jpeggpu_status jpeggpu_toggle_logging(jpeggpu_decoder_t decoder)
+enum jpeggpu_status jpeggpu_set_logging(jpeggpu_decoder_t decoder, int do_logging)
 {
     if (!decoder) {
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    decoder->decoder.logger.do_logging = !decoder->decoder.logger.do_logging;
+    jpeggpu::set_logging(do_logging);
 
     return JPEGGPU_SUCCESS;
 }
