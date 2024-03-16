@@ -49,8 +49,9 @@ enum jpeggpu_pixel_format {
 };
 
 /// \brief Subsampling for planes beyond the first plane.
+///   Note that this is not the same as it is defined in the JPEG header.
 struct jpeggpu_subsampling {
-    // ss / ss_max, values in [1, 4]
+    // ss_max / ss_max, values in [1, 4]
     int x[JPEGGPU_MAX_COMP];
     int y[JPEGGPU_MAX_COMP];
 };

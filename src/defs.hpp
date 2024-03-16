@@ -59,8 +59,7 @@ __device__ constexpr int order_natural[64 + 16] = {
     63, 63, 63, 63, 63, 63, 63, 63};
 // clang-format on
 
-// TODO make this non-constexpr so it does not get compiled out, make it a hidden toggle
-constexpr bool is_debug = true;
+constexpr bool is_debug = false;
 
 } // namespace jpeggpu
 

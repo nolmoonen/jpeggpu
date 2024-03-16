@@ -151,8 +151,6 @@ void bench_nvjpeg(char* file_data, size_t file_size, cudaStream_t stream)
             nvjpeg_decode_params,
             jpeg_stream));
 
-        CHECK_CUDA(cudaStreamSynchronize(stream));
-
         CHECK_NVJPEG(nvjpegDecodeJpegTransferToDevice(
             nvjpeg_handle, nvjpeg_decoder, nvjpeg_decoupled_state, jpeg_stream, stream));
 
@@ -163,18 +161,19 @@ void bench_nvjpeg(char* file_data, size_t file_size, cudaStream_t stream)
     for (int i = 0; i < num_warmup_iter; ++i) {
         run_iter();
     }
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 
     const std::chrono::high_resolution_clock::time_point t0 =
         std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_iter; ++i) {
         run_iter();
     }
+    CHECK_CUDA(cudaStreamSynchronize(stream));
     const std::chrono::high_resolution_clock::time_point t1 =
         std::chrono::high_resolution_clock::now();
-    const double elapsed = std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count();
-
-    const size_t total_bytes = image_bytes + file_size;
-    std::cout << std::setprecision(2) << (total_bytes >> 20) / elapsed << " MiB/s "
+    const double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const size_t total_bytes = num_iter * (image_bytes + file_size);
+    std::cout << std::setprecision(4) << total_bytes / 1e3 / elapsed << " GB/s "
               << mem_device / static_cast<double>(image_bytes) << " device tmp "
               << mem_pinned / static_cast<double>(image_bytes) << " pinned tmp\n";
 
@@ -207,10 +206,14 @@ void bench_jpeggpu(char* file_data, size_t file_size, cudaStream_t stream)
     size_t image_bytes = 0;
     jpeggpu_img img;
     for (int c = 0; c < 3; ++c) {
-        // TODO allocate according to subsampling
-        const size_t plane_bytes = img_info.size_x * img_info.size_y;
+        int ss_x   = img_info.subsampling.x[c];
+        int size_x = (img_info.size_x + ss_x - 1) / ss_x;
+        int ss_y   = img_info.subsampling.y[c];
+        int size_y = (img_info.size_y + ss_y - 1) / ss_y;
+
+        const size_t plane_bytes = size_x * size_y;
         CHECK_CUDA(cudaMalloc((void**)&img.image[c], plane_bytes));
-        img.pitch[0] = img_info.size_x;
+        img.pitch[0] = size_x;
         image_bytes += plane_bytes;
     }
 
@@ -255,18 +258,19 @@ void bench_jpeggpu(char* file_data, size_t file_size, cudaStream_t stream)
     for (int i = 0; i < num_warmup_iter; ++i) {
         run_iter();
     }
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 
     const std::chrono::high_resolution_clock::time_point t0 =
         std::chrono::high_resolution_clock::now();
     for (int i = 0; i < num_iter; ++i) {
         run_iter();
     }
+    CHECK_CUDA(cudaStreamSynchronize(stream));
     const std::chrono::high_resolution_clock::time_point t1 =
         std::chrono::high_resolution_clock::now();
-    const double elapsed = std::chrono::duration_cast<std::chrono::seconds>(t1 - t0).count();
-
-    const size_t total_bytes = image_bytes + file_size;
-    std::cout << std::setprecision(2) << (total_bytes >> 20) / elapsed << " MiB/s "
+    const double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const size_t total_bytes = num_iter * (image_bytes + file_size);
+    std::cout << std::setprecision(4) << total_bytes / 1e3 / elapsed << " GB/s "
               << tmp_size / static_cast<double>(image_bytes) << " device tmp "
               << 0 / static_cast<double>(image_bytes) << " pinned tmp\n"; // TODO
 

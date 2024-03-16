@@ -98,7 +98,15 @@ jpeggpu_status jpeggpu::decoder::parse_header(
     default:
         return JPEGGPU_NOT_SUPPORTED;
     }
-    img_info.subsampling = reader.jpeg_stream.css;
+
+    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
+        img_info.subsampling.x[c] = reader.jpeg_stream.ss_x_max / reader.jpeg_stream.css.x[c];
+        img_info.subsampling.y[c] = reader.jpeg_stream.ss_y_max / reader.jpeg_stream.css.y[c];
+    }
+    for (int c = reader.jpeg_stream.num_components; c < max_comp_count; ++c) {
+        img_info.subsampling.x[c] = 0;
+        img_info.subsampling.y[c] = 0;
+    }
 
     return JPEGGPU_SUCCESS;
 }
