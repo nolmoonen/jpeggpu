@@ -1,5 +1,6 @@
-#include <cuda_runtime.h>
 #include <jpeggpu/jpeggpu.h>
+
+#include <cuda_runtime.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -50,8 +51,6 @@ int main(int argc, char* argv[])
     }
 
     const char* filename = argv[1];
-
-    // TODO check if file exists
 
     FILE* fp = NULL;
     CHECK((fp = fopen(filename, "r")) != NULL);

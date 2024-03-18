@@ -118,18 +118,15 @@ struct reader {
     struct jpeg_stream jpeg_stream; // TODO name it info?
 
     struct reader_state {
-        int scan_idx; ///< Index of next scan.
+        int scan_idx; /// Index of next scan.
+        const uint8_t* image; /// Modifiable pointer to parsing head.
+        const uint8_t* image_begin; /// Non-modifiable pointer to start of image.
+        const uint8_t* image_end; /// Non-modifiable pointer to end of image.
     } reader_state;
 
-    // TODO move into reader_state
-    const uint8_t* image; ///< Modifiable pointer to parsing head.
-    const uint8_t* image_begin;
-    const uint8_t* image_end;
+    // TODO include a `seen_dht` etc and check if exactly one such segment is seen, else return error
 
-    // TODO include a `seen_dht` etc and check if exactly one such segment is
-    //   seen, else return error
-
-    // pinned. in natural order
+    // pinned. in raster order
     qtable* h_qtables[max_comp_count];
     // pinned.
     huffman_table* h_huff_tables[max_huffman_count][HUFF_COUNT];

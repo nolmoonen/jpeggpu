@@ -12,10 +12,16 @@
 
 namespace jpeggpu {
 
+/// \brief Undo DC difference encoding
+///
+/// \param[in] info
+/// \param[inout] d_out Device pointer to quantized and cosine-transformed data how it appears in the encoded JPEG stream.
+/// \param[in] allocator
+/// \param[in] stream
 template <bool do_it>
 jpeggpu_status decode_dc(
     const jpeg_stream& info, int16_t* d_out, stack_allocator& allocator, cudaStream_t stream);
 
-}
+} // namespace jpeggpu
 
 #endif // JPEGGPU_DECODE_DC_HPP_

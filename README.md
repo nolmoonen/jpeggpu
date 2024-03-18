@@ -24,3 +24,4 @@ jpeggpu 996.6 GB/s 7.537 device tmp 0 pinned tmp
 - Add subsamplings and color formats to convert function and interface
 - Add some test.
 - Add thread-safe logging.
+- Clarify how applications segments are handled. Add API function to disable color interpretation and output unchanged.

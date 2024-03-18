@@ -17,9 +17,9 @@ constexpr int num_data_units_x_block = 4;
 /// \brief Number of vertical data units processed by one kernel block.
 constexpr int num_data_units_y_block = 4;
 /// \brief Number of horizontal data elements processed by one kernel block.
-constexpr int num_data_x_block       = num_data_units_x_block * block_size;
+constexpr int num_data_x_block       = num_data_units_x_block * data_unit_vector_size;
 /// \brief Number of vertical data elements processed by one kernel block.
-constexpr int num_data_y_block       = num_data_units_y_block * block_size;
+constexpr int num_data_y_block       = num_data_units_y_block * data_unit_vector_size;
 
 /// \brief Convert fixed-point value to short value.
 __device__ inline int16_t unfixh(int x) { return static_cast<int16_t>((x + 0x8000) >> 16); }
@@ -133,8 +133,8 @@ __global__ void idct_kernel(
 
     // threadIdx.x is index in four times eights threads, each completing one 8x8 data unit
     // (threadIdx.y, threadIdx.z) is macroblock index
-    int shared_x = threadIdx.y * block_size + threadIdx.x;
-    int shared_y = threadIdx.z * block_size;
+    int shared_x = threadIdx.y * data_unit_vector_size + threadIdx.x;
+    int shared_y = threadIdx.z * data_unit_vector_size;
 
     const int data_unit_x = blockIdx.x * num_data_units_x_block + threadIdx.y;
     const int data_unit_y = blockIdx.y * num_data_units_y_block + threadIdx.z;
@@ -144,10 +144,10 @@ __global__ void idct_kernel(
     // load one 8-wide col of data
     // TODO load two values at once
     if (is_inside) {
-        for (int i = 0; i < block_size; ++i) {
-            const int off = (data_unit_y * block_size + i) * data_size_x +
-                            data_unit_x * block_size + threadIdx.x;
-            const int data_idx_in_data_unit = i * block_size + threadIdx.x;
+        for (int i = 0; i < data_unit_vector_size; ++i) {
+            const int off = (data_unit_y * data_unit_vector_size + i) * data_size_x +
+                            data_unit_x * data_unit_vector_size + threadIdx.x;
+            const int data_idx_in_data_unit = i * data_unit_vector_size + threadIdx.x;
             int16_t* bl_ptr                 = &block[shared_y * shared_stride + shared_x];
             const int16_t val               = d_image_qdct[off];
             const int8_t qval               = qtable[data_idx_in_data_unit];
@@ -163,16 +163,16 @@ __global__ void idct_kernel(
 
     if (is_inside) {
         idct_row(reinterpret_cast<uint32_t*>(
-            &block[(shared_y + threadIdx.x) * shared_stride + threadIdx.y * block_size]));
+            &block[(shared_y + threadIdx.x) * shared_stride + threadIdx.y * data_unit_vector_size]));
     }
     __syncthreads();
 
     // store one 8-wide col of data
     // TODO store four values at once
     if (is_inside) {
-        for (int i = 0; i < block_size; ++i) {
-            const int off = (data_unit_y * block_size + i) * data_size_x +
-                            data_unit_x * block_size + threadIdx.x;
+        for (int i = 0; i < data_unit_vector_size; ++i) {
+            const int off = (data_unit_y * data_unit_vector_size + i) * data_size_x +
+                            data_unit_x * data_unit_vector_size + threadIdx.x;
             int16_t* bl_ptr = &block[shared_y * shared_stride + shared_x];
 
             // normalize
@@ -197,7 +197,7 @@ jpeggpu_status jpeggpu::idct(
                 info.components[c].data_size_x, static_cast<unsigned int>(num_data_x_block)),
             ceiling_div(
                 info.components[c].data_size_y, static_cast<unsigned int>(num_data_y_block)));
-        const dim3 kernel_block_size(block_size, num_data_units_x_block, num_data_units_y_block);
+        const dim3 kernel_block_size(data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
         idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
             d_image_qdct[c],
             d_image[c],

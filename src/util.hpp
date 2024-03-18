@@ -43,7 +43,6 @@ struct stack_allocator {
     {
         const size_t alloc_bytes = gpu_alloc_size(size_alloc);
         if (do_it && alloc_bytes > alloc.size) {
-            // TODO log
             return JPEGGPU_INTERNAL_ERROR;
         }
 

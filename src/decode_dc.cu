@@ -19,6 +19,7 @@ using namespace jpeggpu;
 namespace {
 
 struct non_interleaved_functor {
+    /// \brief For non-interleaved scans, returns pixel offset of data unit `i`.
     __device__ __host__ int operator()(int i)
     {
         const int data_idx = i * data_unit_size;
@@ -33,6 +34,7 @@ struct interleaved_functor {
     {
     }
 
+    /// \brief For interleaved scans, returns segment index of data unit `i`.
     __device__ __host__ int operator()(int i)
     {
         const int num_data_units_in_segment = restart_interval * data_units_in_mcu_component;
@@ -53,6 +55,7 @@ struct interleaved_transform_functor {
     {
     }
 
+    /// \brief For interleaved scan, returns the pixel index of data unit `i`.
     __device__ __host__ int operator()(int i)
     {
         const int mcu_idx    = i / data_units_in_mcu_component;
@@ -81,13 +84,16 @@ jpeggpu_status jpeggpu::decode_dc(
     for (int c = 0; c < info.num_components; ++c) {
         const int data_units_in_mcu_component = info.components[c].ss_x * info.components[c].ss_y;
 
-        auto counting_iter          = thrust::make_counting_iterator(int{0});
+        auto counting_iter = thrust::make_counting_iterator(int{0});
+
+        // iterates over the DC values for the current component in interleaved scan
         auto interleaved_index_iter = thrust::make_transform_iterator(
             counting_iter,
             interleaved_transform_functor(
                 data_units_in_mcu_component, off_in_mcu, info.num_data_units_in_mcu));
         auto iter_interleaved = thrust::make_permutation_iterator(d_out, interleaved_index_iter);
 
+        // iterates over DC values in non-interleaved scan
         auto non_interleaved_index_iter =
             thrust::make_transform_iterator(counting_iter, non_interleaved_functor{});
         auto iter_non_interleaved =
@@ -100,6 +106,8 @@ jpeggpu_status jpeggpu::decode_dc(
             info.components[c].data_size_x * info.components[c].data_size_y / data_unit_size;
 
         if (info.restart_interval != 0) {
+            // if restart interval is defined, scan by key where key is segment index
+
             auto counting_iter_key     = thrust::make_counting_iterator(int{0});
             const int restart_interval = info.restart_interval;
             auto iter_key              = thrust::make_transform_iterator(
@@ -136,6 +144,8 @@ jpeggpu_status jpeggpu::decode_dc(
 
             if (do_it) JPEGGPU_CHECK_CUDA(dispatch());
         } else {
+            // if no restart interval is defined, simply perform a single scan
+
             const auto dispatch = [&]() -> cudaError_t {
                 if (info.is_interleaved) {
                     return cub::DeviceScan::InclusiveSum(

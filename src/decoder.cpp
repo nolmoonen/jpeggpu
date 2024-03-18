@@ -159,7 +159,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image[c]), size * sizeof(uint8_t)));
     }
-    const size_t file_size = reader.image_end - reader.image_begin;
+    const size_t file_size = reader.reader_state.image_end - reader.reader_state.image_begin;
     uint8_t* d_image_data  = nullptr;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_image_data, file_size));
     uint8_t* d_image_data_destuffed = nullptr;
@@ -168,7 +168,11 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
     // TODO put in separate API function
     if (do_it) {
         JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-            d_image_data, reader.image_begin, file_size, cudaMemcpyHostToDevice, stream));
+            d_image_data,
+            reader.reader_state.image_begin,
+            file_size,
+            cudaMemcpyHostToDevice,
+            stream));
         for (int i = 0; i < max_huffman_count; ++i) {
             for (int j = 0; j < HUFF_COUNT; ++j) {
                 JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
@@ -200,6 +204,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
         JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
     }
 
+    // destuff the scan and decode the Huffman stream
     if (info.is_interleaved) {
         const scan& scan = info.scans[0];
 
@@ -279,11 +284,19 @@ jpeggpu_status jpeggpu::decoder::decode_impl(
         }
     }
 
-    // data is now as it appears in the encoded stream: one data unit at a time, possibly interleaved
+    // after decoding, the data is as how it appears in the encoded stream: one data unit at a time, possibly interleaved
+
+    // undo DC difference encoding
     decode_dc<do_it>(info, d_out, allocator, stream);
+
+    // TODO maybe the code can be simpler if doing transpose before DC decoding
+
     if (do_it) {
-        // data is not in image order
+        // convert data order from data unit at a time to raster order
         decode_transpose(info, d_out, d_image_qdct, stream);
+
+        // data is now in raster order
+
         idct(info, d_image_qdct, d_image, d_qtables, stream);
     }
 

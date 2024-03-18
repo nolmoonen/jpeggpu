@@ -22,6 +22,7 @@ add_library(jpeggpu STATIC
     "${SOURCE_DIR}/decode_huffman.cu"
     "${SOURCE_DIR}/decode_transpose.cu"
     "${SOURCE_DIR}/decoder.cpp"
+    "${SOURCE_DIR}/defs.cpp"
     "${SOURCE_DIR}/idct.cu"
     "${SOURCE_DIR}/logger.cpp"
     "${SOURCE_DIR}/reader.cpp")

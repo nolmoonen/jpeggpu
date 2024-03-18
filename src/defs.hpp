@@ -35,9 +35,10 @@ namespace jpeggpu {
         }                                                                                          \
     } while (0)
 
-/// TODO more descriptive name?
-constexpr int block_size     = 8;
-constexpr int data_unit_size = 64;
+/// \brief The number of rows or columns in a data unit, eight.
+constexpr int data_unit_vector_size = 8;
+/// \brief The number of pixels in a data units, 64.
+constexpr int data_unit_size        = 64;
 
 constexpr int max_huffman_count = 2;
 /// as defined by jpeg spec
@@ -48,7 +49,9 @@ enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 using qtable = uint8_t[64];
 
 // clang-format off
-__device__ constexpr int order_natural[64 + 16] = {
+/// \brief Convert zig-zag index to raster index,
+///   `i`th value is the raster index of the zig-zag index `i`.
+__device__ constexpr int order_natural[64] = {
      0,  1,  8, 16,  9,  2,  3, 10,
     17, 24, 32, 25, 18, 11,  4,  5,
     12, 19, 26, 33, 40, 48, 41, 34,
@@ -56,12 +59,11 @@ __device__ constexpr int order_natural[64 + 16] = {
     35, 42, 49, 56, 57, 50, 43, 36,
     29, 22, 15, 23, 30, 37, 44, 51,
     58, 59, 52, 45, 38, 31, 39, 46,
-    53, 60, 61, 54, 47, 55, 62, 63,
-    63, 63, 63, 63, 63, 63, 63, 63, // Extra entries for safety in decoder TODO is this needed?
-    63, 63, 63, 63, 63, 63, 63, 63};
+    53, 60, 61, 54, 47, 55, 62, 63};
 // clang-format on
 
-constexpr bool is_debug = false;
+/// \brief Enable additional, synchronous debugging. Intentionally not a compile-time constant.
+extern bool is_debug;
 
 } // namespace jpeggpu
 

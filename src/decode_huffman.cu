@@ -32,9 +32,9 @@ struct subsequence_info {
     int p;
     /// \brief The number of decoded symbols.
     int n;
-    /// \brief The data unit index in the MCU. With the sampling factors, the color component
+    /// \brief The data unit index in the MCU. Combined with the sampling factors, the color component
     ///   can be inferred. The paper calls this field "the current color component",
-    ///   but merely checking the color component will not suffice.
+    ///   but merely checking the color component does not suffice.
     int c;
     /// \brief Zig-zag index.
     int z;
@@ -97,8 +97,7 @@ __device__ void discard_bits(reader_state& rstate, int num_bits)
 /// \tparam do_discard Whether to discard the bits that were read in the process.
 /// \param[out] length Number of bits read.
 template <bool do_discard = true>
-uint8_t __device__ get_category(
-    reader_state& rstate, int& length, const jpeggpu::huffman_table& table)
+uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman_table& table)
 {
     load_bits(rstate, 16);
 
@@ -143,8 +142,8 @@ __device__ void decode_next_symbol_dc(
     int& length,
     int& symbol,
     int& run_length,
-    const jpeggpu::huffman_table& table_dc,
-    const jpeggpu::huffman_table& table_ac,
+    const huffman_table& table_dc,
+    const huffman_table& table_ac,
     int z)
 {
     int category_length    = 0;
@@ -195,7 +194,7 @@ __device__ void decode_next_symbol_ac(
     int& length,
     int& symbol,
     int& run_length,
-    const jpeggpu::huffman_table& table,
+    const huffman_table& table,
     int z)
 {
     int category_length = 0;
@@ -285,8 +284,8 @@ __device__ void decode_next_symbol(
     int& length,
     int& symbol,
     int& run_length,
-    const jpeggpu::huffman_table& table_dc,
-    const jpeggpu::huffman_table& table_ac,
+    const huffman_table& table_dc,
+    const huffman_table& table_ac,
     int z)
 {
     if (z == 0) {
@@ -306,14 +305,14 @@ enum class component {
 struct const_state {
     const uint8_t* scan;
     const uint8_t* scan_end;
-    const jpeggpu::huffman_table* dc_0;
-    const jpeggpu::huffman_table* ac_0;
-    const jpeggpu::huffman_table* dc_1;
-    const jpeggpu::huffman_table* ac_1;
-    const jpeggpu::huffman_table* dc_2;
-    const jpeggpu::huffman_table* ac_2;
-    const jpeggpu::huffman_table* dc_3;
-    const jpeggpu::huffman_table* ac_3;
+    const huffman_table* dc_0;
+    const huffman_table* ac_0;
+    const huffman_table* dc_1;
+    const huffman_table* ac_1;
+    const huffman_table* dc_2;
+    const huffman_table* ac_2;
+    const huffman_table* dc_3;
+    const huffman_table* ac_3;
     int2 ss_0;
     int2 ss_1;
     int2 ss_2;
@@ -365,7 +364,7 @@ __device__ subsequence_info decode_subsequence(
     int16_t* out,
     subsequence_info* s_info,
     const const_state& cstate,
-    const jpeggpu::segment_info& segment_info,
+    const segment_info& segment_info,
     int segment_idx)
 {
     assert(i >= segment_info.subseq_offset);
@@ -373,7 +372,7 @@ __device__ subsequence_info decode_subsequence(
 
     subsequence_info info;
     // start of i-th subsequence
-    info.p = i_rel * jpeggpu::subsequence_size;
+    info.p = i_rel * subsequence_size;
     info.n = 0;
     info.c = 0; // start from the first data unit of the Y component
     info.z = 0;
@@ -387,13 +386,14 @@ __device__ subsequence_info decode_subsequence(
 
     int position_in_output = 0;
     if constexpr (do_write) {
-        position_in_output = s_info[i].n + segment_idx * cstate.num_mcus_in_segment *
-                                               cstate.num_data_units_in_mcu *
-                                               jpeggpu::data_unit_size;
+        // offset in pixels
+        int segment_offset = segment_idx * cstate.num_mcus_in_segment *
+                             cstate.num_data_units_in_mcu * data_unit_size;
+        // subsequence_info.n is relative to segment
+        position_in_output = segment_offset + s_info[i].n;
     }
     if constexpr (is_overflow) {
         info.p = s_info[i - 1].p;
-        // FIXME previous testing did not take into account the `do_write` version? maybe
         // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
         //   only for each subsequence (and not an aggregate)
         info.c = s_info[i - 1].c;
@@ -409,7 +409,7 @@ __device__ subsequence_info decode_subsequence(
         }
     }
 
-    const int end_subseq = (i_rel + 1) * jpeggpu::subsequence_size; // first bit in next subsequence
+    const int end_subseq  = (i_rel + 1) * subsequence_size; // first bit in next subsequence
     const int end_segment = (segment_info.end - segment_info.begin) * 8; // bit count in segment
     subsequence_info last_symbol; // the last detected codeword
     while (info.p < min(end_subseq, end_segment)) {
@@ -417,8 +417,7 @@ __device__ subsequence_info decode_subsequence(
         //   (so info.p cannot reliably be used to determine if the loop should break)
         //   this problem is excerbated by restart intevals, where padding occurs more frequently
         if (do_write && position_in_output >= (segment_idx + 1) * cstate.num_mcus_in_segment *
-                                                  cstate.num_data_units_in_mcu *
-                                                  jpeggpu::data_unit_size) {
+                                                  cstate.num_data_units_in_mcu * data_unit_size) {
             break;
         }
 
@@ -452,8 +451,9 @@ __device__ subsequence_info decode_subsequence(
         decode_next_symbol(rstate, length, symbol, run_length, *dc, *ac, info.z);
         if (do_write) {
             // TODO could make a separate kernel for this
-            out[position_in_output / 64 * 64 + jpeggpu::order_natural[position_in_output % 64]] =
-                symbol;
+            const int data_unit_idx    = position_in_output / data_unit_size;
+            const int idx_in_data_unit = position_in_output % data_unit_size;
+            out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
         }
         if (do_write) {
             position_in_output += run_length + 1;
@@ -489,7 +489,7 @@ __global__ void sync_intra_sequence(
     subsequence_info* s_info,
     int num_subsequences,
     const_state cstate,
-    const jpeggpu::segment_info* segment_infos,
+    const segment_info* segment_infos,
     const int* segment_indices)
 {
     assert(block_size == blockDim.x);
@@ -504,14 +504,13 @@ __global__ void sync_intra_sequence(
     }
 
     // obtain the segment info for this subsequence
-    const int segment_idx                = segment_indices[subseq_global];
-    const jpeggpu::segment_info seg_info = segment_infos[segment_idx];
+    const int segment_idx       = segment_indices[subseq_global];
+    const segment_info seg_info = segment_infos[segment_idx];
+    const int bytes_in_segment  = seg_info.end - seg_info.begin;
     // index of the final subsequence in this segment
-    const int final_index                = seg_info.subseq_offset +
-                            ceiling_div(
-                                seg_info.end - seg_info.begin,
-                                static_cast<unsigned int>(jpeggpu::subsequence_size_bytes)) -
-                            1;
+    const int final_index =
+        seg_info.subseq_offset +
+        ceiling_div(bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes)) - 1;
     assert(subseq_global <= final_index);
 
     bool synchronized = false;
@@ -558,7 +557,7 @@ __global__ void sync_inter_sequence(
     const_state cstate,
     uint8_t* sequence_not_synced,
     int num_sequences,
-    const jpeggpu::segment_info* segment_infos,
+    const segment_info* segment_infos,
     const int* segment_indices)
 {
     // Thread with global id `tid` handles sequence `tid + 1 = i`, since sequence zero needs no work
@@ -572,14 +571,13 @@ __global__ void sync_inter_sequence(
     int subseq_global = (bi + 1) * block_size;
 
     // obtain the segment info for last subsequence of sequence `tid`
-    const int segment_idx                = segment_indices[subseq_global - 1];
-    const jpeggpu::segment_info seg_info = segment_infos[segment_idx];
+    const int segment_idx       = segment_indices[subseq_global - 1];
+    const segment_info seg_info = segment_infos[segment_idx];
+    const int bytes_in_segment  = seg_info.end - seg_info.begin;
     // index of the final subsequence in this segment
-    const int final_index                = seg_info.subseq_offset +
-                            ceiling_div(
-                                seg_info.end - seg_info.begin,
-                                static_cast<unsigned int>(jpeggpu::subsequence_size_bytes)) -
-                            1;
+    const int final_index =
+        seg_info.subseq_offset +
+        ceiling_div(bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes)) - 1;
     assert(subseq_global - 1 <= final_index);
     if (subseq_global - 1 == final_index) {
         // the last subsequence of sequence `tid` is the last subsequence in the segment,
@@ -619,7 +617,7 @@ __global__ void decode_write(
     subsequence_info* s_info,
     int num_subsequences,
     const_state cstate,
-    const jpeggpu::segment_info* segment_infos,
+    const segment_info* segment_infos,
     const int* segment_indices)
 {
     const int si = blockIdx.x * blockDim.x + threadIdx.x;
@@ -627,8 +625,8 @@ __global__ void decode_write(
         return;
     }
 
-    const int segment_idx                = segment_indices[si];
-    const jpeggpu::segment_info seg_info = segment_infos[segment_idx];
+    const int segment_idx       = segment_indices[si];
+    const segment_info seg_info = segment_infos[segment_idx];
 
     // only first thread does not do overflow
     constexpr bool do_write = true;
@@ -667,19 +665,17 @@ __global__ void assign_sinfo_n(
 template <bool do_it>
 jpeggpu_status jpeggpu::decode_scan(
     const jpeg_stream& info,
-    uint8_t* d_scan_destuffed,
-    segment_info* d_segment_infos,
-    int* d_segment_indices,
+    const uint8_t* d_scan_destuffed,
+    const segment_info* d_segment_infos,
+    const int* d_segment_indices,
     int16_t* d_out,
-    const struct jpeggpu::scan& scan,
+    const struct scan& scan,
     huffman_table* (&d_huff_tables)[max_huffman_count][HUFF_COUNT],
     stack_allocator& allocator,
     cudaStream_t stream)
 {
-    // TODO pick the right huffman table
-
-    const int num_subsequences = scan.num_subsequences; // "N"
-    constexpr int block_size   = 256; // "b", size in subsequences
+    const int num_subsequences = scan.num_subsequences; // "N", determined by JPEG stream
+    constexpr int block_size   = 256; // "b", sequence size in number of subsequences, configurable
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size)); // "B"
     if (do_it) {
@@ -689,8 +685,8 @@ jpeggpu_status jpeggpu::decode_scan(
     // alg-1:01
     int num_data_units = 0;
     for (int c = 0; c < info.num_components; ++c) {
-        num_data_units += (info.components[c].data_size_x / jpeggpu::block_size) *
-                          (info.components[c].data_size_y / jpeggpu::block_size);
+        num_data_units += (info.components[c].data_size_x / jpeggpu::data_unit_vector_size) *
+                          (info.components[c].data_size_y / jpeggpu::data_unit_vector_size);
     }
 
     // alg-1:05
@@ -700,7 +696,8 @@ jpeggpu_status jpeggpu::decode_scan(
 
     const const_state cstate = {
         d_scan_destuffed,
-        // TODO this is not the end of data, but the end of allocation. the final subsequence may read garbage.
+        // this is not the end of data, but the end of allocation. the final subsequence may read garbage bits (but not bytes).
+        //   this can introduce additional (non-existent) symbols, but a check is in place to prevent writing more symbols than needed
         d_scan_destuffed + (scan.end - scan.begin),
         d_huff_tables[info.components[0].dc_idx][HUFF_DC],
         d_huff_tables[info.components[0].ac_idx][HUFF_AC],
@@ -863,22 +860,22 @@ jpeggpu_status jpeggpu::decode_scan(
 
 template jpeggpu_status jpeggpu::decode_scan<false>(
     const jpeg_stream&,
-    uint8_t*,
-    segment_info*,
-    int*,
+    const uint8_t*,
+    const segment_info*,
+    const int*,
     int16_t*,
-    const struct jpeggpu::scan&,
+    const struct scan&,
     huffman_table* (&)[max_huffman_count][HUFF_COUNT],
     stack_allocator&,
     cudaStream_t);
 
 template jpeggpu_status jpeggpu::decode_scan<true>(
     const jpeg_stream&,
-    uint8_t*,
-    segment_info*,
-    int*,
+    const uint8_t*,
+    const segment_info*,
+    const int*,
     int16_t*,
-    const struct jpeggpu::scan&,
+    const struct scan&,
     huffman_table* (&)[max_huffman_count][HUFF_COUNT],
     stack_allocator&,
     cudaStream_t);

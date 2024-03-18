@@ -49,7 +49,7 @@ void reader::cleanup()
     }
 }
 
-uint8_t jpeggpu::reader::read_uint8() { return *(image++); }
+uint8_t jpeggpu::reader::read_uint8() { return *(reader_state.image++); }
 
 uint16_t jpeggpu::reader::read_uint16()
 {
@@ -57,7 +57,10 @@ uint16_t jpeggpu::reader::read_uint16()
     return static_cast<uint16_t>(high) << 8 | read_uint8();
 }
 
-bool jpeggpu::reader::has_remaining(int size) { return image_end - image >= size; }
+bool jpeggpu::reader::has_remaining(int size)
+{
+    return reader_state.image_end - reader_state.image >= size;
+}
 
 jpeggpu_status jpeggpu::reader::read_marker(uint8_t& marker)
 {
@@ -313,19 +316,21 @@ jpeggpu_status jpeggpu::reader::read_sos()
     const uint8_t successive_approximation = read_uint8();
     (void)spectral_start, (void)spectral_end, (void)successive_approximation;
 
-    const int scan_begin     = image - image_begin;
+    const int scan_begin     = reader_state.image - reader_state.image_begin;
     int num_bytes_in_segment = 0;
     do {
-        const uint8_t* ret = reinterpret_cast<const uint8_t*>(
-            std::memchr(reinterpret_cast<const void*>(image), 0xff, image_end - image));
+        const uint8_t* ret = reinterpret_cast<const uint8_t*>(std::memchr(
+            reinterpret_cast<const void*>(reader_state.image),
+            0xff,
+            reader_state.image_end - reader_state.image));
         if (ret == nullptr) {
             // file does not have an end of image marker
             return JPEGGPU_INVALID_JPEG;
         }
 
-        num_bytes_in_segment += ret - image;
+        num_bytes_in_segment += ret - reader_state.image;
 
-        image                = ret + 1;
+        reader_state.image   = ret + 1;
         const uint8_t marker = read_uint8();
         // `image` now points to after marker
         if (marker == 0) {
@@ -350,16 +355,16 @@ jpeggpu_status jpeggpu::reader::read_sos()
 
         if (is_scan_end) {
             // rewind 0xff and marker byte
-            image -= 2;
+            reader_state.image -= 2;
             break;
         }
 
         log("marker %s\n", jpeggpu::get_marker_string(marker));
         log("unexpected\n");
         return JPEGGPU_INVALID_JPEG;
-    } while (image < image_end);
+    } while (reader_state.image < reader_state.image_end);
     scan.begin = scan_begin;
-    scan.end   = image - image_begin;
+    scan.end   = reader_state.image - reader_state.image_begin;
 
     return JPEGGPU_SUCCESS;
 }
@@ -442,7 +447,7 @@ jpeggpu_status jpeggpu::reader::skip_segment()
 
     log("\twarning: skipping this segment\n");
 
-    image += length;
+    reader_state.image += length;
     return JPEGGPU_SUCCESS;
 }
 
@@ -521,8 +526,10 @@ jpeggpu_status jpeggpu::reader::read()
         comp.size_x = get_size(jpeg_stream.size_x, comp.ss_x, jpeg_stream.ss_x_max);
         comp.size_y = get_size(jpeg_stream.size_y, comp.ss_y, jpeg_stream.ss_y_max);
 
-        comp.mcu_size_x = jpeg_stream.is_interleaved ? block_size * comp.ss_x : block_size;
-        comp.mcu_size_y = jpeg_stream.is_interleaved ? block_size * comp.ss_y : block_size;
+        comp.mcu_size_x =
+            jpeg_stream.is_interleaved ? data_unit_vector_size * comp.ss_x : data_unit_vector_size;
+        comp.mcu_size_y =
+            jpeg_stream.is_interleaved ? data_unit_vector_size * comp.ss_y : data_unit_vector_size;
 
         comp.data_size_x =
             ceiling_div(comp.size_x, static_cast<unsigned int>(comp.mcu_size_x)) * comp.mcu_size_x;
@@ -553,13 +560,14 @@ jpeggpu_status jpeggpu::reader::read()
 
 void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
 {
-    this->image       = image;
-    this->image_begin = image;
-    this->image_end   = image_end;
+    // clear and reset reader state
+    std::memset(&reader_state, 0, sizeof(reader_state));
+    reader_state.image       = image;
+    reader_state.image_begin = image;
+    reader_state.image_end   = image_end;
 
     // clear remaining state
     std::memset(&jpeg_stream, 0, sizeof(jpeg_stream));
-    std::memset(&reader_state, 0, sizeof(reader_state));
     for (int c = 0; c < max_comp_count; ++c) {
         std::memset(h_qtables[c], 0, data_unit_size * sizeof(*(h_qtables[c])));
     }

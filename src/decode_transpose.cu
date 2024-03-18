@@ -95,11 +95,11 @@ __global__ void transpose_interleaved(
     const int x_data_unit = x_mcu * ss.x + x_in_mcu;
     const int y_data_unit = y_mcu * ss.y + y_in_mcu;
 
-    const int x_in_data_unit = idx_in_data_unit % block_size;
-    const int y_in_data_unit = idx_in_data_unit / block_size;
+    const int x_in_data_unit = idx_in_data_unit % data_unit_vector_size;
+    const int y_in_data_unit = idx_in_data_unit / data_unit_vector_size;
 
-    const int x = x_data_unit * block_size + x_in_data_unit;
-    const int y = y_data_unit * block_size + y_in_data_unit;
+    const int x = x_data_unit * data_unit_vector_size + x_in_data_unit;
+    const int y = y_data_unit * data_unit_vector_size + y_in_data_unit;
 
     const int idx_pixel_out = y * size.x + x;
     data_out[idx_pixel_out] = val;
@@ -177,11 +177,11 @@ __global__ void transpose_non_interleaved(
 
     const uint16_t val = data_in[idx_pixel_in];
 
-    const int x_in_data_unit = idx_in_data_unit % block_size;
-    const int y_in_data_unit = idx_in_data_unit / block_size;
+    const int x_in_data_unit = idx_in_data_unit % data_unit_vector_size;
+    const int y_in_data_unit = idx_in_data_unit / data_unit_vector_size;
 
-    const int x = x_data_unit * block_size + x_in_data_unit;
-    const int y = y_data_unit * block_size + y_in_data_unit;
+    const int x = x_data_unit * data_unit_vector_size + x_in_data_unit;
+    const int y = y_data_unit * data_unit_vector_size + y_in_data_unit;
 
     const int idx_pixel_out = y * size.x + x;
     data_out[idx_pixel_out] = val;
@@ -191,7 +191,7 @@ __global__ void transpose_non_interleaved(
 
 jpeggpu_status jpeggpu::decode_transpose(
     const jpeg_stream& info,
-    int16_t* d_out,
+    const int16_t* d_out,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
     cudaStream_t stream)
 {
