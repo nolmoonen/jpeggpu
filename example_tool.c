@@ -94,6 +94,8 @@ int main(int argc, char* argv[])
 
     CHECK_CUDA(cudaFree(d_tmp));
 
+    printf("gpu decode done\n");
+
     uint8_t* h_img = malloc(image_size * 3);
     CHECK_CUDA(cudaMemcpy(h_img, img.image[0], image_size * 3, cudaMemcpyDeviceToHost));
 
