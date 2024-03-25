@@ -20,8 +20,8 @@ jpeggpu 996.6 GB/s 7.537 device tmp 0 pinned tmp
 ## TODO
 
 - Clarify where assumptions are made about only supporting 444, 420, etc. to see if the assumption can be lifted. Add check if CSS is one of "popular subsamplings", reject otherwise.
-- Separate copy functions in API interface and make threaded benchmark.
 - Add subsamplings and color formats to convert function and interface
 - Add some test.
 - Add thread-safe logging.
-- Clarify how applications segments are handled. Add API function to disable color interpretation and output unchanged.
+- Clarify how applications headers are handled. Add API function to disable color interpretation and output unchanged.
+- Some optimization

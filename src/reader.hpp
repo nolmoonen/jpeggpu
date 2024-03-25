@@ -124,6 +124,8 @@ struct reader {
         const uint8_t* image_end; /// Non-modifiable pointer to end of image.
     } reader_state;
 
+    size_t get_file_size() const { return reader_state.image_end - reader_state.image_begin; }
+
     // TODO include a `seen_dht` etc and check if exactly one such segment is seen, else return error
 
     // pinned. in raster order

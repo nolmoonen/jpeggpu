@@ -20,22 +20,14 @@ struct decoder {
 
     jpeggpu_status parse_header(jpeggpu_img_info& img_info, const uint8_t* data, size_t size);
 
-    template <bool do_it>
-    jpeggpu_status decode_impl(
-        jpeggpu_img& img,
-        jpeggpu_color_format color_fmt,
-        jpeggpu_pixel_format pixel_fmt,
-        jpeggpu_subsampling subsampling,
-        cudaStream_t stream);
+    jpeggpu_status transfer(void* d_tmp, size_t tmp_size, cudaStream_t stream);
 
-    jpeggpu_status decode(
-        jpeggpu_img& img,
-        jpeggpu_color_format color_fmt,
-        jpeggpu_pixel_format pixel_fmt,
-        jpeggpu_subsampling subsampling,
-        void* d_tmp,
-        size_t& tmp_size,
-        cudaStream_t stream);
+    template <bool do_it>
+    jpeggpu_status decode_impl(cudaStream_t stream);
+
+    jpeggpu_status decode_get_size(size_t& tmp_size);
+
+    jpeggpu_status decode(jpeggpu_img* img, void* d_tmp, size_t tmp_size, cudaStream_t stream);
 
     struct reader reader;
 

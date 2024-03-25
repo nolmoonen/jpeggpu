@@ -70,21 +70,29 @@ struct jpeggpu_img_info {
 enum jpeggpu_status jpeggpu_decoder_parse_header(
     jpeggpu_decoder_t decoder, struct jpeggpu_img_info* img_info, const uint8_t* data, size_t size);
 
+enum jpeggpu_status jpeggpu_decoder_get_buffer_size(jpeggpu_decoder_t decoder, size_t* tmp_size);
+
+/// \param[in] d_tmp Temporary device memory, should be aligned to 256 byte boundary.
+enum jpeggpu_status jpeggpu_decoder_transfer(
+    jpeggpu_decoder_t decoder,
+    void* d_tmp,
+    size_t tmp_size,
+    cudaStream_t stream);
+
 struct jpeggpu_img {
     uint8_t* image[JPEGGPU_MAX_COMP];
     int pitch[JPEGGPU_MAX_COMP];
+    enum jpeggpu_color_format color_fmt;
+    enum jpeggpu_pixel_format pixel_fmt;
+    struct jpeggpu_subsampling subsampling;
 };
 
-// TODO split out copy and kernel. maybe separate function for tmp size
 /// \param[in] d_tmp Temporary device memory, should be aligned to 256 byte boundary.
 enum jpeggpu_status jpeggpu_decoder_decode(
     jpeggpu_decoder_t decoder,
     struct jpeggpu_img* img,
-    enum jpeggpu_color_format color_fmt,
-    enum jpeggpu_pixel_format pixel_fmt,
-    struct jpeggpu_subsampling subsampling,
     void* d_tmp,
-    size_t* tmp_size,
+    size_t tmp_size,
     cudaStream_t stream);
 
 enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder);

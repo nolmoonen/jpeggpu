@@ -30,10 +30,10 @@ struct allocation {
 /// \brief Does not actually do allocations.
 ///   Stack as to not have to deal with fragmentation.
 struct stack_allocator {
-    void reset()
+    void reset(void* data_alloc = nullptr, size_t size_alloc = 0)
     {
-        alloc.data = nullptr;
-        alloc.size = 0;
+        alloc.data = reinterpret_cast<char*>(data_alloc);
+        alloc.size = size_alloc;
         stack.clear();
         size = 0;
     }

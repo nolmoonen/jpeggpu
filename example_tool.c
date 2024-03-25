@@ -76,21 +76,23 @@ int main(int argc, char* argv[])
     struct jpeggpu_img_info img_info;
     CHECK_JPEGGPU(jpeggpu_decoder_parse_header(decoder, &img_info, data, off));
 
-    const size_t image_size = img_info.size_x * img_info.size_y;
-
-    struct jpeggpu_img img;
-    CHECK_CUDA(cudaMalloc((void**)&img.image[0], image_size * 3));
-    img.pitch[0] = img_info.size_x * 3;
-
     size_t tmp_size = 0;
-    CHECK_JPEGGPU(jpeggpu_decoder_decode(
-        decoder, &img, JPEGGPU_SRGB, JPEGGPU_P012, img_info.subsampling, NULL, &tmp_size, stream));
+    CHECK_JPEGGPU(jpeggpu_decoder_get_buffer_size(decoder, &tmp_size));
 
     void* d_tmp = NULL;
     CHECK_CUDA(cudaMalloc((void**)&d_tmp, tmp_size));
 
-    CHECK_JPEGGPU(jpeggpu_decoder_decode(
-        decoder, &img, JPEGGPU_SRGB, JPEGGPU_P012, img_info.subsampling, d_tmp, &tmp_size, stream));
+    CHECK_JPEGGPU(jpeggpu_decoder_transfer(decoder, d_tmp, tmp_size, stream));
+
+    const size_t image_size = img_info.size_x * img_info.size_y;
+    struct jpeggpu_img img;
+    CHECK_CUDA(cudaMalloc((void**)&img.image[0], image_size * 3));
+    img.pitch[0]    = img_info.size_x * 3;
+    img.color_fmt   = JPEGGPU_SRGB;
+    img.pixel_fmt   = JPEGGPU_P012;
+    img.subsampling = img_info.subsampling;
+
+    CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &img, d_tmp, tmp_size, stream));
 
     CHECK_CUDA(cudaFree(d_tmp));
 

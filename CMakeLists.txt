@@ -13,6 +13,8 @@ set(CMAKE_CUDA_EXTENSIONS OFF)
 
 message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
 set(SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_library(jpeggpu STATIC
     "${SOURCE_DIR}/convert.cu"
@@ -32,5 +34,4 @@ target_link_libraries(jpeggpu PUBLIC CUDA::cudart_static)
 add_executable(example_tool example_tool.c)
 target_link_libraries(example_tool PRIVATE jpeggpu)
 
-add_executable(benchmark benchmark.cpp)
-target_link_libraries(benchmark PRIVATE jpeggpu CUDA::nvjpeg)
+add_subdirectory(benchmark)

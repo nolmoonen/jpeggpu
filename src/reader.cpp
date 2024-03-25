@@ -555,6 +555,24 @@ jpeggpu_status jpeggpu::reader::read()
         jpeg_stream.total_data_size += comp.data_size_x * comp.data_size_y;
     }
 
+    // TODO read metadata to determine color formats
+    switch (jpeg_stream.num_components) {
+    case 1:
+        jpeg_stream.color_fmt = JPEGGPU_GRAY;
+        jpeg_stream.pixel_fmt = JPEGGPU_P0;
+        break;
+    case 3:
+        jpeg_stream.color_fmt = JPEGGPU_YCBCR;
+        jpeg_stream.pixel_fmt = JPEGGPU_P0P1P2;
+        break;
+    case 4:
+        jpeg_stream.color_fmt = JPEGGPU_CMYK;
+        jpeg_stream.pixel_fmt = JPEGGPU_P0P1P2P3;
+        break;
+    default:
+        return JPEGGPU_NOT_SUPPORTED;
+    }
+
     return JPEGGPU_SUCCESS;
 }
 
