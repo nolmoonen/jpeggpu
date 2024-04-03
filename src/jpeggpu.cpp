@@ -58,6 +58,23 @@ enum jpeggpu_status jpeggpu_set_logging(jpeggpu_decoder_t decoder, int do_loggin
     return JPEGGPU_SUCCESS;
 }
 
+int is_css_444(struct jpeggpu_subsampling css, int num_components)
+{
+    switch (num_components) {
+    case 1:
+        return css.x[0] == 1 && css.y[0] == 1;
+    case 2:
+        return css.x[0] == 1 && css.y[0] == 1 && css.x[1] == 1 && css.y[1] == 1;
+    case 3:
+        return css.x[0] == 1 && css.y[0] == 1 && css.x[1] == 1 && css.y[1] == 1 && css.x[2] == 1 &&
+               css.y[2] == 1;
+    case 4:
+        return css.x[0] == 1 && css.y[0] == 1 && css.x[1] == 1 && css.y[1] == 1 && css.x[2] == 1 &&
+               css.y[2] == 1 && css.x[3] == 1 && css.y[3] == 1;
+    }
+    return 0;
+}
+
 enum jpeggpu_status jpeggpu_decoder_parse_header(
     jpeggpu_decoder_t decoder, struct jpeggpu_img_info* img_info, const uint8_t* data, size_t size)
 {
@@ -98,8 +115,17 @@ enum jpeggpu_status jpeggpu_decoder_decode(
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    // TODO filter out more impossible combinations
-    if (img->color_fmt == JPEGGPU_GRAY && img->pixel_fmt == JPEGGPU_P0P1P2) {
+    return decoder->decoder.decode(img, d_tmp, tmp_size, stream);
+}
+
+enum jpeggpu_status jpeggpu_decoder_decode_interleaved(
+    jpeggpu_decoder_t decoder,
+    struct jpeggpu_img_interleaved* img,
+    void* d_tmp,
+    size_t tmp_size,
+    cudaStream_t stream)
+{
+    if (!decoder || !img) {
         return JPEGGPU_INVALID_ARGUMENT;
     }
 

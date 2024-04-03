@@ -72,11 +72,10 @@ struct jpeg_stream {
 
     component components[max_comp_count];
 
-    jpeggpu_color_format color_fmt;
-    jpeggpu_pixel_format pixel_fmt;
+    jpeggpu_color_format_jpeg color_fmt;
 
-    int num_mcus_x;
-    int num_mcus_y;
+    int num_mcus_x; /// Image x size in number of MCUs.
+    int num_mcus_y; /// Image y size in number of MCUs.
 
     bool is_interleaved;
 
@@ -95,6 +94,7 @@ struct reader {
     uint16_t read_uint16();
 
     bool has_remaining(int size);
+    bool has_remaining();
 
     jpeggpu_status read_marker(uint8_t& marker);
 

@@ -27,7 +27,20 @@ struct decoder {
 
     jpeggpu_status decode_get_size(size_t& tmp_size);
 
+    jpeggpu_status decode(
+        uint8_t* (&image)[max_comp_count],
+        int (&pitch)[max_comp_count],
+        jpeggpu_color_format_out color_fmt,
+        jpeggpu_subsampling subsampling,
+        bool out_is_interleaved,
+        void* d_tmp,
+        size_t tmp_size,
+        cudaStream_t stream);
+
     jpeggpu_status decode(jpeggpu_img* img, void* d_tmp, size_t tmp_size, cudaStream_t stream);
+
+    jpeggpu_status decode(
+        jpeggpu_img_interleaved* img, void* d_tmp, size_t tmp_size, cudaStream_t stream);
 
     struct reader reader;
 

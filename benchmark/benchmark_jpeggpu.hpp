@@ -36,29 +36,17 @@ void bench_jpeggpu_st(const char* file_data, size_t file_size)
     CHECK_JPEGGPU(jpeggpu_decoder_parse_header(
         decoder, &img_info, reinterpret_cast<const uint8_t*>(file_data), file_size));
 
-    // TODO not supporting non-YUV data
-    if (img_info.pixel_fmt != JPEGGPU_P0P1P2) {
-        std::exit(EXIT_FAILURE);
-    }
-    const int num_components = 3;
-
     size_t image_bytes = 0;
     jpeggpu_img d_img;
-    std::vector<char*> h_img(num_components);
-    for (int c = 0; c < num_components; ++c) {
-        int ss_x   = img_info.subsampling.x[c];
-        int size_x = (img_info.size_x + ss_x - 1) / ss_x;
-        int ss_y   = img_info.subsampling.y[c];
-        int size_y = (img_info.size_y + ss_y - 1) / ss_y;
-
-        const size_t plane_bytes = size_x * size_y;
+    std::vector<char*> h_img(img_info.num_components);
+    for (int c = 0; c < img_info.num_components; ++c) {
+        const size_t plane_bytes = img_info.sizes_x[c] * img_info.sizes_y[c];
         CHECK_CUDA(cudaMalloc(&d_img.image[c], plane_bytes));
-        d_img.pitch[0] = size_x;
+        d_img.pitch[c] = img_info.sizes_x[c];
         image_bytes += plane_bytes;
         CHECK_CUDA(cudaMallocHost(&h_img[c], plane_bytes));
     }
-    d_img.color_fmt   = JPEGGPU_YCBCR;
-    d_img.pixel_fmt   = JPEGGPU_P0P1P2;
+    d_img.color_fmt   = JPEGGPU_OUT_NO_CONVERSION;
     d_img.subsampling = img_info.subsampling;
 
     void* d_tmp     = nullptr;
@@ -84,14 +72,8 @@ void bench_jpeggpu_st(const char* file_data, size_t file_size)
 
         CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &d_img, d_tmp, this_tmp_size, stream));
 
-        for (int c = 0; c < num_components; ++c) {
-            // TODO there should be an easier way to do this
-            int ss_x   = img_info.subsampling.x[c];
-            int size_x = (img_info.size_x + ss_x - 1) / ss_x;
-            int ss_y   = img_info.subsampling.y[c];
-            int size_y = (img_info.size_y + ss_y - 1) / ss_y;
-
-            const size_t plane_bytes = size_x * size_y;
+        for (int c = 0; c < img_info.num_components; ++c) {
+            const size_t plane_bytes = img_info.sizes_x[c] * img_info.sizes_y[c];
             CHECK_CUDA(cudaMemcpyAsync(
                 h_img[c], d_img.image[c], plane_bytes, cudaMemcpyDeviceToHost, stream));
         }
@@ -118,7 +100,7 @@ void bench_jpeggpu_st(const char* file_data, size_t file_size)
     const double throughput    = num_iter / total_seconds;
 
     if (d_tmp) CHECK_CUDA(cudaFree(d_tmp));
-    for (int c = 0; c < num_components; ++c) {
+    for (int c = 0; c < img_info.num_components; ++c) {
         CHECK_CUDA(cudaFreeHost(h_img[c]));
         CHECK_CUDA(cudaFree(d_img.image[c]));
     }
@@ -191,13 +173,8 @@ void bench_jpeggpu_run_iter(
         CHECK_CUDA(cudaEventRecord(bench_thread_state.event_d2h, bench_state.stream_common));
         CHECK_CUDA(cudaStreamWaitEvent(bench_thread_state.stream, bench_thread_state.event_d2h));
         for (int c = 0; c < bench_thread_state.num_components; ++c) {
-            // TODO there should be an easier way to do this
-            int ss_x   = bench_thread_state.img_info.subsampling.x[c];
-            int size_x = (bench_thread_state.img_info.size_x + ss_x - 1) / ss_x;
-            int ss_y   = bench_thread_state.img_info.subsampling.y[c];
-            int size_y = (bench_thread_state.img_info.size_y + ss_y - 1) / ss_y;
-
-            const size_t plane_bytes = size_x * size_y;
+            const size_t plane_bytes =
+                bench_thread_state.img_info.sizes_x[c] * bench_thread_state.img_info.sizes_y[c];
             CHECK_CUDA(cudaMemcpyAsync(
                 bench_thread_state.h_img[c],
                 bench_thread_state.d_img.image[c],
@@ -224,27 +201,17 @@ void bench_jpeggpu_mt_thread_startup(
         reinterpret_cast<const uint8_t*>(bench_state.file_data),
         bench_state.file_size));
 
-    if (bench_thread_state.img_info.pixel_fmt != JPEGGPU_P0P1P2) {
-        std::exit(EXIT_FAILURE);
-    }
-    bench_thread_state.num_components = 3;
-
-    bench_thread_state.h_img.resize(3);
+    bench_thread_state.h_img.resize(bench_thread_state.img_info.num_components);
     size_t image_bytes = 0;
-    for (int c = 0; c < bench_thread_state.num_components; ++c) {
-        int ss_x   = bench_thread_state.img_info.subsampling.x[c];
-        int size_x = (bench_thread_state.img_info.size_x + ss_x - 1) / ss_x;
-        int ss_y   = bench_thread_state.img_info.subsampling.y[c];
-        int size_y = (bench_thread_state.img_info.size_y + ss_y - 1) / ss_y;
-
-        const size_t plane_bytes = size_x * size_y;
+    for (int c = 0; c < bench_thread_state.img_info.num_components; ++c) {
+        const size_t plane_bytes =
+            bench_thread_state.img_info.sizes_x[c] * bench_thread_state.img_info.sizes_y[c];
         CHECK_CUDA(cudaMalloc(&bench_thread_state.d_img.image[c], plane_bytes));
-        bench_thread_state.d_img.pitch[0] = size_x;
+        bench_thread_state.d_img.pitch[c] = bench_thread_state.img_info.sizes_x[c];
         image_bytes += plane_bytes;
         CHECK_CUDA(cudaMallocHost(&bench_thread_state.h_img[c], plane_bytes));
     }
-    bench_thread_state.d_img.color_fmt   = JPEGGPU_YCBCR;
-    bench_thread_state.d_img.pixel_fmt   = JPEGGPU_P0P1P2;
+    bench_thread_state.d_img.color_fmt   = JPEGGPU_OUT_NO_CONVERSION;
     bench_thread_state.d_img.subsampling = bench_thread_state.img_info.subsampling;
 
     bench_thread_state.d_tmp    = nullptr;

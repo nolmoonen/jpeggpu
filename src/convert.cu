@@ -2,9 +2,15 @@
 #include "defs.hpp"
 #include "util.hpp"
 
+#include <cassert>
+
+using namespace jpeggpu;
+
+namespace {
+
 __device__ __forceinline__ float clamp_pix(float c) { return fmaxf(0.f, fminf(roundf(c), 255.f)); }
 
-__device__ void convert(uint8_t (&data)[4])
+__device__ void convert_ycbcr_rgb(uint8_t (&data)[4])
 {
     const uint8_t cy = data[0];
     const uint8_t cb = data[1];
@@ -21,6 +27,42 @@ __device__ void convert(uint8_t (&data)[4])
     data[2] = clamp_pix(b);
 }
 
+__device__ void convert_y_rgb(uint8_t (&data)[4])
+{
+    // essentially convert_y_rgb with cb and cr zero
+    const uint8_t cy = data[0];
+
+    // clang-format off
+    const float r = cy                      + 1.402f    * -128.f;
+    const float g = cy -  .344136f * -128.f -  .714136f * -128.f;
+    const float b = cy + 1.772f    * -128.f;
+    // clang-format on
+
+    data[0] = clamp_pix(r);
+    data[1] = clamp_pix(g);
+    data[2] = clamp_pix(b);
+}
+
+__device__ void convert(
+    uint8_t (&data)[4],
+    jpeggpu_color_format_jpeg in_color_fmt,
+    jpeggpu_color_format_out out_color_fmt)
+{
+    if (out_color_fmt == JPEGGPU_OUT_NO_CONVERSION) {
+        return;
+    }
+
+    if (in_color_fmt == JPEGGPU_JPEG_YCBCR && out_color_fmt == JPEGGPU_OUT_SRGB) {
+        return convert_ycbcr_rgb(data);
+    }
+
+    if (in_color_fmt == JPEGGPU_JPEG_GRAY && out_color_fmt == JPEGGPU_OUT_SRGB) {
+        return convert_y_rgb(data);
+    }
+
+    assert("color conversion not yet implemented" && false);
+}
+
 // needed for kernel argument copy
 struct subsampling {
     int x_0;
@@ -33,35 +75,38 @@ struct subsampling {
     int y_3;
 };
 
-// TODO place many parameters as template parameters
+template <int cubes_per_block_x, int cubes_per_block_y>
 __global__ void kernel_convert(
     int size_x,
     int size_y,
     jpeggpu::image_desc in_image,
-    jpeggpu_color_format in_color_fmt,
-    jpeggpu_pixel_format in_pixel_fmt,
-    subsampling in_css, // e.g. 4:2:0 will get (1, 1), (2, 2), (2, 2)
+    jpeggpu_color_format_jpeg in_color_fmt, // TODO make template parameter
+    // e.g. 4:2:0 will get (12, 12), (6, 6), (6, 6), 4:4:4 will get (12, 12), (12, 12), (12, 12)
+    subsampling in_css_inv,
+    int in_num_components, // TODO make template parameter
     jpeggpu::image_desc out_image,
-    jpeggpu_color_format out_color_fmt,
-    jpeggpu_pixel_format out_pixel_fmt,
-    subsampling out_css)
+    jpeggpu_color_format_out out_color_fmt, // TODO make template parameter
+    subsampling out_css_inv,
+    int out_num_components, // TODO make template parameter
+    bool is_interleaved)
 {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int block_x = blockIdx.x * blockDim.x;
+    const int block_y = blockIdx.y * blockDim.y;
 
-    const int x_off = x * 4;
-    const int y_off = y * 4;
+    const int x = block_x + threadIdx.x;
+    const int y = block_y + threadIdx.y;
 
-    if (x_off >= size_x || y_off >= size_y) {
-        return;
-    }
+    constexpr int num_pixels_per_block_x = cubes_per_block_x * 12;
+    constexpr int num_pixels_per_block_y = cubes_per_block_y * 12;
+    constexpr int num_pixels_per_block   = num_pixels_per_block_x * num_pixels_per_block_y;
+    __shared__ uint8_t data[num_pixels_per_block][max_comp_count];
 
-    const int in_num_components = 3;
+    const int i = threadIdx.y * num_pixels_per_block_x + threadIdx.x;
 
+    // TODO optimize such that each thread loads at most one word at a time
+    // load data, every thread loads one pixel
     // in_image will always be planar
-    uint8_t data[4 * 4][4]; // 16 pix in block, 4 components
     for (int c = 0; c < in_num_components; ++c) {
-        // hope this gets unrolled if `in_num_components` is constexpr
         const uint8_t* channel;
         int pitch;
         int ssx;
@@ -70,121 +115,120 @@ __global__ void kernel_convert(
         case 0:
             channel = in_image.channel_0;
             pitch   = in_image.pitch_0;
-            ssx     = in_css.x_0;
-            ssy     = in_css.y_0;
+            ssx     = in_css_inv.x_0;
+            ssy     = in_css_inv.y_0;
             break;
         case 1:
             channel = in_image.channel_1;
             pitch   = in_image.pitch_1;
-            ssx     = in_css.x_1;
-            ssy     = in_css.y_1;
+            ssx     = in_css_inv.x_1;
+            ssy     = in_css_inv.y_1;
             break;
         case 2:
             channel = in_image.channel_2;
             pitch   = in_image.pitch_2;
-            ssx     = in_css.x_2;
-            ssy     = in_css.y_2;
+            ssx     = in_css_inv.x_2;
+            ssy     = in_css_inv.y_2;
             break;
         case 3:
             channel = in_image.channel_3;
             pitch   = in_image.pitch_3;
-            ssx     = in_css.x_3;
-            ssy     = in_css.y_3;
+            ssx     = in_css_inv.x_3;
+            ssy     = in_css_inv.y_3;
             break;
         default:
             __builtin_unreachable();
         }
 
-        for (int yy = 0; yy < ssy; ++yy) {
-            for (int xx = 0; xx < ssx; ++xx) {
-                const uint8_t val = channel[(y * ssy + yy) * pitch + x * ssx + xx];
-                for (int yyy = 0; yyy < 4 / ssy; ++yyy) {
-                    for (int xxx = 0; xxx < 4 / ssx; ++xxx) {
-                        // no bounds check needed, input data is always a multiple of four
-                        data[(yy * (4 / ssy) + yyy) * 4 + (xx * (4 / ssx) + xxx)][c] = val;
-                    }
-                }
-            }
+        // TODO passing subsampling as template param optimizes these divisions
+        const int x_ss = x * ssx / 12;
+        const int y_ss = y * ssy / 12;
+
+        if (x_ss < ceiling_div(size_x * 12, static_cast<unsigned int>(ssx)) &&
+            y_ss < ceiling_div(size_y * 12, static_cast<unsigned int>(ssy))) {
+            // if image is subsampled, some redundant reads occur
+            data[i][c] = channel[y_ss * pitch + x_ss];
         }
     }
 
-    for (int yy = 0; yy < 4; ++yy) {
-        for (int xx = 0; xx < 4; ++xx) {
-            convert(data[yy * 4 + xx]);
-        }
-    }
+    convert(data[i], in_color_fmt, out_color_fmt);
+    __syncthreads();
 
-    const bool interleaved = true;
-    if (interleaved) {
-        const int out_num_components = 3;
+    if (is_interleaved) {
+        // if out format is interleaved, no subsampling is allowed
+        if (x >= size_x || y >= size_y) {
+            return;
+        }
+
         for (int c = 0; c < out_num_components; ++c) {
-            // if out format is interleaved, no subsampling is allowed
-            for (int yy = 0; yy < 4; ++yy) {
-                for (int xx = 0; xx < 4; ++xx) {
-                    const int out_x = x_off + xx;
-                    const int out_y = y_off + yy;
-                    if (out_x >= size_x || out_y >= size_y) {
-                        continue;
-                    }
-
-                    const size_t idx = out_y * out_image.pitch_0 + out_x * out_num_components;
-                    out_image.channel_0[idx + c] = data[yy * 4 + xx][c];
-                }
-            }
+            const size_t idx             = y * out_image.pitch_0 + x * out_num_components;
+            out_image.channel_0[idx + c] = data[i][c];
         }
     } else {
-        const int out_num_components = 3;
+        // TODO this path is not yet fully tested
+        // offset of the cube in shared memory
+        const int shared_off_x = threadIdx.x / 12 * 12;
+        const int shared_off_y = threadIdx.y / 12 * 12;
+
+        // offset of the cube in global output
+        const int x_off = x / 12 * 12;
+        const int y_off = y / 12 * 12;
+
         for (int c = 0; c < out_num_components; ++c) {
-            // hope this gets unrolled if `out_num_components` is constexpr
             uint8_t* channel;
             int pitch;
-            int ssx;
-            int ssy;
+            int ssx_inv;
+            int ssy_inv;
             switch (c) {
             case 0:
                 channel = out_image.channel_0;
                 pitch   = out_image.pitch_0;
-                ssx     = out_css.x_0;
-                ssy     = out_css.y_0;
+                ssx_inv = out_css_inv.x_0;
+                ssy_inv = out_css_inv.y_0;
                 break;
             case 1:
                 channel = out_image.channel_1;
                 pitch   = out_image.pitch_1;
-                ssx     = out_css.x_1;
-                ssy     = out_css.y_1;
+                ssx_inv = out_css_inv.x_1;
+                ssy_inv = out_css_inv.y_1;
                 break;
             case 2:
                 channel = out_image.channel_2;
                 pitch   = out_image.pitch_2;
-                ssx     = out_css.x_2;
-                ssy     = out_css.y_2;
+                ssx_inv = out_css_inv.x_2;
+                ssy_inv = out_css_inv.y_2;
                 break;
             case 3:
                 channel = out_image.channel_3;
                 pitch   = out_image.pitch_3;
-                ssx     = out_css.x_3;
-                ssy     = out_css.y_3;
+                ssx_inv = out_css_inv.x_3;
+                ssy_inv = out_css_inv.y_3;
                 break;
             default:
                 __builtin_unreachable();
             }
 
-            // FIXME: probably, css-related is broken
-            for (int yy = 0; yy < ssy; ++yy) {
-                for (int xx = 0; xx < ssx; ++xx) {
+            for (int yy = 0; yy < ssy_inv; ++yy) {
+                for (int xx = 0; xx < ssx_inv; ++xx) {
+                    // output one pixel, possibly an aggregate due to subsampling
                     const int out_x = x_off + xx;
                     const int out_y = y_off + yy;
                     if (out_x >= size_x || out_y >= size_y) {
                         continue;
                     }
 
+                    // aggregation in int to prevent data loss (rounding)
+                    //   when subsampling factor is the same
                     int sum = 0;
-                    for (int yyy = 0; yyy < 4 / ssy; ++yyy) {
-                        for (int xxx = 0; xxx < 4 / ssx; ++xxx) {
-                            sum += data[(yy * ssy + yyy) * 4 + (xx * ssx + xxx)][c];
+                    for (int yyy = 0; yyy < 12 / ssy_inv; ++yyy) {
+                        for (int xxx = 0; xxx < 12 / ssx_inv; ++xxx) {
+                            const int shared_x = shared_off_x + xx * ssx_inv + xxx;
+                            const int shared_y = shared_off_y + yy * ssy_inv + yyy;
+                            sum += data[shared_y * num_pixels_per_block_x + shared_x][c];
                         }
                     }
-                    const uint8_t val              = sum * (1.f / (ssx * ssy));
+                    // integer division to prevent rounding
+                    const uint8_t val              = sum / (ssx_inv * ssy_inv);
                     channel[out_y * pitch + out_x] = val;
                 }
             }
@@ -192,25 +236,36 @@ __global__ void kernel_convert(
     }
 }
 
+} // namespace
+
 jpeggpu_status jpeggpu::convert(
     int size_x,
     int size_y,
     jpeggpu::image_desc in_image,
-    jpeggpu_color_format in_color_fmt,
-    jpeggpu_pixel_format in_pixel_fmt,
+    jpeggpu_color_format_jpeg in_color_fmt,
     jpeggpu_subsampling in_subsampling,
+    int in_num_components,
     jpeggpu::image_desc out_image,
-    jpeggpu_color_format out_color_fmt,
-    jpeggpu_pixel_format out_pixel_fmt,
+    jpeggpu_color_format_out out_color_fmt,
     jpeggpu_subsampling out_subsampling,
+    int out_num_components,
+    bool is_interleaved,
     cudaStream_t stream)
 {
-    constexpr int block_size_x = 32;
-    constexpr int block_size_y = 16;
-    const dim3 block_size(block_size_x, block_size_y);
+    // lcm of 1, 2, 3, and 4 is 12. pixels are processed in "cubes" of 12x12 to make subsampling
+    //   conversion easier: no inter-block communication is needed at most size_x * size_y * num_components
+    //   numer of reads and writes are done
+
+    constexpr int cubes_per_block_x = 2; // configurable for performance
+    constexpr int cubes_per_block_y = 2; // configurable for performance
+
+    constexpr int pixels_per_block_x = 12 * cubes_per_block_x;
+    constexpr int pixels_per_block_y = 12 * cubes_per_block_y;
+
+    const dim3 block_size(pixels_per_block_x, pixels_per_block_y);
     const dim3 grid_size(
-        ceiling_div(ceiling_div(size_x, 4u), static_cast<unsigned int>(block_size_x)),
-        ceiling_div(ceiling_div(size_y, 4u), static_cast<unsigned int>(block_size_y)));
+        ceiling_div(size_x, static_cast<unsigned int>(pixels_per_block_x)),
+        ceiling_div(size_y, static_cast<unsigned int>(pixels_per_block_y)));
 
     const auto calc_max = [](jpeggpu_subsampling css) -> int2 {
         int2 ret = make_int2(0, 0);
@@ -226,10 +281,10 @@ jpeggpu_status jpeggpu::convert(
 
     const auto conv_css = [](jpeggpu_subsampling css, int2 css_max) -> subsampling {
         const auto conv_x = [=](int x) -> int {
-            return ceiling_div(4 * x, static_cast<unsigned int>(css_max.x));
+            return ceiling_div(12 * x, static_cast<unsigned int>(css_max.x));
         };
         const auto conv_y = [=](int y) -> int {
-            return ceiling_div(4 * y, static_cast<unsigned int>(css_max.y));
+            return ceiling_div(12 * y, static_cast<unsigned int>(css_max.y));
         };
         return {
             conv_x(css.x[0]),
@@ -242,19 +297,20 @@ jpeggpu_status jpeggpu::convert(
             conv_y(css.y[3])};
     };
 
-    const subsampling in_css  = conv_css(in_subsampling, in_css_max);
-    const subsampling out_css = conv_css(out_subsampling, out_css_max);
-    kernel_convert<<<grid_size, block_size, 0, stream>>>(
+    const subsampling in_css_inv  = conv_css(in_subsampling, in_css_max);
+    const subsampling out_css_inv = conv_css(out_subsampling, out_css_max);
+    kernel_convert<cubes_per_block_x, cubes_per_block_y><<<grid_size, block_size, 0, stream>>>(
         size_x,
         size_y,
         in_image,
         in_color_fmt,
-        in_pixel_fmt,
-        in_css,
+        in_css_inv,
+        in_num_components,
         out_image,
         out_color_fmt,
-        out_pixel_fmt,
-        out_css);
+        out_css_inv,
+        out_num_components,
+        is_interleaved);
     JPEGGPU_CHECK_CUDA(cudaGetLastError());
 
     return JPEGGPU_SUCCESS;

@@ -45,8 +45,8 @@
 
 int main(int argc, char* argv[])
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: example <jpeg_file>\n");
+    if (argc < 2) {
+        fprintf(stderr, "usage: example <in_jpeg_file> (optional: <out_png_file>)\n");
         return EXIT_FAILURE;
     }
 
@@ -84,25 +84,28 @@ int main(int argc, char* argv[])
 
     CHECK_JPEGGPU(jpeggpu_decoder_transfer(decoder, d_tmp, tmp_size, stream));
 
-    const size_t image_size = img_info.size_x * img_info.size_y;
-    struct jpeggpu_img img;
-    CHECK_CUDA(cudaMalloc((void**)&img.image[0], image_size * 3));
-    img.pitch[0]    = img_info.size_x * 3;
-    img.color_fmt   = JPEGGPU_SRGB;
-    img.pixel_fmt   = JPEGGPU_P012;
-    img.subsampling = img_info.subsampling;
+    const size_t image_size = img_info.sizes_x[0] * img_info.sizes_y[0];
+    struct jpeggpu_img_interleaved img;
+    CHECK_CUDA(cudaMalloc((void**)&img.image, image_size * 3));
+    img.pitch     = img_info.sizes_x[0] * 3;
+    img.color_fmt = JPEGGPU_OUT_SRGB;
 
-    CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &img, d_tmp, tmp_size, stream));
+    CHECK_JPEGGPU(jpeggpu_decoder_decode_interleaved(decoder, &img, d_tmp, tmp_size, stream));
 
     CHECK_CUDA(cudaFree(d_tmp));
 
     printf("gpu decode done\n");
 
     uint8_t* h_img = malloc(image_size * 3);
-    CHECK_CUDA(cudaMemcpy(h_img, img.image[0], image_size * 3, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_img, img.image, image_size * 3, cudaMemcpyDeviceToHost));
 
-    const size_t byte_stride = img.pitch[0];
-    stbi_write_png("out.png", img_info.size_x, img_info.size_y, 3, h_img, byte_stride);
+    const char* out_filename = "out.png";
+    if (argc >= 3) {
+        out_filename = argv[2];
+    }
+
+    const size_t byte_stride = img.pitch;
+    stbi_write_png(out_filename, img_info.sizes_x[0], img_info.sizes_y[0], 3, h_img, byte_stride);
 
     free(h_img);
 

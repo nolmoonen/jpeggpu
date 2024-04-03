@@ -62,21 +62,25 @@ bool jpeggpu::reader::has_remaining(int size)
     return reader_state.image_end - reader_state.image >= size;
 }
 
-jpeggpu_status jpeggpu::reader::read_marker(uint8_t& marker)
+bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
+
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_marker(uint8_t& marker)
 {
     if (!has_remaining(2)) {
+        log("\ttoo few bytes for marker\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint8_t ff = read_uint8();
     if (ff != 0xff) {
+        log("\tinvalid marker byte 0x%02x\n", ff);
         return JPEGGPU_INVALID_JPEG;
     }
     marker = read_uint8();
     return JPEGGPU_SUCCESS;
 }
 
-jpeggpu_status jpeggpu::reader::read_sof0()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_sof0()
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -115,18 +119,10 @@ jpeggpu_status jpeggpu::reader::read_sof0()
         if (ss_x_c < 1 && ss_x_c > 4) {
             return JPEGGPU_INVALID_JPEG;
         }
-        if (ss_x_c == 3) {
-            // fairly annoying to handle, and extremely uncommon
-            return JPEGGPU_NOT_SUPPORTED;
-        }
         comp.ss_x        = ss_x_c;
         const int ss_y_c = sampling_factors & 0xf;
         if (ss_y_c < 1 && ss_y_c > 4) {
             return JPEGGPU_INVALID_JPEG;
-        }
-        if (ss_y_c == 3) {
-            // fairly annoying to handle, and extremely uncommon
-            return JPEGGPU_NOT_SUPPORTED;
         }
         comp.ss_y        = ss_y_c;
         const uint8_t qi = read_uint8();
@@ -186,14 +182,16 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
     table.maxcode[17] = 0xFFFFFL;
 }
 
-jpeggpu_status jpeggpu::reader::read_dht()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dht()
 {
     if (!has_remaining(2)) {
+        log("\ttoo few bytes in DHT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint16_t length = read_uint16() - 2;
     if (!has_remaining(length)) {
+        log("\ttoo few bytes in DHT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
@@ -205,6 +203,7 @@ jpeggpu_status jpeggpu::reader::read_dht()
         const int th = index & 0xf;
         // TODO check if these are already defined. if so, throw warning
         if (tc != 0 && tc != 1) {
+            log("\tinvalid Huffman table index\n");
             return JPEGGPU_INVALID_JPEG;
         }
         if (th != 0 && th != 1) {
@@ -212,6 +211,7 @@ jpeggpu_status jpeggpu::reader::read_dht()
         }
 
         if (!has_remaining(16)) {
+            log("\ttoo few bytes in DHT segment\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
@@ -228,10 +228,12 @@ jpeggpu_status jpeggpu::reader::read_dht()
         remaining -= 16;
 
         if (!has_remaining(count)) {
+            log("\ttoo few bytes in DHT segment\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
         if (static_cast<size_t>(count) > sizeof(table.huffval)) {
+            log("\ttoo many values\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
@@ -248,19 +250,27 @@ jpeggpu_status jpeggpu::reader::read_dht()
     return JPEGGPU_SUCCESS;
 }
 
-jpeggpu_status jpeggpu::reader::read_sos()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_sos()
 {
     if (!has_remaining(3)) {
+        log("\ttoo few bytes in SOS segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint16_t length        = read_uint16();
     const uint8_t num_components = read_uint8();
-    // there should only be one scan if the scan is interleaved (1 < num_components)
-    if (num_components > 4 || (1 < num_components && num_components < jpeg_stream.num_components)) {
+    if (num_components < 1 || num_components > 4) {
+        log("\tinvalid number of components in scan\n");
         return JPEGGPU_INVALID_JPEG;
     }
     jpeg_stream.is_interleaved = num_components > 1;
+    if (jpeg_stream.is_interleaved && num_components != jpeg_stream.num_components) {
+        // FIXME this is a wrong assumption, this is allowed! see ISO/IEC 10918-1 4.10
+        log("\tinvalid number of components in interleaved scan (%d) compared to stream (%d)\n",
+            num_components,
+            jpeg_stream.num_components);
+        return JPEGGPU_INVALID_JPEG;
+    }
 
     if (length != 2 + 1 + 2 * num_components + 3) {
         return JPEGGPU_INVALID_JPEG;
@@ -359,8 +369,7 @@ jpeggpu_status jpeggpu::reader::read_sos()
             break;
         }
 
-        log("marker %s\n", jpeggpu::get_marker_string(marker));
-        log("unexpected\n");
+        log("unexpected marker \"%s\"\n", jpeggpu::get_marker_string(marker));
         return JPEGGPU_INVALID_JPEG;
     } while (reader_state.image < reader_state.image_end);
     scan.begin = scan_begin;
@@ -369,7 +378,7 @@ jpeggpu_status jpeggpu::reader::read_sos()
     return JPEGGPU_SUCCESS;
 }
 
-jpeggpu_status jpeggpu::reader::read_dqt()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dqt()
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -410,7 +419,7 @@ jpeggpu_status jpeggpu::reader::read_dqt()
     return JPEGGPU_SUCCESS;
 }
 
-jpeggpu_status jpeggpu::reader::read_dri()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dri()
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -434,7 +443,7 @@ jpeggpu_status jpeggpu::reader::read_dri()
     return JPEGGPU_SUCCESS;
 }
 
-jpeggpu_status jpeggpu::reader::skip_segment()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::skip_segment()
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -474,7 +483,7 @@ jpeggpu_status jpeggpu::reader::read()
         log("marker %s\n", get_marker_string(marker));
         switch (marker) {
         case jpeggpu::MARKER_SOF0:
-            read_sof0();
+            JPEGGPU_CHECK_STATUS(read_sof0());
             continue;
         case jpeggpu::MARKER_SOF1:
         case jpeggpu::MARKER_SOF2:
@@ -488,21 +497,21 @@ jpeggpu_status jpeggpu::reader::read()
         case jpeggpu::MARKER_SOF13:
         case jpeggpu::MARKER_SOF14:
         case jpeggpu::MARKER_SOF15:
-            log("unsupported JPEG type %s\n", get_marker_string(marker));
+            log("\tunsupported JPEG type: %s\n", get_marker_string(marker));
             return JPEGGPU_NOT_SUPPORTED;
         case jpeggpu::MARKER_DHT:
-            read_dht();
+            JPEGGPU_CHECK_STATUS(read_dht());
             continue;
         case jpeggpu::MARKER_EOI:
             break; // nothing to skip
         case jpeggpu::MARKER_SOS:
-            read_sos();
+            JPEGGPU_CHECK_STATUS(read_sos());
             continue;
         case jpeggpu::MARKER_DQT:
-            read_dqt();
+            JPEGGPU_CHECK_STATUS(read_dqt());
             continue;
         case jpeggpu::MARKER_DRI:
-            read_dri();
+            JPEGGPU_CHECK_STATUS(read_dri());
             continue;
         default:
             JPEGGPU_CHECK_STATUS(skip_segment());
@@ -520,8 +529,15 @@ jpeggpu_status jpeggpu::reader::read()
 
     jpeg_stream.num_data_units_in_mcu = 0;
     jpeg_stream.total_data_size       = 0;
+
     for (int c = 0; c < jpeg_stream.num_components; ++c) {
         component& comp = jpeg_stream.components[c];
+
+        // A.2.4 Completion of partial MCU
+        assert(comp.size_x % data_unit_vector_size == 0);
+        assert(comp.size_y % data_unit_vector_size == 0);
+        assert(comp.size_x % (data_unit_vector_size * comp.ss_x) == 0);
+        assert(comp.size_y % (data_unit_vector_size * comp.ss_y) == 0);
 
         comp.size_x = get_size(jpeg_stream.size_x, comp.ss_x, jpeg_stream.ss_x_max);
         comp.size_y = get_size(jpeg_stream.size_y, comp.ss_y, jpeg_stream.ss_y_max);
@@ -536,19 +552,16 @@ jpeggpu_status jpeggpu::reader::read()
         comp.data_size_y =
             ceiling_div(comp.size_y, static_cast<unsigned int>(comp.mcu_size_y)) * comp.mcu_size_y;
 
-        // TODO assumption 3: assumes first component is not subsampled
+        const int num_mcus_x =
+            ceiling_div(comp.data_size_x, static_cast<unsigned int>(comp.mcu_size_x));
+        const int num_mcus_y =
+            ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_x));
         if (c == 0) {
-            jpeg_stream.num_mcus_x =
-                ceiling_div(comp.data_size_x, static_cast<unsigned int>(comp.mcu_size_x));
-            jpeg_stream.num_mcus_y =
-                ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_y));
+            jpeg_stream.num_mcus_x = num_mcus_x;
+            jpeg_stream.num_mcus_y = num_mcus_y;
         } else {
-            assert(
-                ceiling_div(comp.data_size_x, static_cast<unsigned int>(comp.mcu_size_x)) ==
-                static_cast<unsigned int>(jpeg_stream.num_mcus_x));
-            assert(
-                ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_y)) ==
-                static_cast<unsigned int>(jpeg_stream.num_mcus_y));
+            assert(jpeg_stream.num_mcus_x == num_mcus_x);
+            assert(jpeg_stream.num_mcus_y == num_mcus_y);
         }
 
         jpeg_stream.num_data_units_in_mcu += comp.ss_x * comp.ss_y;
@@ -558,16 +571,10 @@ jpeggpu_status jpeggpu::reader::read()
     // TODO read metadata to determine color formats
     switch (jpeg_stream.num_components) {
     case 1:
-        jpeg_stream.color_fmt = JPEGGPU_GRAY;
-        jpeg_stream.pixel_fmt = JPEGGPU_P0;
+        jpeg_stream.color_fmt = JPEGGPU_JPEG_GRAY;
         break;
     case 3:
-        jpeg_stream.color_fmt = JPEGGPU_YCBCR;
-        jpeg_stream.pixel_fmt = JPEGGPU_P0P1P2;
-        break;
-    case 4:
-        jpeg_stream.color_fmt = JPEGGPU_CMYK;
-        jpeg_stream.pixel_fmt = JPEGGPU_P0P1P2P3;
+        jpeg_stream.color_fmt = JPEGGPU_JPEG_YCBCR;
         break;
     default:
         return JPEGGPU_NOT_SUPPORTED;

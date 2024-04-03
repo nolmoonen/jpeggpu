@@ -77,7 +77,6 @@ template <bool do_it>
 jpeggpu_status jpeggpu::decode_dc(
     const jpeg_stream& info, int16_t* d_out, stack_allocator& allocator, cudaStream_t stream)
 {
-    // TODO assumption 3: this calculation only works for 4:4:4, 4:2:0, etc.?
     int off_in_mcu  = 0; // number of data units, only used for interleaved
     int off_in_data = 0; // number of data elements, only used for non-interleaved
 

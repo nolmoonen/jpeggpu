@@ -20,14 +20,16 @@ jpeggpu_status convert(
     int size_x,
     int size_y,
     image_desc in_image,
-    jpeggpu_color_format in_color_fmt,
-    jpeggpu_pixel_format in_pixel_fmt, // will always be planar
+    jpeggpu_color_format_jpeg in_color_fmt,
     jpeggpu_subsampling in_subsampling,
+    int in_num_components,
     image_desc out_image,
-    jpeggpu_color_format out_color_fmt,
-    jpeggpu_pixel_format out_pixel_fmt,
+    jpeggpu_color_format_out out_color_fmt,
     jpeggpu_subsampling out_subsampling,
+    int out_num_components,
+    bool is_interleaved,
     cudaStream_t stream);
 
 } // namespace jpeggpu
+
 #endif // JPEGGPU_CONVERT_HPP_

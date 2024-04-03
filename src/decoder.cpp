@@ -89,19 +89,20 @@ jpeggpu_status jpeggpu::decoder::parse_header(
         return stat;
     }
 
-    // TODO check reader consistency
-
-    img_info.size_x = reader.jpeg_stream.size_x;
-    img_info.size_y = reader.jpeg_stream.size_y;
-
-    img_info.color_fmt = reader.jpeg_stream.color_fmt;
-    img_info.pixel_fmt = reader.jpeg_stream.pixel_fmt;
-
+    // set jpeggpu_img_info
     for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        img_info.subsampling.x[c] =
-            reader.jpeg_stream.ss_x_max / reader.jpeg_stream.components[c].ss_x;
-        img_info.subsampling.y[c] =
-            reader.jpeg_stream.ss_y_max / reader.jpeg_stream.components[c].ss_y;
+        img_info.sizes_x[c] = reader.jpeg_stream.components->size_x;
+        img_info.sizes_y[c] = reader.jpeg_stream.components->size_y;
+    }
+    for (int c = reader.jpeg_stream.num_components; c < max_comp_count; ++c) {
+        img_info.sizes_x[c] = 0;
+        img_info.sizes_y[c] = 0;
+    }
+    img_info.num_components = reader.jpeg_stream.num_components;
+    img_info.color_fmt      = reader.jpeg_stream.color_fmt;
+    for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
+        img_info.subsampling.x[c] = reader.jpeg_stream.components[c].ss_x;
+        img_info.subsampling.y[c] = reader.jpeg_stream.components[c].ss_y;
     }
     for (int c = reader.jpeg_stream.num_components; c < max_comp_count; ++c) {
         img_info.subsampling.x[c] = 0;
@@ -320,12 +321,15 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
 }
 
 jpeggpu_status jpeggpu::decoder::decode(
-    jpeggpu_img* img, void* d_tmp_param, size_t tmp_size_param, cudaStream_t stream)
+    uint8_t* (&image)[max_comp_count],
+    int (&pitch)[max_comp_count],
+    jpeggpu_color_format_out color_fmt,
+    jpeggpu_subsampling subsampling,
+    bool out_is_interleaved,
+    void* d_tmp_param,
+    size_t tmp_size_param,
+    cudaStream_t stream)
 {
-    if (!img) {
-        return JPEGGPU_INTERNAL_ERROR;
-    }
-
     allocator.reset(d_tmp_param, tmp_size_param);
 
     JPEGGPU_CHECK_STAT(decode_impl<true>(stream));
@@ -333,45 +337,95 @@ jpeggpu_status jpeggpu::decoder::decode(
     // output image format have not bearing on temporary memory or the decoding process
 
     // data will be planar, may be subsampled, may be RGB, YCbCr, CYMK, anything else
-    const bool is_matching_css = false; // TODO find a good way to pass CSS to this function
-    const jpeg_stream& info    = reader.jpeg_stream;
-    if (info.color_fmt != img->color_fmt || info.pixel_fmt != img->pixel_fmt || !is_matching_css) {
-        convert(
-            info.size_x,
-            info.size_y,
-            jpeggpu::image_desc{
-                d_image[0],
-                info.components[0].data_size_x,
-                d_image[1],
-                info.components[1].data_size_x,
-                d_image[2],
-                info.components[2].data_size_x,
-                d_image[3],
-                info.components[3].data_size_x},
-            info.color_fmt,
-            info.pixel_fmt,
-            {{info.components[0].ss_x,
-              info.components[1].ss_x,
-              info.components[2].ss_x,
-              info.components[3].ss_x},
-             {info.components[0].ss_y,
-              info.components[1].ss_y,
-              info.components[2].ss_y,
-              info.components[3].ss_y}},
-            jpeggpu::image_desc{
-                img->image[0],
-                img->pitch[0],
-                img->image[1],
-                img->pitch[1],
-                img->image[2],
-                img->pitch[2],
-                img->image[3],
-                img->pitch[3]},
-            img->color_fmt,
-            img->pixel_fmt,
-            img->subsampling,
-            stream);
+
+    // TODO in some cases conversion may not be needed, and a simple copy suffices. optimize this case
+
+    const jpeg_stream& info = reader.jpeg_stream;
+
+    int out_num_components = 0;
+    switch (color_fmt) {
+    case JPEGGPU_OUT_GRAY:
+        out_num_components = 1;
+        break;
+    case JPEGGPU_OUT_SRGB:
+        out_num_components = 3;
+        break;
+    case JPEGGPU_OUT_YCBCR:
+        break;
+        out_num_components = 3;
+        break;
+    case JPEGGPU_OUT_NO_CONVERSION:
+        out_num_components = info.num_components;
+        break;
+    }
+    if (out_num_components == 0) {
+        return JPEGGPU_INVALID_ARGUMENT;
     }
 
+    convert(
+        info.size_x,
+        info.size_y,
+        jpeggpu::image_desc{
+            d_image[0],
+            info.components[0].data_size_x,
+            d_image[1],
+            info.components[1].data_size_x,
+            d_image[2],
+            info.components[2].data_size_x,
+            d_image[3],
+            info.components[3].data_size_x},
+        info.color_fmt,
+        {{info.components[0].ss_x,
+          info.components[1].ss_x,
+          info.components[2].ss_x,
+          info.components[3].ss_x},
+         {info.components[0].ss_y,
+          info.components[1].ss_y,
+          info.components[2].ss_y,
+          info.components[3].ss_y}},
+        info.num_components,
+        jpeggpu::image_desc{
+            image[0], pitch[0], image[1], pitch[1], image[2], pitch[2], image[3], pitch[3]},
+        color_fmt,
+        subsampling,
+        out_num_components,
+        out_is_interleaved,
+        stream);
+
     return JPEGGPU_SUCCESS;
+}
+
+jpeggpu_status jpeggpu::decoder::decode(
+    jpeggpu_img* img, void* d_tmp_param, size_t tmp_size_param, cudaStream_t stream)
+{
+    if (!img) {
+        return JPEGGPU_INTERNAL_ERROR;
+    }
+
+    return decode(
+        img->image,
+        img->pitch,
+        img->color_fmt,
+        img->subsampling,
+        false,
+        d_tmp_param,
+        tmp_size_param,
+        stream);
+}
+
+jpeggpu_status jpeggpu::decoder::decode(
+    jpeggpu_img_interleaved* img, void* d_tmp_param, size_t tmp_size_param, cudaStream_t stream)
+{
+    if (!img) {
+        return JPEGGPU_INTERNAL_ERROR;
+    }
+
+    uint8_t* image[max_comp_count] = {img->image, nullptr, nullptr, nullptr};
+
+    int pitch[max_comp_count] = {img->pitch, 0, 0, 0};
+
+    jpeggpu_subsampling subsampling = {{1, 1, 1, 1}, {1, 1, 1, 1}};
+
+    return decode(
+        image, pitch, img->color_fmt, subsampling, true, d_tmp_param, tmp_size_param, stream);
 }
