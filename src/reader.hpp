@@ -20,7 +20,9 @@ struct huffman_table {
     int valptr[17];
 
     /// These two fields directly represent the contents of a JPEG DHT marker
-    /// bits[k] = # of symbols with codes of
+
+    // TODO can be shrunk, there are no codes of length 0
+    /// bits[k] = # of symbols with codes of length k
     uint8_t bits[17];
     /// The symbols, in order of incr code length
     uint8_t huffval[256];
@@ -36,13 +38,13 @@ struct scan {
     int num_segments;
 };
 
-// TODO make vector class?
+// TODO make vector class, e.g. int2?
 struct component {
     uint8_t id; /// Id as defined in the start of frame header.
     uint8_t qtable_idx; /// Index of quantization table.
     uint8_t dc_idx; /// Index of DC Huffman table.
     uint8_t ac_idx; /// Index of AC Huffman table.
-    int size_x; /// Actual image size in pixels. TODO is this used?
+    int size_x; /// Actual image size in pixels.
     int size_y;
     // TODO add some variable for number of data units in MCU?
     int mcu_size_x; /// Number of pixels in one MCU.

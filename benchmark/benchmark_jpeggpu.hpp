@@ -124,7 +124,6 @@ struct bench_jpeggpu_thread_state {
     cudaEvent_t event_h2d;
     cudaEvent_t event_d2h;
     jpeggpu_decoder_t decoder;
-    int num_components;
     jpeggpu_img_info img_info;
     jpeggpu_img d_img;
     std::vector<char*> h_img;
@@ -172,7 +171,7 @@ void bench_jpeggpu_run_iter(
             bench_state.stream_common));
         CHECK_CUDA(cudaEventRecord(bench_thread_state.event_d2h, bench_state.stream_common));
         CHECK_CUDA(cudaStreamWaitEvent(bench_thread_state.stream, bench_thread_state.event_d2h));
-        for (int c = 0; c < bench_thread_state.num_components; ++c) {
+        for (int c = 0; c < bench_thread_state.img_info.num_components; ++c) {
             const size_t plane_bytes =
                 bench_thread_state.img_info.sizes_x[c] * bench_thread_state.img_info.sizes_y[c];
             CHECK_CUDA(cudaMemcpyAsync(
@@ -240,7 +239,7 @@ void bench_jpeggpu_mt_thread_cleanup(
     bench_jpeggpu_state&, bench_jpeggpu_thread_state& bench_thread_state)
 {
     if (bench_thread_state.d_tmp) CHECK_CUDA(cudaFree(bench_thread_state.d_tmp));
-    for (int c = 0; c < bench_thread_state.num_components; ++c) {
+    for (int c = 0; c < bench_thread_state.img_info.num_components; ++c) {
         CHECK_CUDA(cudaFreeHost(bench_thread_state.h_img[c]));
         CHECK_CUDA(cudaFree(bench_thread_state.d_img.image[c]));
     }

@@ -126,54 +126,47 @@ __global__ void transpose_non_interleaved(
     const int idx_in_data_unit = idx_pixel_in % data_unit_size;
 
     int16_t* data_out = nullptr;
-    int x_data_unit   = 0;
-    int y_data_unit   = 0;
     int2 size         = make_int2(0, 0);
     [&]() {
         int i = idx_data_unit;
 
         int size_0_flat = size_0.x * size_0.y;
         if (i < size_0_flat) {
-            data_out    = data_out_0;
-            x_data_unit = i % size_0.x;
-            y_data_unit = i / size_0.x;
-            size        = size_0;
+            data_out = data_out_0;
+            size     = size_0;
             return;
         }
         i -= size_0_flat;
 
         int size_1_flat = size_1.x * size_1.y;
         if (i < size_1_flat) {
-            data_out    = data_out_1;
-            x_data_unit = i % size_1.x;
-            y_data_unit = i / size_1.x;
-            size        = size_1;
+            data_out = data_out_1;
+            size     = size_1;
             return;
         }
         i -= size_1_flat;
 
         int size_2_flat = size_2.x * size_2.y;
         if (i < size_2_flat) {
-            data_out    = data_out_2;
-            x_data_unit = i % size_2.x;
-            y_data_unit = i / size_2.x;
-            size        = size_2;
+            data_out = data_out_2;
+            size     = size_2;
             return;
         }
         i -= size_2_flat;
 
         int size_3_flat = size_3.x * size_3.y;
         if (i < size_3_flat) {
-            data_out    = data_out_3;
-            x_data_unit = i % size_3.x;
-            y_data_unit = i / size_3.x;
-            size        = size_3;
+            data_out = data_out_3;
+            size     = size_3;
             return;
         }
         i -= size_3_flat;
         assert(false);
         __builtin_unreachable();
     }();
+
+    int x_data_unit = idx_data_unit % (size.x / data_unit_vector_size);
+    int y_data_unit = idx_data_unit / (size.x / data_unit_vector_size);
 
     const uint16_t val = data_in[idx_pixel_in];
 

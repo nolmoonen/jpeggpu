@@ -35,7 +35,8 @@ enum jpeggpu_status jpeggpu_set_logging(jpeggpu_decoder_t decoder, int do_loggin
 /// \brief Color format of JPEG file.
 enum jpeggpu_color_format_jpeg {
     JPEGGPU_JPEG_GRAY = 0, /// single-component grayscale
-    JPEGGPU_JPEG_YCBCR /// three-component YCbCr BT.601
+    JPEGGPU_JPEG_YCBCR, /// three-component YCbCr BT.601
+    JPEGGPU_JPEG_CMYK /// four-component CMYK
 };
 
 /// \brief Color format of output buffer.

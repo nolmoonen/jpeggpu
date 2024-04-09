@@ -258,6 +258,10 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
 
     // after decoding, the data is as how it appears in the encoded stream: one data unit at a time, possibly interleaved
 
+    // the order of the components is as how they appear in the scan
+    // FIXME this may need to be reordered depending on metadata, in a lot of places the assumption is that
+    //   e.g. if color space is ycbcr, the components are in that order in the scan(s)
+
     // undo DC difference encoding
     decode_dc<do_it>(info, d_out, allocator, stream);
 
@@ -338,8 +342,6 @@ jpeggpu_status jpeggpu::decoder::decode(
 
     // data will be planar, may be subsampled, may be RGB, YCbCr, CYMK, anything else
 
-    // TODO in some cases conversion may not be needed, and a simple copy suffices. optimize this case
-
     const jpeg_stream& info = reader.jpeg_stream;
 
     int out_num_components = 0;
@@ -365,6 +367,14 @@ jpeggpu_status jpeggpu::decoder::decode(
     convert(
         info.size_x,
         info.size_y,
+        info.components[0].size_x,
+        info.components[1].size_x,
+        info.components[2].size_x,
+        info.components[3].size_x,
+        info.components[0].size_y,
+        info.components[1].size_y,
+        info.components[2].size_y,
+        info.components[3].size_y,
         jpeggpu::image_desc{
             d_image[0],
             info.components[0].data_size_x,

@@ -207,6 +207,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
             return JPEGGPU_INVALID_JPEG;
         }
         if (th != 0 && th != 1) {
+            log("\tmore than two Huffman tables are not supported\n");
             return JPEGGPU_NOT_SUPPORTED;
         }
 
@@ -215,6 +216,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
             return JPEGGPU_INVALID_JPEG;
         }
 
+        log("\t%s Huffman table index %d\n", tc == 0 ? "DC" : "AC", th);
         jpeggpu::huffman_table& table = *(h_huff_tables[th][tc]);
 
         // read bits
@@ -381,29 +383,29 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
 [[nodiscard]] jpeggpu_status jpeggpu::reader::read_dqt()
 {
     if (!has_remaining(2)) {
+        log("\ttoo few bytes in DQT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint16_t length = read_uint16() - 2;
     if (!has_remaining(length)) {
+        log("\ttoo few bytes in DQT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
-    if (length % 65 != 0) {
-        return JPEGGPU_INVALID_JPEG;
-    }
-
-    const int qtable_count = length / 65;
-
-    for (int i = 0; i < qtable_count; ++i) {
-        const uint8_t info  = read_uint8();
+    int remaining = length;
+    while (remaining > 0) {
+        const uint8_t info = read_uint8();
+        --remaining;
         const int precision = info >> 4;
         const int id        = info & 0xf;
         // TODO warning if redefined
         if ((precision != 0 && precision != 1) || id > 3) {
+            log("\tinvalid precision or id value\n");
             return JPEGGPU_INVALID_JPEG;
         }
         if (precision != 0) {
+            log("\t16-bit quantization table is not supported\n");
             return JPEGGPU_NOT_SUPPORTED;
         }
 
@@ -414,6 +416,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
             // store in natural order
             (*h_qtables[id])[jpeggpu::order_natural[j]] = element;
         }
+        remaining -= 64;
     }
 
     return JPEGGPU_SUCCESS;
@@ -435,6 +438,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
     if (seen_rsti_before && jpeg_stream.restart_interval != rsti) {
         // TODO is this even a problem?
         // do not support redefinining restart interval
+        log("\tredefined restart interval\n");
         return JPEGGPU_NOT_SUPPORTED;
     }
     jpeg_stream.restart_interval = rsti;
@@ -555,7 +559,7 @@ jpeggpu_status jpeggpu::reader::read()
         const int num_mcus_x =
             ceiling_div(comp.data_size_x, static_cast<unsigned int>(comp.mcu_size_x));
         const int num_mcus_y =
-            ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_x));
+            ceiling_div(comp.data_size_y, static_cast<unsigned int>(comp.mcu_size_y));
         if (c == 0) {
             jpeg_stream.num_mcus_x = num_mcus_x;
             jpeg_stream.num_mcus_y = num_mcus_y;
@@ -573,11 +577,17 @@ jpeggpu_status jpeggpu::reader::read()
     case 1:
         jpeg_stream.color_fmt = JPEGGPU_JPEG_GRAY;
         break;
+    case 2:
+        log("\tcomponent count of two is not supported\n");
+        return JPEGGPU_NOT_SUPPORTED;
     case 3:
         jpeg_stream.color_fmt = JPEGGPU_JPEG_YCBCR;
         break;
+    case 4:
+        jpeg_stream.color_fmt = JPEGGPU_JPEG_CMYK;
+        break;
     default:
-        return JPEGGPU_NOT_SUPPORTED;
+        return JPEGGPU_INTERNAL_ERROR;
     }
 
     return JPEGGPU_SUCCESS;

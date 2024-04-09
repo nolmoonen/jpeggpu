@@ -12,6 +12,7 @@ __device__ __forceinline__ float clamp_pix(float c) { return fmaxf(0.f, fminf(ro
 
 __device__ void convert_ycbcr_rgb(uint8_t (&data)[4])
 {
+    // https://en.wikipedia.org/wiki/YCbCr#JPEG_conversion
     const uint8_t cy = data[0];
     const uint8_t cb = data[1];
     const uint8_t cr = data[2];
@@ -29,18 +30,21 @@ __device__ void convert_ycbcr_rgb(uint8_t (&data)[4])
 
 __device__ void convert_y_rgb(uint8_t (&data)[4])
 {
-    // essentially convert_y_rgb with cb and cr zero
-    const uint8_t cy = data[0];
+    data[1] = data[0];
+    data[2] = data[0];
+}
 
-    // clang-format off
-    const float r = cy                      + 1.402f    * -128.f;
-    const float g = cy -  .344136f * -128.f -  .714136f * -128.f;
-    const float b = cy + 1.772f    * -128.f;
-    // clang-format on
+__device__ void convert_cmyk_rgb(uint8_t (&data)[4])
+{
+    // based on OpenCV
+    const uint8_t c = data[0];
+    const uint8_t m = data[1];
+    const uint8_t y = data[2];
+    const uint8_t k = data[3];
 
-    data[0] = clamp_pix(r);
-    data[1] = clamp_pix(g);
-    data[2] = clamp_pix(b);
+    data[0] = k - ((255 - c) * k >> 8);
+    data[1] = k - ((255 - m) * k >> 8);
+    data[2] = k - ((255 - y) * k >> 8);
 }
 
 __device__ void convert(
@@ -58,6 +62,10 @@ __device__ void convert(
 
     if (in_color_fmt == JPEGGPU_JPEG_GRAY && out_color_fmt == JPEGGPU_OUT_SRGB) {
         return convert_y_rgb(data);
+    }
+
+    if (in_color_fmt == JPEGGPU_JPEG_CMYK && out_color_fmt == JPEGGPU_OUT_SRGB) {
+        return convert_cmyk_rgb(data);
     }
 
     assert("color conversion not yet implemented" && false);
@@ -79,6 +87,14 @@ template <int cubes_per_block_x, int cubes_per_block_y>
 __global__ void kernel_convert(
     int size_x,
     int size_y,
+    int size_x_0,
+    int size_x_1,
+    int size_x_2,
+    int size_x_3,
+    int size_y_0,
+    int size_y_1,
+    int size_y_2,
+    int size_y_3,
     jpeggpu::image_desc in_image,
     jpeggpu_color_format_jpeg in_color_fmt, // TODO make template parameter
     // e.g. 4:2:0 will get (12, 12), (6, 6), (6, 6), 4:4:4 will get (12, 12), (12, 12), (12, 12)
@@ -165,73 +181,79 @@ __global__ void kernel_convert(
             out_image.channel_0[idx + c] = data[i][c];
         }
     } else {
-        // TODO this path is not yet fully tested
         // offset of the cube in shared memory
         const int shared_off_x = threadIdx.x / 12 * 12;
         const int shared_off_y = threadIdx.y / 12 * 12;
 
-        // offset of the cube in global output
-        const int x_off = x / 12 * 12;
-        const int y_off = y / 12 * 12;
+        // offset in the cube in shared memory
+        const int off_shared_x = threadIdx.x - shared_off_x;
+        const int off_shared_y = threadIdx.y - shared_off_y;
 
         for (int c = 0; c < out_num_components; ++c) {
             uint8_t* channel;
             int pitch;
             int ssx_inv;
             int ssy_inv;
+            int size_x_c;
+            int size_y_c;
             switch (c) {
             case 0:
-                channel = out_image.channel_0;
-                pitch   = out_image.pitch_0;
-                ssx_inv = out_css_inv.x_0;
-                ssy_inv = out_css_inv.y_0;
+                channel  = out_image.channel_0;
+                pitch    = out_image.pitch_0;
+                ssx_inv  = out_css_inv.x_0;
+                ssy_inv  = out_css_inv.y_0;
+                size_x_c = size_x_0;
+                size_y_c = size_y_0;
                 break;
             case 1:
-                channel = out_image.channel_1;
-                pitch   = out_image.pitch_1;
-                ssx_inv = out_css_inv.x_1;
-                ssy_inv = out_css_inv.y_1;
+                channel  = out_image.channel_1;
+                pitch    = out_image.pitch_1;
+                ssx_inv  = out_css_inv.x_1;
+                ssy_inv  = out_css_inv.y_1;
+                size_x_c = size_x_1;
+                size_y_c = size_y_1;
                 break;
             case 2:
-                channel = out_image.channel_2;
-                pitch   = out_image.pitch_2;
-                ssx_inv = out_css_inv.x_2;
-                ssy_inv = out_css_inv.y_2;
+                channel  = out_image.channel_2;
+                pitch    = out_image.pitch_2;
+                ssx_inv  = out_css_inv.x_2;
+                ssy_inv  = out_css_inv.y_2;
+                size_x_c = size_x_2;
+                size_y_c = size_y_2;
                 break;
             case 3:
-                channel = out_image.channel_3;
-                pitch   = out_image.pitch_3;
-                ssx_inv = out_css_inv.x_3;
-                ssy_inv = out_css_inv.y_3;
+                channel  = out_image.channel_3;
+                pitch    = out_image.pitch_3;
+                ssx_inv  = out_css_inv.x_3;
+                ssy_inv  = out_css_inv.y_3;
+                size_x_c = size_x_3;
+                size_y_c = size_y_3;
                 break;
             default:
                 __builtin_unreachable();
             }
 
-            for (int yy = 0; yy < ssy_inv; ++yy) {
-                for (int xx = 0; xx < ssx_inv; ++xx) {
-                    // output one pixel, possibly an aggregate due to subsampling
-                    const int out_x = x_off + xx;
-                    const int out_y = y_off + yy;
-                    if (out_x >= size_x || out_y >= size_y) {
-                        continue;
-                    }
+            // output one pixel, possibly an aggregate due to subsampling
+            if (x >= size_x_c || y >= size_y_c) {
+                continue;
+            }
 
-                    // aggregation in int to prevent data loss (rounding)
-                    //   when subsampling factor is the same
-                    int sum = 0;
-                    for (int yyy = 0; yyy < 12 / ssy_inv; ++yyy) {
-                        for (int xxx = 0; xxx < 12 / ssx_inv; ++xxx) {
-                            const int shared_x = shared_off_x + xx * ssx_inv + xxx;
-                            const int shared_y = shared_off_y + yy * ssy_inv + yyy;
-                            sum += data[shared_y * num_pixels_per_block_x + shared_x][c];
-                        }
-                    }
-                    // integer division to prevent rounding
-                    const uint8_t val              = sum / (ssx_inv * ssy_inv);
-                    channel[out_y * pitch + out_x] = val;
+            const int xx = 12 / ssx_inv;
+            const int yy = 12 / ssy_inv;
+
+            // aggregation in int to prevent data loss (rounding)
+            //   when subsampling factor is the same
+            int sum = 0;
+            for (int yyy = 0; yyy < xx; ++yyy) {
+                for (int xxx = 0; xxx < yy; ++xxx) {
+                    const int shared_x = shared_off_x + off_shared_x / xx * xx + xxx;
+                    const int shared_y = shared_off_y + off_shared_y / yy * yy + yyy;
+                    sum += data[shared_y * num_pixels_per_block_x + shared_x][c];
                 }
             }
+            // integer division to prevent rounding
+            const uint8_t val      = sum / (ssx_inv * ssy_inv);
+            channel[y * pitch + x] = val;
         }
     }
 }
@@ -241,6 +263,14 @@ __global__ void kernel_convert(
 jpeggpu_status jpeggpu::convert(
     int size_x,
     int size_y,
+    int size_x_0,
+    int size_x_1,
+    int size_x_2,
+    int size_x_3,
+    int size_y_0,
+    int size_y_1,
+    int size_y_2,
+    int size_y_3,
     jpeggpu::image_desc in_image,
     jpeggpu_color_format_jpeg in_color_fmt,
     jpeggpu_subsampling in_subsampling,
@@ -249,6 +279,7 @@ jpeggpu_status jpeggpu::convert(
     jpeggpu_color_format_out out_color_fmt,
     jpeggpu_subsampling out_subsampling,
     int out_num_components,
+    // TODO change naming, the same term is used to denote data unit interleaving
     bool is_interleaved,
     cudaStream_t stream)
 {
@@ -302,6 +333,14 @@ jpeggpu_status jpeggpu::convert(
     kernel_convert<cubes_per_block_x, cubes_per_block_y><<<grid_size, block_size, 0, stream>>>(
         size_x,
         size_y,
+        size_x_0,
+        size_x_1,
+        size_x_2,
+        size_x_3,
+        size_y_0,
+        size_y_1,
+        size_y_2,
+        size_y_3,
         in_image,
         in_color_fmt,
         in_css_inv,
