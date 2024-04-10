@@ -109,11 +109,12 @@ uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman
         length = 0;
         return 0;
     }
-    int i, code;
+    int i;
+    int32_t code;
     for (i = 0; i < max_bits; ++i) {
         code                    = select_bits(rstate, i + 1);
         const bool is_last_iter = i == (max_bits - 1);
-        if (code <= table.maxcode[i + 1] || is_last_iter) {
+        if (code <= table.maxcode[i] || is_last_iter) {
             break;
         }
     }
@@ -123,7 +124,7 @@ uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman
         discard_bits(rstate, i + 1);
     }
     length        = i + 1;
-    const int idx = table.valptr[i + 1] + (code - table.mincode[i + 1]);
+    const int idx = table.valptr[i] + (code - table.mincode[i]);
     if (idx < 0 || 256 <= idx) {
         // found a value that does not make sense. this can happen if the wrong huffman
         //   table is used. return arbitrary value

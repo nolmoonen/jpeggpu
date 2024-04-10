@@ -139,47 +139,33 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
     return JPEGGPU_SUCCESS;
 }
 
-void compute_huffman_table(jpeggpu::huffman_table& table)
+void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_codes)[16])
 {
-    // Figure C.1: make table of Huffman code length for each symbol
-    // Note that this is in code-length order.
-    char huffsize[257];
-    int p = 0;
-    for (int l = 1; l <= 16; l++) {
-        for (int i = 1; i <= (int)table.bits[l]; i++)
-            huffsize[p++] = (char)l;
-    }
-    huffsize[p] = 0;
-
-    // Figure C.2: generate the codes themselves
-    // Note that this is in code-length order.
-    unsigned int huffcode[257];
-    unsigned int code = 0;
-    int si            = huffsize[0];
-    p                 = 0;
-    while (huffsize[p]) {
-        while (((int)huffsize[p]) == si) {
-            huffcode[p++] = code;
-            code++;
+    // generate Huffman
+    int huffcode[257]; // [1, 16]
+    int code_idx  = 0; // [0, 256]
+    uint16_t code = 0;
+    for (int l = 0; l < 16; ++l) {
+        for (uint8_t i = 0; i < num_codes[l]; i++) {
+            huffcode[code_idx++] = code;
+            ++code;
         }
         code <<= 1;
-        si++;
     }
+    huffcode[code_idx] = 0;
 
-    // Figure F.15: generate decoding tables for bit-sequential decoding
-    p = 0;
-    for (int l = 1; l <= 16; l++) {
-        if (table.bits[l]) {
-            table.valptr[l]  = p; // huffval[] index of 1st symbol of code length l
-            table.mincode[l] = huffcode[p]; // minimum code of length l
-            p += table.bits[l];
-            table.maxcode[l] = huffcode[p - 1]; // maximum code of length l
+    // generate decoding tables for bit-sequential decoding
+    code_idx = 0;
+    for (int l = 0; l < 16; ++l) {
+        if (num_codes[l]) {
+            table.valptr[l]  = code_idx; // huffval[] index of 1st symbol of code length l
+            table.mincode[l] = huffcode[code_idx]; // minimum code of length l
+            code_idx += num_codes[l];
+            table.maxcode[l] = huffcode[code_idx - 1]; // maximum code of length l
         } else {
             table.maxcode[l] = -1; // -1 if no codes of this length
         }
     }
-    // Ensures huff_decode terminates
-    table.maxcode[17] = 0xFFFFFL;
 }
 
 [[nodiscard]] jpeggpu_status jpeggpu::reader::read_dht()
@@ -219,13 +205,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
         log("\t%s Huffman table index %d\n", tc == 0 ? "DC" : "AC", th);
         jpeggpu::huffman_table& table = *(h_huff_tables[th][tc]);
 
-        // read bits
-        table.bits[0] = 0;
-        int count     = 0;
+        /// num_codes[i] is # of symbols with codes of i + 1 bits
+        uint8_t num_codes[16];
+        int count = 0;
         for (int i = 0; i < 16; ++i) {
-            const int idx   = i + 1;
-            table.bits[idx] = read_uint8();
-            count += table.bits[idx];
+            num_codes[i] = read_uint8();
+            count += num_codes[i];
         }
         remaining -= 16;
 
@@ -245,8 +230,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table)
         }
         remaining -= count;
 
-        // TODO is this the correct place?
-        compute_huffman_table(table);
+        compute_huffman_table(table, num_codes);
     }
 
     return JPEGGPU_SUCCESS;

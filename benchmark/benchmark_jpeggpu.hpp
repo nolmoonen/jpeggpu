@@ -296,7 +296,7 @@ void bench_jpeggpu_mt(const char* file_data, size_t file_size)
 void bench_jpeggpu(const char* file_data, size_t file_size)
 {
     bench_jpeggpu_st(file_data, file_size);
-    bench_jpeggpu_mt(file_data, file_size);
+    // bench_jpeggpu_mt(file_data, file_size);
 }
 
 #endif // JPEGGPU_BENCHMARK_BENCHMARK_JPEGGPU_HPP_

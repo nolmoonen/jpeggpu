@@ -12,19 +12,13 @@
 namespace jpeggpu {
 
 struct huffman_table {
-    /// Smallest code of length k
-    int mincode[17];
-    /// Largest code of length k (-1 if none)
-    int maxcode[18];
-    /// Huffval[] index of 1st symbol of length k
-    int valptr[17];
-
-    /// These two fields directly represent the contents of a JPEG DHT marker
-
-    // TODO can be shrunk, there are no codes of length 0
-    /// bits[k] = # of symbols with codes of length k
-    uint8_t bits[17];
-    /// The symbols, in order of incr code length
+    /// mincode[k] is smallest code of length k+1
+    uint16_t mincode[16];
+    /// maxcode[k] is largest code of length k+1, -1 if no codes
+    int32_t maxcode[16];
+    /// Huffval[] index of 1st symbol of length k+1
+    uint16_t valptr[16];
+    /// Values associated with each Huffman code, in order of increasing code length
     uint8_t huffval[256];
 };
 
