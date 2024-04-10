@@ -27,7 +27,7 @@
 
 void bench_jpeggpu_st(const char* file_data, size_t file_size)
 {
-    cudaStream_t stream = nullptr;
+    cudaStream_t stream = 0;
 
     jpeggpu_decoder_t decoder;
     CHECK_JPEGGPU(jpeggpu_decoder_startup(&decoder));
@@ -84,7 +84,7 @@ void bench_jpeggpu_st(const char* file_data, size_t file_size)
     run_iter();
 
     double sum_latency{};
-    double max_latency{};
+    double max_latency{std::numeric_limits<double>::lowest()};
     for (int i = 0; i < num_iter; ++i) {
         const auto t0 = std::chrono::high_resolution_clock::now();
         run_iter();
@@ -223,7 +223,7 @@ void bench_jpeggpu_mt_thread_perform(
     bench_jpeggpu_state& bench_state, bench_jpeggpu_thread_state& bench_thread_state)
 {
     bench_thread_state.sum_latency = 0.0;
-    bench_thread_state.max_latency = -std::numeric_limits<double>::max();
+    bench_thread_state.max_latency = std::numeric_limits<double>::lowest();
     for (int i = 0; i < num_iter; ++i) {
         const auto t0 = std::chrono::high_resolution_clock::now();
         bench_jpeggpu_run_iter(bench_state, bench_thread_state);
@@ -288,7 +288,7 @@ void bench_jpeggpu_mt(const char* file_data, size_t file_size)
         std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1e3;
     const double throughput = (2 * num_iter) / total_seconds;
 
-    std::cout << "jpeggpu multithreaded, throughput: " << std::fixed << std::setw(5)
+    std::cout << " jpeggpu multithreaded, throughput: " << std::fixed << std::setw(5)
               << std::setprecision(2) << throughput << " image/s, avg latency: " << avg_latency
               << "ms, max latency: " << max_latency << "ms\n";
 }

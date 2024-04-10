@@ -100,6 +100,111 @@ struct nvjpeg_state {
     nvjpegDecodeParams_t nvjpeg_decode_params;
 };
 
+void bench_nvjpeg_st(const char* file_data, size_t file_size)
+{
+    cudaStream_t stream = 0;
+
+    nvjpeg_state state;
+    state.startup();
+
+    int widths[NVJPEG_MAX_COMPONENT];
+    int heights[NVJPEG_MAX_COMPONENT];
+    int channels;
+    nvjpegChromaSubsampling_t subsampling;
+    CHECK_NVJPEG(nvjpegGetImageInfo(
+        state.nvjpeg_handle,
+        reinterpret_cast<const unsigned char*>(file_data),
+        file_size,
+        &channels,
+        &subsampling,
+        widths,
+        heights));
+
+    std::vector<char*> h_img(channels);
+
+    nvjpegImage_t d_img;
+    size_t image_bytes = 0;
+    for (int c = 0; c < channels; ++c) {
+        const size_t plane_bytes = widths[c] * heights[c];
+        CHECK_CUDA(cudaMalloc(&d_img.channel[c], plane_bytes));
+        d_img.pitch[c] = widths[c];
+        image_bytes += plane_bytes;
+        CHECK_CUDA(cudaMallocHost(&h_img[c], plane_bytes));
+    }
+
+    CHECK_NVJPEG(nvjpegDecodeParamsSetOutputFormat(state.nvjpeg_decode_params, NVJPEG_OUTPUT_YUV));
+
+    const auto run_iter = [&]() {
+        const int save_metadata = 0;
+        const int save_stream   = 0;
+        CHECK_NVJPEG(nvjpegJpegStreamParse(
+            state.nvjpeg_handle,
+            reinterpret_cast<const unsigned char*>(file_data),
+            file_size,
+            save_metadata,
+            save_stream,
+            state.jpeg_stream));
+
+        CHECK_NVJPEG(nvjpegDecodeJpegHost(
+            state.nvjpeg_handle,
+            state.nvjpeg_decoder,
+            state.nvjpeg_decoupled_state,
+            state.nvjpeg_decode_params,
+            state.jpeg_stream));
+
+        CHECK_NVJPEG(nvjpegDecodeJpegTransferToDevice(
+            state.nvjpeg_handle,
+            state.nvjpeg_decoder,
+            state.nvjpeg_decoupled_state,
+            state.jpeg_stream,
+            stream));
+        CHECK_NVJPEG(nvjpegDecodeJpegDevice(
+            state.nvjpeg_handle,
+            state.nvjpeg_decoder,
+            state.nvjpeg_decoupled_state,
+            &d_img,
+            stream));
+        for (int c = 0; c < channels; ++c) {
+            CHECK_CUDA(cudaMemcpyAsync(
+                h_img[c],
+                d_img.channel[c],
+                widths[c] * heights[c],
+                cudaMemcpyDeviceToHost,
+                stream));
+        }
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+    };
+
+    run_iter();
+
+    double sum_latency{};
+    double max_latency{std::numeric_limits<double>::lowest()};
+    for (int i = 0; i < num_iter; ++i) {
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        run_iter();
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        const double elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        sum_latency += elapsed_ms;
+        max_latency = std::max(max_latency, elapsed_ms);
+    }
+    const double avg_latency = sum_latency / num_iter;
+
+    const double total_seconds = sum_latency / 1e3;
+    const double throughput    = num_iter / total_seconds;
+
+    for (int c = 0; c < channels; ++c) {
+        CHECK_CUDA(cudaFreeHost(h_img[c]));
+        CHECK_CUDA(cudaFree(d_img.channel[c]));
+    }
+
+    state.cleanup();
+
+    std::cout << " nvJPEG singlethreaded, throughput: " << std::fixed << std::setw(5)
+              << std::setprecision(2) << throughput << " image/s, avg latency: " << avg_latency
+              << "ms, max latency: " << max_latency << "ms\n";
+}
+
 struct bench_nvjpeg_state {
     const char* file_data;
     size_t file_size;
@@ -339,7 +444,7 @@ void bench_nvjpeg_mt(const char* file_data, size_t file_size, bool is_alternativ
         }
 
         double sum_latency{};
-        double max_latency = -std::numeric_limits<double>::max();
+        double max_latency{std::numeric_limits<double>::lowest()};
         for (int i = 0; i < num_threads; ++i) {
             sum_latency += thread_states[i].sum_latency;
             max_latency = std::max(max_latency, thread_states[i].max_latency);
@@ -362,6 +467,7 @@ void bench_nvjpeg_mt(const char* file_data, size_t file_size, bool is_alternativ
 // TODO specify iterations and override number of threads on command line
 void bench_nvjpeg(const char* file_data, size_t file_size)
 {
+    bench_nvjpeg_st(file_data, file_size);
     std::cout << "nvJPEG\n";
     bench_nvjpeg_mt(file_data, file_size, false);
     bool do_alternative = false;

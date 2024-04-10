@@ -10,21 +10,20 @@ JPEGGPU is an experimental JPEG decoder implemented in CUDA. It works by decodin
 
 ## Benchmarks
 
-AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070. 12MP 4:2:0 image with restart intervals, single thread (`chunk_size = 16`):
+AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070. 12MP 4:2:0 image with restart intervals, (`chunk_size = 16`):
 
 ```shell
-jpeggpu throughput: 46.84 image/s, avg latency: 21.35ms, max latency: 26.00ms
- nvJPEG throughput: 62.31 image/s, avg latency: 15.51ms, max latency: 33.00ms
+jpeggpu singlethreaded, throughput: 52.14 image/s, avg latency: 19.18ms, max latency: 24.00ms
+ nvJPEG singlethreaded, throughput: 66.01 image/s, avg latency: 15.15ms, max latency: 19.00ms
 ```
 
-## TODO
+## To do
 
 - Address JPEG applications headers/extensions, like color profiles and EXIF metadata. Currently, this is mostly ignored. It would probably also be good to optionally disable this interpretation.
 - Add some test.
 - Add thread-safe logging.
 - Some optimization
 - Handling a mix of non-interleaved and interleaved scans.
-- Add single-threaded nvJPEG benchmark for comparison purposes.
 
 ## Other
 
