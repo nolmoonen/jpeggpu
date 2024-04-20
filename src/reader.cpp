@@ -10,6 +10,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <stdint.h>
+#include <vector>
 
 using namespace jpeggpu;
 
@@ -32,11 +33,22 @@ jpeggpu_status reader::startup()
         }
     }
 
+    for (int s = 0; s < max_scan_count; ++s) {
+        h_segments[s] = nullptr;
+    }
+
     return JPEGGPU_SUCCESS;
 }
 
 void reader::cleanup()
 {
+    for (int s = 0; s < max_scan_count; ++s) {
+        if (h_segments[s]) {
+            cudaFreeHost(h_segments[s]);
+            h_segments[s] = nullptr;
+        }
+    }
+
     for (int i = 0; i < max_huffman_count; ++i) {
         for (int j = 0; j < HUFF_COUNT; ++j) {
             cudaFreeHost(h_huff_tables[i][j]);
@@ -262,7 +274,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         return JPEGGPU_INVALID_JPEG;
     }
 
-    scan& scan = jpeg_stream.scans[reader_state.scan_idx++];
+    const int scan_idx = reader_state.scan_idx++;
+    scan& scan         = jpeg_stream.scans[scan_idx];
 
     for (uint8_t c = 0; c < num_components; ++c) {
         if (!has_remaining(2)) {
@@ -273,7 +286,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         scan.ids[c]            = selector;
         // check if selector matches the component index, since the frame header must have been seen
         //   once we encounter start of scan
-        int comp_idx           = -1;
+        int comp_idx = -1;
         for (int d = 0; d < jpeg_stream.num_components; ++d) {
             if (jpeg_stream.components[d].id == selector) {
                 comp_idx = d;
@@ -312,6 +325,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     const uint8_t successive_approximation = read_uint8();
     (void)spectral_start, (void)spectral_end, (void)successive_approximation;
 
+    std::vector<segment> segments;
     const int scan_begin     = reader_state.image - reader_state.image_begin;
     int num_bytes_in_segment = 0;
     do {
@@ -339,8 +353,10 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         const bool is_scan_end = marker == jpeggpu::MARKER_EOI || marker == jpeggpu::MARKER_SOS;
 
         if (is_rst || is_scan_end) {
-            scan.num_subsequences += ceiling_div(
+            const int num_subsequences = ceiling_div(
                 num_bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes));
+            segments.push_back({scan.num_subsequences, num_subsequences});
+            scan.num_subsequences += num_subsequences;
             num_bytes_in_segment = 0;
             ++scan.num_segments;
         }
@@ -360,6 +376,13 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     } while (reader_state.image < reader_state.image_end);
     scan.begin = scan_begin;
     scan.end   = reader_state.image - reader_state.image_begin;
+
+    if (h_segments[scan_idx]) {
+        return JPEGGPU_INTERNAL_ERROR;
+    }
+    const size_t segment_bytes = scan.num_segments * sizeof(segment);
+    JPEGGPU_CHECK_CUDA(cudaMallocHost(&h_segments[scan_idx], segment_bytes));
+    std::memcpy(h_segments[scan_idx], segments.data(), segment_bytes);
 
     return JPEGGPU_SUCCESS;
 }
@@ -593,6 +616,13 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
     for (int i = 0; i < max_huffman_count; ++i) {
         for (int j = 0; j < HUFF_COUNT; ++j) {
             std::memset(h_huff_tables[i][j], 0, sizeof(*(h_huff_tables[i][j])));
+        }
+    }
+
+    for (int s = 0; s < max_scan_count; ++s) {
+        if (h_segments[s]) {
+            cudaFreeHost(h_segments[s]);
+            h_segments[s] = nullptr;
         }
     }
 }

@@ -307,6 +307,9 @@ enum class component {
 struct const_state {
     const uint8_t* scan;
     const uint8_t* scan_end;
+    const segment* segments;
+    const int* segment_indices;
+    const int num_segments;
     const huffman_table* dc_0;
     const huffman_table* ac_0;
     const huffman_table* dc_1;
@@ -366,7 +369,7 @@ __device__ subsequence_info decode_subsequence(
     int16_t* out,
     subsequence_info* s_info,
     const const_state& cstate,
-    const segment_info& segment_info,
+    const segment& segment_info,
     int segment_idx)
 {
     assert(i >= segment_info.subseq_offset);
@@ -380,9 +383,10 @@ __device__ subsequence_info decode_subsequence(
     info.z = 0;
 
     reader_state rstate;
-    // subsequence_size is multiple of eight
-    rstate.data           = cstate.scan + segment_info.begin + (info.p / 8);
-    rstate.data_end       = cstate.scan + segment_info.end;
+    // subsequence_size is multiple of eight, info.p is multiple of eight
+    rstate.data = cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
+    rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
+                                        subsequence_size_bytes;
     rstate.cache          = 0;
     rstate.cache_num_bits = 0;
 
@@ -402,7 +406,8 @@ __device__ subsequence_info decode_subsequence(
         info.z = s_info[i - 1].z;
 
         // overflowing from saved state, restore the reader state
-        rstate.data        = cstate.scan + segment_info.begin + (info.p / 8);
+        rstate.data =
+            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
         const int in_cache = (8 - (info.p % 8)) % 8;
         if (in_cache > 0) {
             rstate.cache          = *(rstate.data++);
@@ -412,7 +417,7 @@ __device__ subsequence_info decode_subsequence(
     }
 
     const int end_subseq  = (i_rel + 1) * subsequence_size; // first bit in next subsequence
-    const int end_segment = (segment_info.end - segment_info.begin) * 8; // bit count in segment
+    const int end_segment = segment_info.subseq_count * subsequence_size; // bit count in segment
     subsequence_info last_symbol; // the last detected codeword
     while (info.p < min(end_subseq, end_segment)) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
@@ -481,11 +486,7 @@ __device__ subsequence_info decode_subsequence(
 
 /// \brief Decode all subsequences once without synchronizing.
 __global__ void decode_subsequences(
-    subsequence_info* s_info,
-    int num_subsequences,
-    const_state cstate,
-    const segment_info* segment_infos,
-    const int* segment_indices)
+    subsequence_info* s_info, int num_subsequences, const_state cstate)
 {
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {
@@ -493,8 +494,8 @@ __global__ void decode_subsequences(
     }
 
     // obtain the segment info for this subsequence
-    const int segment_idx       = segment_indices[subseq_idx];
-    const segment_info seg_info = segment_infos[segment_idx];
+    const int segment_idx  = cstate.segment_indices[subseq_idx];
+    const segment seg_info = cstate.segments[segment_idx];
 
     subsequence_info info = decode_subsequence<false, false>(
         subseq_idx, nullptr, s_info, cstate, seg_info, segment_idx);
@@ -534,27 +535,16 @@ struct logical_and {
 /// \tparam block_size Block size of the kernel.
 template <int size_in_subsequences, int block_size>
 __global__ void sync_subsequences(
-    subsequence_info* s_info,
-    int num_subsequences,
-    const_state cstate,
-    const segment_info* segment_infos,
-    const int* segment_indices)
+    subsequence_info* s_info, int num_subsequences, const_state cstate)
 {
     assert(blockDim.x == block_size);
-    const int tid             = blockDim.x * blockIdx.x + threadIdx.x;
+    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
     // subsequence index this thread is overflowing from, this will be the first s_info read
     const int subseq_idx_from = (tid + 1) * size_in_subsequences - 1;
     // overflowing to
-    const int subseq_idx_to   = subseq_idx_from + 1;
+    const int subseq_idx_to = subseq_idx_from + 1;
 
-    // segment index from the subsequence we are flowing from
-    const int segment_idx       = segment_indices[subseq_idx_from];
-    const segment_info seg_info = segment_infos[segment_idx];
-    const int bytes_in_segment  = seg_info.end - seg_info.begin;
-    // index of the final subsequence for this segment
-    const int subseq_last_idx_segment =
-        seg_info.subseq_offset +
-        ceiling_div(bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes)) - 1;
+    // TODO use begin/end terminology instead of last_idx for consistency
 
     // first subsequence index owned/read by the next thread block, follow from `subseq_idx_from`
     //   calculation, substituting `blockDim.x` by `blockDim.x + 1` and `threadIdx.x` by `0`
@@ -563,11 +553,23 @@ __global__ void sync_subsequences(
     // last subsequence index "owned" by this thread block
     const int subseq_last_idx_block = subseq_idx_from_next_block - 1;
 
-    // last index dictated by block, segment, and JPEG stream
-    const int end = min(subseq_last_idx_segment, min(subseq_last_idx_block, num_subsequences - 1));
+    // last index dictated by block and JPEG stream
+    int end = min(subseq_last_idx_block, num_subsequences - 1);
 
-    // if index is within bounds, segment final index must be correctly calculated
-    assert(subseq_idx_from > end || subseq_idx_from <= subseq_last_idx_segment);
+    // since all threads must partipate, some threads will be assigned to
+    //  a subsequence out of bounds
+    int segment_idx;
+    segment seg_info;
+    if (subseq_idx_from < num_subsequences) {
+        // segment index from the subsequence we are flowing from
+        segment_idx = cstate.segment_indices[subseq_idx_from];
+        assert(segment_idx < cstate.num_segments);
+        seg_info = cstate.segments[segment_idx];
+        // index of the final subsequence for this segment
+        const int subseq_last_idx_segment = seg_info.subseq_offset + seg_info.subseq_count - 1;
+        assert(subseq_idx_from <= subseq_last_idx_segment);
+        end = min(end, subseq_last_idx_segment);
+    }
 
     __shared__ bool is_block_done;
     using block_reduce = cub::BlockReduce<bool, block_size>;
@@ -603,20 +605,15 @@ __global__ void sync_subsequences(
 }
 
 __global__ void decode_write(
-    int16_t* out,
-    subsequence_info* s_info,
-    int num_subsequences,
-    const_state cstate,
-    const segment_info* segment_infos,
-    const int* segment_indices)
+    int16_t* out, subsequence_info* s_info, int num_subsequences, const_state cstate)
 {
     const int si = blockIdx.x * blockDim.x + threadIdx.x;
     if (si >= num_subsequences) {
         return;
     }
 
-    const int segment_idx       = segment_indices[si];
-    const segment_info seg_info = segment_infos[segment_idx];
+    const int segment_idx  = cstate.segment_indices[si];
+    const segment seg_info = cstate.segments[segment_idx];
 
     // only first thread does not do overflow
     constexpr bool do_write = true;
@@ -656,7 +653,7 @@ template <bool do_it>
 jpeggpu_status jpeggpu::decode_scan(
     const jpeg_stream& info,
     const uint8_t* d_scan_destuffed,
-    const segment_info* d_segment_infos,
+    const segment* d_segments,
     const int* d_segment_indices,
     int16_t* d_out,
     const struct scan& scan,
@@ -686,6 +683,9 @@ jpeggpu_status jpeggpu::decode_scan(
         //   this can introduce additional (non-existent) symbols,
         //   but a check is in place to prevent writing more symbols than needed
         d_scan_destuffed + (scan.end - scan.begin),
+        d_segments,
+        d_segment_indices,
+        scan.num_segments,
         d_huff_tables[info.components[0].dc_idx][HUFF_DC],
         d_huff_tables[info.components[0].ac_idx][HUFF_AC],
         d_huff_tables[info.components[1].dc_idx][HUFF_DC],
@@ -712,7 +712,7 @@ jpeggpu_status jpeggpu::decode_scan(
     if (do_it) {
         log("decoding %d subsequences\n", num_subsequences);
         decode_subsequences<<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-            d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
+            d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
@@ -723,7 +723,7 @@ jpeggpu_status jpeggpu::decode_scan(
             num_subsequences_in_sequence);
         sync_subsequences<1, num_subsequences_in_sequence>
             <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-                d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
+                d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
@@ -737,7 +737,7 @@ jpeggpu_status jpeggpu::decode_scan(
             num_sequences_in_supersequence * num_subsequences_in_sequence);
         sync_subsequences<num_subsequences_in_sequence, num_sequences_in_supersequence>
             <<<num_supersequences, num_sequences_in_supersequence, 0, stream>>>(
-                d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
+                d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
@@ -806,7 +806,7 @@ jpeggpu_status jpeggpu::decode_scan(
     if (do_it) {
         // alg-1:09-15
         decode_write<<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-            d_out, d_s_info, num_subsequences, cstate, d_segment_infos, d_segment_indices);
+            d_out, d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
@@ -816,7 +816,7 @@ jpeggpu_status jpeggpu::decode_scan(
 template jpeggpu_status jpeggpu::decode_scan<false>(
     const jpeg_stream&,
     const uint8_t*,
-    const segment_info*,
+    const segment*,
     const int*,
     int16_t*,
     const struct scan&,
@@ -827,7 +827,7 @@ template jpeggpu_status jpeggpu::decode_scan<false>(
 template jpeggpu_status jpeggpu::decode_scan<true>(
     const jpeg_stream&,
     const uint8_t*,
-    const segment_info*,
+    const segment*,
     const int*,
     int16_t*,
     const struct scan&,

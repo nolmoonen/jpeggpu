@@ -2,7 +2,6 @@
 #define JPEGGPU_UTIL_HPP_
 
 #include <type_traits>
-#include <vector>
 
 template <
     typename T,
@@ -34,8 +33,7 @@ struct stack_allocator {
     {
         alloc.data = reinterpret_cast<char*>(data_alloc);
         alloc.size = size_alloc;
-        stack.clear();
-        size = 0;
+        size       = 0;
     }
 
     template <bool do_it, typename T>
@@ -47,18 +45,11 @@ struct stack_allocator {
         }
 
         if (do_it) {
-            *d_ptr_alloc = reinterpret_cast<T*>(alloc.data);
+            *d_ptr_alloc = reinterpret_cast<T*>(alloc.data + size);
         } else {
             *d_ptr_alloc = nullptr;
         }
 
-        allocation this_alloc;
-        this_alloc.data = reinterpret_cast<char*>(*d_ptr_alloc);
-        this_alloc.size = alloc_bytes;
-        if (do_it) {
-            alloc.data += alloc_bytes;
-        }
-        stack.push_back(this_alloc);
         size += alloc_bytes;
 
         return JPEGGPU_SUCCESS;
@@ -66,7 +57,6 @@ struct stack_allocator {
 
     allocation alloc; /// Device allocation
 
-    std::vector<allocation> stack;
     size_t size; /// Current size of stack.
 };
 

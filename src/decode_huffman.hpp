@@ -31,7 +31,7 @@ template <bool do_it>
 jpeggpu_status decode_scan(
     const jpeg_stream& info,
     const uint8_t* d_scan_destuffed,
-    const segment_info* d_segment_infos,
+    const segment* d_segments,
     const int* d_segment_indices,
     int16_t* d_out,
     const struct jpeggpu::scan& scan,

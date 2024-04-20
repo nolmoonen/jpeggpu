@@ -11,6 +11,17 @@
 
 namespace jpeggpu {
 
+/// \brief Holds info describing a segment. If a restart marker should be placed
+///   but the number of encoded bits is not a multiple of eight, the encoded stream
+///   is padded with zeroes. To be able to deal with this in the decoding process,
+///   these segments must be decoded independently.
+struct segment {
+    /// Number of subsequences before this segment.
+    int subseq_offset;
+    /// Number of subsequences in this segment.
+    int subseq_count;
+};
+
 struct huffman_table {
     /// mincode[k] is smallest code of length k+1
     uint16_t mincode[16];
@@ -126,8 +137,12 @@ struct reader {
 
     // pinned. in raster order
     qtable* h_qtables[max_comp_count];
+    // TODO every scan can have at `max_huffman_count` tables
     // pinned.
     huffman_table* h_huff_tables[max_huffman_count][HUFF_COUNT];
+
+    // TODO better manage this and keep allocation around
+    segment* h_segments[max_scan_count];
 };
 
 inline int get_size(int size, int ss, int ss_max)

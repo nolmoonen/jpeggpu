@@ -1,5 +1,5 @@
 AlignAfterOpenBracket: AlwaysBreak
-AlignConsecutiveAssignments: AcrossComments
+AlignConsecutiveAssignments: Consecutive
 AlignTrailingComments: Never
 AllowShortIfStatementsOnASingleLine: Always
 AlwaysBreakTemplateDeclarations: Yes

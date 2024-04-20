@@ -3,6 +3,7 @@
 #include "decode_dc.hpp"
 #include "decode_huffman.hpp"
 #include "decode_transpose.hpp"
+#include "decoder_defs.hpp"
 #include "defs.hpp"
 #include "idct.hpp"
 #include "marker.hpp"
@@ -58,8 +59,6 @@ jpeggpu_status jpeggpu::decoder::init()
     if ((stat = reader.startup()) != JPEGGPU_SUCCESS) {
         return stat;
     }
-
-    new (&allocator.stack) std::vector<jpeggpu::allocation>();
 
     return JPEGGPU_SUCCESS;
 }
@@ -130,8 +129,11 @@ inline bool operator!=(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling
 }
 
 template <bool do_it>
-jpeggpu_status reserve_file_data(
-    const reader& reader, stack_allocator& allocator, uint8_t*& d_image_data)
+jpeggpu_status reserve_transfer_data(
+    const reader& reader,
+    stack_allocator& allocator,
+    uint8_t*& d_image_data,
+    segment* (&d_segments)[max_scan_count])
 {
     if (allocator.size != 0) {
         // should be first in allocation, to ensure it's in the same place
@@ -140,6 +142,11 @@ jpeggpu_status reserve_file_data(
 
     d_image_data = nullptr;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_image_data, reader.get_file_size()));
+    for (int s = 0; s < max_scan_count; ++s) {
+        d_segments[s] = nullptr;
+        JPEGGPU_CHECK_STAT(
+            allocator.reserve<do_it>(&d_segments[s], reader.jpeg_stream.scans[s].num_segments));
+    }
 
     return JPEGGPU_SUCCESS;
 }
@@ -151,9 +158,9 @@ jpeggpu_status reserve_file_data(
 template <bool do_it>
 jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
 {
-    uint8_t* d_image_data  = nullptr;
-    const size_t file_size = reader.get_file_size();
-    JPEGGPU_CHECK_STAT(reserve_file_data<do_it>(reader, allocator, d_image_data));
+    uint8_t* d_image_data               = nullptr;
+    segment* d_segments[max_scan_count] = {};
+    JPEGGPU_CHECK_STAT(reserve_transfer_data<do_it>(reader, allocator, d_image_data, d_segments));
 
     const jpeg_stream& info = reader.jpeg_stream;
     for (int c = 0; c < info.num_components; ++c) {
@@ -161,9 +168,6 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image[c]), size * sizeof(uint8_t)));
     }
-
-    uint8_t* d_image_data_destuffed = nullptr;
-    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_image_data_destuffed, file_size));
 
     size_t total_data_size = 0;
     for (int c = 0; c < info.num_components; ++c) {
@@ -176,28 +180,29 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
         JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
     }
 
+    // FIXME interleaved does not imply there is only one scan!
     // destuff the scan and decode the Huffman stream
     if (info.is_interleaved) {
         const scan& scan = info.scans[0];
 
-        segment_info* d_segment_infos = nullptr;
-        JPEGGPU_CHECK_STAT(
-            allocator.reserve<do_it>(&d_segment_infos, scan.num_segments * sizeof(segment_info)));
+        uint8_t* d_scan_destuffed = nullptr;
+        // this effectively rounds up the size, is needed for easy offset calculation in huffman decoder
+        const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
+        // scan should be properly aligned by allocator to do optimized reads in huffman decoder
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
 
         // for each subsequence, its segment
         int* d_segment_indices = nullptr;
         JPEGGPU_CHECK_STAT(
             allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
 
-        const uint8_t* d_scan     = d_image_data + scan.begin;
-        uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
-
+        const uint8_t* d_scan = d_image_data + scan.begin;
         JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
             info,
-            d_segment_infos,
-            d_segment_indices,
             d_scan,
             d_scan_destuffed,
+            d_segments[0],
+            d_segment_indices,
             scan,
             allocator,
             stream));
@@ -205,7 +210,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
             info,
             d_scan_destuffed,
-            d_segment_infos,
+            d_segments[0],
             d_segment_indices,
             d_out,
             scan,
@@ -217,25 +222,22 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
         for (int c = 0; c < info.num_scans; ++c) {
             const scan& scan = info.scans[c];
 
-            // TODO if these allocations just once, the maximum across scans, they can be reused
-            segment_info* d_segment_infos = nullptr;
-            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
-                &d_segment_infos, scan.num_segments * sizeof(segment_info)));
+            uint8_t* d_scan_destuffed   = nullptr;
+            const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
+            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
 
             // for each subsequence, its segment
             int* d_segment_indices = nullptr;
             JPEGGPU_CHECK_STAT(
                 allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
 
-            const uint8_t* d_scan     = d_image_data + scan.begin;
-            uint8_t* d_scan_destuffed = d_image_data_destuffed + scan.begin;
-
+            const uint8_t* d_scan = d_image_data + scan.begin;
             JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
                 info,
-                d_segment_infos,
-                d_segment_indices,
                 d_scan,
                 d_scan_destuffed,
+                d_segments[c],
+                d_segment_indices,
                 scan,
                 allocator,
                 stream));
@@ -243,7 +245,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
             JPEGGPU_CHECK_STAT(decode_scan<do_it>(
                 info,
                 d_scan_destuffed,
-                d_segment_infos,
+                d_segments[c],
                 d_segment_indices,
                 d_out + offset,
                 scan,
@@ -292,8 +294,9 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
 {
     allocator.reset(d_tmp, tmp_size);
 
-    uint8_t* d_image_data = nullptr;
-    JPEGGPU_CHECK_STAT(reserve_file_data<true>(reader, allocator, d_image_data));
+    uint8_t* d_image_data               = nullptr;
+    segment* d_segments[max_scan_count] = {};
+    JPEGGPU_CHECK_STAT(reserve_transfer_data<true>(reader, allocator, d_image_data, d_segments));
 
     JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
         d_image_data,
@@ -317,6 +320,15 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
             d_qtables[c],
             reader.h_qtables[info.components[c].qtable_idx],
             sizeof(*reader.h_qtables[info.components[c].qtable_idx]),
+            cudaMemcpyHostToDevice,
+            stream));
+    }
+
+    for (int s = 0; s < info.num_scans; ++s) {
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+            d_segments[s],
+            reader.h_segments[s],
+            info.scans[s].num_segments * sizeof(segment),
             cudaMemcpyHostToDevice,
             stream));
     }

@@ -38,11 +38,14 @@ namespace jpeggpu {
 /// \brief The number of rows or columns in a data unit, eight.
 constexpr int data_unit_vector_size = 8;
 /// \brief The number of pixels in a data units, 64.
-constexpr int data_unit_size        = 64;
+constexpr int data_unit_size = 64;
 
 constexpr int max_huffman_count = 2;
 /// as defined by jpeg spec
-constexpr int max_comp_count    = JPEGGPU_MAX_COMP;
+constexpr int max_comp_count = JPEGGPU_MAX_COMP;
+/// each scan must have at least one component, no component may appear twice
+/// TODO check with spec whether above is true
+constexpr int max_scan_count = max_comp_count;
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
