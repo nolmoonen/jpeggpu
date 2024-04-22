@@ -140,55 +140,37 @@ __device__ int get_value(int num_bits, int code)
 }
 
 __device__ void decode_next_symbol_dc(
-    reader_state& rstate,
-    int& length,
-    int& symbol,
-    int& run_length,
-    const huffman_table& table_dc,
-    const huffman_table& table_ac,
-    int z)
+    reader_state& rstate, int& length, int& symbol, int& run_length, const huffman_table& table)
 {
     int category_length    = 0;
-    const uint8_t category = get_category(rstate, category_length, table_dc);
+    const uint8_t category = get_category(rstate, category_length, table);
 
-    if (category != 0) {
-        assert(0 < category && category < 17);
-        load_bits(rstate, category);
-        // there might not be `category` bits left
-        if (rstate.cache_num_bits < category) {
-            // eat all remaining so the `decode_subsequence` loop does not get stuck
-            length = category_length + rstate.cache_num_bits;
-            discard_bits(rstate, rstate.cache_num_bits);
-            symbol     = 0; // arbitrary symbol
-            run_length = 0; // arbitrary length
-            return;
-        }
-        const int offset = select_bits(rstate, category);
-        discard_bits(rstate, category);
-        const int value = get_value(category, offset);
-
-        length = category_length + category;
-        symbol = value;
-    } else {
-        length = category_length;
-        symbol = 0;
+    if (category == 0) {
+        // coeff is zero
+        length     = category_length;
+        symbol     = 0;
+        run_length = 0;
+        return;
     }
 
-    // peek next to determine run (is always AC)
-    {
-        int len;
-        const uint8_t s    = get_category<false>(rstate, len, table_ac);
-        const int run      = s >> 4;
-        const int category = s & 0xf;
-
-        if (category != 0) {
-            run_length = run;
-        } else {
-            // either EOB or ZRL, which are treated as a symbol,
-            //   so there are no zeros inbetween the DC value and EOB or ZRL
-            run_length = 0;
-        }
+    assert(0 < category && category <= 16);
+    load_bits(rstate, category);
+    // there might not be `category` bits left
+    if (rstate.cache_num_bits < category) {
+        // eat all remaining so the `decode_subsequence` loop does not get stuck
+        length = category_length + rstate.cache_num_bits;
+        discard_bits(rstate, rstate.cache_num_bits);
+        symbol     = 0; // arbitrary symbol
+        run_length = 0;
+        return;
     }
+    const int offset = select_bits(rstate, category);
+    discard_bits(rstate, category);
+    const int value = get_value(category, offset);
+
+    length     = category_length + category;
+    symbol     = value;
+    run_length = 0;
 };
 
 __device__ void decode_next_symbol_ac(
@@ -204,82 +186,43 @@ __device__ void decode_next_symbol_ac(
     const int run       = s >> 4;
     const int category  = s & 0xf;
 
-    if (category != 0) {
-        load_bits(rstate, category);
-        // there might not be `category` bits left
-        if (rstate.cache_num_bits < category) {
-            // eat all remaining so the `decode_subsequence` loop does not get stuck
-            length = category_length + rstate.cache_num_bits;
-            discard_bits(rstate, rstate.cache_num_bits);
-            symbol     = 0; // arbitrary symbol
-            run_length = 0; // arbitrary length
-            return;
-        }
-        const int offset = select_bits(rstate, category);
-        discard_bits(rstate, category);
-        const int value = get_value(category, offset);
-
-        length = category_length + category;
-        symbol = value;
-
-        if (z + 1 <= 63) { // note: z already includes `run`
-            // next value is ac coefficient, peek next to determine run
-            int len;
-            const uint8_t s    = get_category<false>(rstate, len, table);
-            const int run      = s >> 4;
-            const int category = s & 0xf;
-
-            if (category != 0) {
-                run_length = run;
-            } else {
-                // EOB or ZRL
-                run_length = 0;
-            }
-        } else {
-            // next table is dc
-            run_length = 0;
-        }
-    } else {
-        if (run == 15) {
-            length     = category_length;
-            symbol     = 0; // ZRL
-            run_length = 15;
-
-            if (z + 1 + 15 <= 63) {
-                // there is an AC symbol after the ZRL
-                int len;
-                const uint8_t s    = get_category<false>(rstate, len, table);
-                const int run      = s >> 4;
-                const int category = s & 0xf;
-
-                if (category != 0) {
-                    run_length += run;
-                } else {
-                    // EOB or ZRL
-                }
-            } else {
-                // next is dc
-            }
-        } else {
-            length     = category_length;
-            symbol     = 0; // EOB
-            run_length = 63 - z;
-        }
+    if (category == 0) {
+        // coeff is zero
+        length = category_length;
+        symbol = 0;
+        if (run == 15) run_length = 15; // ZRL
+        else run_length = 63 - z; // EOB
+        return;
     }
+
+    assert(0 < category && category <= 16);
+    load_bits(rstate, category);
+    // there might not be `category` bits left
+    if (rstate.cache_num_bits < category) {
+        // eat all remaining so the `decode_subsequence` loop does not get stuck
+        length = category_length + rstate.cache_num_bits;
+        discard_bits(rstate, rstate.cache_num_bits);
+        symbol     = 0; // arbitrary symbol
+        run_length = 0; // arbitrary length
+        return;
+    }
+    const int offset = select_bits(rstate, category);
+    discard_bits(rstate, category);
+    const int value = get_value(category, offset);
+
+    length     = category_length + category;
+    symbol     = value;
+    run_length = run;
 };
 
-/// \brief Extracts coefficients from the bitstream while switching between DC and AC Huffman
-/// tables.
+/// \brief Extracts coefficients from the bitstream while switching between DC and AC Huffman tables.
 ///
-/// - If symbol equals ZRL, 15 will be returned for run_length.
-/// - If symbol equals EOB, 63 - z will be returned for run_length, with z begin the current
-///     index in the zig-zag sequence.
-///
-/// \param[inout] rstate
+/// \param[inout] rstate Reader state.
 /// \param[out] length The number of processed bits. Will be non-zero.
-/// \param[out] symbol The decoded coefficient, provided the code was not EOB or ZRL.
-/// \param[out] run_length The run-length of zeroes which the coefficient is followed by.
-/// \param[in] table
+/// \param[out] symbol The decoded coefficient.
+/// \param[out] run_length The run-length of zeroes that preceeds the coefficient.
+/// \param[in] table_dc DC Huffman table.
+/// \param[in] table_ac AC Huffman table.
 /// \param[in] z Current index in the zig-zag sequence.
 __device__ void decode_next_symbol(
     reader_state& rstate,
@@ -291,10 +234,11 @@ __device__ void decode_next_symbol(
     int z)
 {
     if (z == 0) {
-        decode_next_symbol_dc(rstate, length, symbol, run_length, table_dc, table_ac, z);
+        decode_next_symbol_dc(rstate, length, symbol, run_length, table_dc);
     } else {
         decode_next_symbol_ac(rstate, length, symbol, run_length, table_ac, z);
     }
+    assert(length > 0);
 }
 
 enum class component {
@@ -458,12 +402,11 @@ __device__ subsequence_info decode_subsequence(
         decode_next_symbol(rstate, length, symbol, run_length, *dc, *ac, info.z);
         if (do_write) {
             // TODO could make a separate kernel for this
+            position_in_output += run_length;
             const int data_unit_idx    = position_in_output / data_unit_size;
             const int idx_in_data_unit = position_in_output % data_unit_size;
             out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
-        }
-        if (do_write) {
-            position_in_output += run_length + 1;
+            ++position_in_output;
         }
         info.p += length;
         info.n += run_length + 1;

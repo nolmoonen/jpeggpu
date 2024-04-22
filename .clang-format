@@ -1,7 +1,7 @@
 AlignAfterOpenBracket: AlwaysBreak
 AlignConsecutiveAssignments: Consecutive
 AlignTrailingComments: Never
-AllowShortIfStatementsOnASingleLine: Always
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
 AlwaysBreakTemplateDeclarations: Yes
 AttributeMacros: ['__device__']
 BinPackArguments: False
