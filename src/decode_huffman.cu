@@ -544,17 +544,13 @@ __global__ void sync_subsequences(
     // overflowing to
     const int subseq_idx_to = subseq_idx_from + 1;
 
-    // TODO use begin/end terminology instead of last_idx for consistency
-
     // first subsequence index owned/read by the next thread block, follow from `subseq_idx_from`
     //   calculation, substituting `blockDim.x` by `blockDim.x + 1` and `threadIdx.x` by `0`
     const int subseq_idx_from_next_block =
-        ((blockIdx.x + 1) * blockDim.x + 1) * size_in_subsequences - 1;
-    // last subsequence index "owned" by this thread block
-    const int subseq_last_idx_block = subseq_idx_from_next_block - 1;
+        ((blockIdx.x + 1) * block_size + 1) * size_in_subsequences - 1;
 
     // last index dictated by block and JPEG stream
-    int end = min(subseq_last_idx_block, num_subsequences - 1);
+    int end = min(subseq_idx_from_next_block, num_subsequences);
 
     // since all threads must partipate, some threads will be assigned to
     //  a subsequence out of bounds
@@ -566,7 +562,7 @@ __global__ void sync_subsequences(
         assert(segment_idx < cstate.num_segments);
         seg_info = cstate.segments[segment_idx];
         // index of the final subsequence for this segment
-        const int subseq_last_idx_segment = seg_info.subseq_offset + seg_info.subseq_count - 1;
+        const int subseq_last_idx_segment = seg_info.subseq_offset + seg_info.subseq_count;
         assert(subseq_idx_from <= subseq_last_idx_segment);
         end = min(end, subseq_last_idx_segment);
     }
@@ -577,10 +573,10 @@ __global__ void sync_subsequences(
 
     bool is_synced = false;
     bool do_write  = true;
-    for (int i = 0; i < blockDim.x * size_in_subsequences; ++i) {
+    for (int i = 0; i < block_size * size_in_subsequences; ++i) {
         const int subseq_idx = subseq_idx_to + i;
         subsequence_info info;
-        if (subseq_idx <= end && !is_synced) {
+        if (subseq_idx < end && !is_synced) {
             info = decode_subsequence<true, false>(
                 subseq_idx, nullptr, s_info, cstate, seg_info, segment_idx);
             const subsequence_info& stored_info = s_info[subseq_idx];
@@ -594,7 +590,7 @@ __global__ void sync_subsequences(
         } else {
             do_write = false;
         }
-        bool is_thread_done      = is_synced || subseq_idx > end;
+        bool is_thread_done      = is_synced || subseq_idx >= end;
         bool is_block_done_local = block_reduce(temp_storage).Reduce(is_thread_done, logical_and{});
         __syncthreads(); // await s_info reads
         if (threadIdx.x == 0) is_block_done = is_block_done_local;
