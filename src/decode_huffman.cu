@@ -111,7 +111,7 @@ uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman
     }
     int i;
     int32_t code;
-    for (i = 0; i < max_bits; ++i) {
+    for (i = 0; i < 16; ++i) { // compile time loop for unrolling purposes
         code                    = select_bits(rstate, i + 1);
         const bool is_last_iter = i == (max_bits - 1);
         if (code <= table.maxcode[i] || is_last_iter) {
