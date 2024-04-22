@@ -241,13 +241,6 @@ __device__ void decode_next_symbol(
     assert(length > 0);
 }
 
-enum class component {
-    y, // Y (YCbCR) or C (CMYK)
-    cb, // Cb (YCbCR) or M (CMYK)
-    cr, // Cr (YCbCR) or Y (CMYK)
-    k // k (CMYK)
-};
-
 struct const_state {
     const uint8_t* scan;
     const uint8_t* scan_end;
@@ -262,42 +255,15 @@ struct const_state {
     const huffman_table* ac_2;
     const huffman_table* dc_3;
     const huffman_table* ac_3;
-    int2 ss_0;
-    int2 ss_1;
-    int2 ss_2;
-    int2 ss_3;
+    int c0_inc_prefix; // inclusive prefix of number of JPEG blocks in MCU
+    int c1_inc_prefix;
+    int c2_inc_prefix;
+    int c3_inc_prefix;
     int num_data_units_in_mcu;
     int num_components;
     int num_data_units;
     int num_mcus_in_segment;
 };
-
-/// \brief Infer image components based on data unit index `c` (in MCU).
-__device__ component calc_component(const const_state& cstate, int c)
-{
-    const int num_in_0 = cstate.ss_0.x * cstate.ss_0.y;
-    if (c < num_in_0) {
-        return component::y;
-    }
-    c -= num_in_0;
-    const int num_in_1 = cstate.ss_1.x * cstate.ss_1.y;
-    if (c < num_in_1) {
-        return component::cb;
-    }
-    c -= num_in_1;
-    const int num_in_2 = cstate.ss_2.x * cstate.ss_2.y;
-    if (c < num_in_2) {
-        return component::cr;
-    }
-    c -= num_in_2;
-    const int num_in_3 = cstate.ss_3.x * cstate.ss_3.y;
-    if (c < num_in_3) {
-        return component::k;
-    }
-    assert(false);
-    return component::k;
-}
-
 static_assert(std::is_trivially_copyable_v<const_state>);
 
 /// \brief Algorithm 2.
@@ -374,30 +340,25 @@ __device__ subsequence_info decode_subsequence(
 
         last_symbol = info;
 
-        const component comp    = calc_component(cstate, info.c);
-        int length              = 0;
-        int symbol              = 0;
-        int run_length          = 0;
-        const huffman_table* dc = nullptr;
-        const huffman_table* ac = nullptr;
-        switch (comp) {
-        case component::y:
+        int length     = 0;
+        int symbol     = 0;
+        int run_length = 0;
+        const huffman_table* dc;
+        const huffman_table* ac;
+        if (info.c < cstate.c0_inc_prefix) {
             dc = cstate.dc_0;
             ac = cstate.ac_0;
-            break;
-        case component::cb:
+        } else if (info.c < cstate.c1_inc_prefix) {
             dc = cstate.dc_1;
             ac = cstate.ac_1;
-            break;
-        case component::cr:
+        } else if (info.c < cstate.c2_inc_prefix) {
             dc = cstate.dc_2;
             ac = cstate.ac_2;
-            break;
-        case component::k:
+        } else {
             dc = cstate.dc_3;
             ac = cstate.ac_3;
-            break;
         }
+
         // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol(rstate, length, symbol, run_length, *dc, *ac, info.z);
         if (do_write) {
@@ -615,6 +576,12 @@ jpeggpu_status jpeggpu::decode_scan(
     JPEGGPU_CHECK_STAT(
         allocator.reserve<do_it>(&d_s_info, num_subsequences * sizeof(subsequence_info)));
 
+    // block count in MCU
+    const int c0_count = info.components[0].ss_x * info.components[0].ss_y;
+    const int c1_count = info.components[1].ss_x * info.components[1].ss_y;
+    const int c2_count = info.components[2].ss_x * info.components[2].ss_y;
+    const int c3_count = info.components[3].ss_x * info.components[3].ss_y;
+
     const const_state cstate = {
         d_scan_destuffed,
         // this is not the end of the destuffed data, but the end of the stuffed allocation.
@@ -633,10 +600,10 @@ jpeggpu_status jpeggpu::decode_scan(
         d_huff_tables[info.components[2].ac_idx][HUFF_AC],
         d_huff_tables[info.components[3].dc_idx][HUFF_DC],
         d_huff_tables[info.components[3].ac_idx][HUFF_AC],
-        make_int2(info.components[0].ss_x, info.components[0].ss_y),
-        make_int2(info.components[1].ss_x, info.components[1].ss_y),
-        make_int2(info.components[2].ss_x, info.components[2].ss_y),
-        make_int2(info.components[3].ss_x, info.components[3].ss_y),
+        c0_count,
+        c0_count + c1_count,
+        c0_count + c1_count + c2_count,
+        c0_count + c1_count + c2_count + c3_count,
         info.num_data_units_in_mcu,
         info.num_components,
         num_data_units,
