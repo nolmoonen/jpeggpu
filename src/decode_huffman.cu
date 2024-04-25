@@ -275,61 +275,56 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 /// \param segment_idx The index of the segment subsequence `i` is in.
 template <bool is_overflow, bool do_write>
 __device__ subsequence_info decode_subsequence(
-    int i,
+    int subseq_idx_rel,
     int16_t* out,
     subsequence_info* s_info,
     const const_state& cstate,
     const segment& segment_info,
-    int segment_idx)
+    int segment_idx,
+    int position_in_output = 0)
 {
-    assert(i >= segment_info.subseq_offset);
-    const int i_rel = i - segment_info.subseq_offset;
-
-    subsequence_info info;
-    // start of i-th subsequence
-    info.p = i_rel * subsequence_size;
-    info.n = 0;
-    info.c = 0; // start from the first data unit of the Y component
-    info.z = 0;
-
     reader_state rstate;
-    // subsequence_size is multiple of eight, info.p is multiple of eight
-    rstate.data = cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
     rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
                                         subsequence_size_bytes;
-    rstate.cache          = 0;
-    rstate.cache_num_bits = 0;
-
-    int position_in_output = 0;
-    if constexpr (do_write) {
-        // offset in pixels
-        int segment_offset = segment_idx * cstate.num_mcus_in_segment *
-                             cstate.num_data_units_in_mcu * data_unit_size;
-        // subsequence_info.n is relative to segment
-        position_in_output = segment_offset + s_info[i].n;
-    }
+    subsequence_info info;
     if constexpr (is_overflow) {
-        info.p = s_info[i - 1].p;
+        const int subseq_idx = segment_info.subseq_offset + subseq_idx_rel;
+        info.p               = s_info[subseq_idx - 1].p;
         // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
         //   only for each subsequence (and not an aggregate)
-        info.c = s_info[i - 1].c;
-        info.z = s_info[i - 1].z;
+        info.n = 0;
+        info.c = s_info[subseq_idx - 1].c;
+        info.z = s_info[subseq_idx - 1].z;
 
         // overflowing from saved state, restore the reader state
         rstate.data =
             cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
+        rstate.cache          = 0;
+        rstate.cache_num_bits = 0;
+
         const int in_cache = (8 - (info.p % 8)) % 8;
         if (in_cache > 0) {
             rstate.cache          = *(rstate.data++);
             rstate.cache_num_bits = 8;
             discard_bits(rstate, 8 - in_cache);
         }
+    } else {
+        // start of i-th subsequence
+        info.p = subseq_idx_rel * subsequence_size;
+        info.n = 0;
+        info.c = 0; // start from the first data unit of the Y component
+        info.z = 0;
+
+        // subsequence_size is multiple of eight, info.p is multiple of eight
+        rstate.data =
+            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
+        rstate.cache          = 0;
+        rstate.cache_num_bits = 0;
     }
 
-    const int end_subseq  = (i_rel + 1) * subsequence_size; // first bit in next subsequence
-    const int end_segment = segment_info.subseq_count * subsequence_size; // bit count in segment
+    const int end_subseq = (subseq_idx_rel + 1) * subsequence_size; // first bit in next subsequence
     subsequence_info last_symbol; // the last detected codeword
-    while (info.p < min(end_subseq, end_segment)) {
+    while (info.p < end_subseq) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
         //   (so info.p cannot reliably be used to determine if the loop should break)
         //   this problem is excerbated by restart intevals, where padding occurs more frequently
@@ -400,15 +395,14 @@ __global__ void decode_subsequences(
     // obtain the segment info for this subsequence
     const int segment_idx  = cstate.segment_indices[subseq_idx];
     const segment seg_info = cstate.segments[segment_idx];
+    assert(seg_info.subseq_offset <= subseq_idx);
+    const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
 
     subsequence_info info = decode_subsequence<false, false>(
-        subseq_idx, nullptr, s_info, cstate, seg_info, segment_idx);
-    s_info[subseq_idx].p = info.p;
+        subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
     // paper text does not mention `n` should be stored here, but if not storing `n`
     //   the first subsequence info's `n` will not be initialized. for simplicity, store all
-    s_info[subseq_idx].n = info.n;
-    s_info[subseq_idx].c = info.c;
-    s_info[subseq_idx].z = info.z;
+    s_info[subseq_idx] = info;
 }
 
 struct logical_and {
@@ -481,8 +475,10 @@ __global__ void sync_subsequences(
         const int subseq_idx = subseq_idx_to + i;
         subsequence_info info;
         if (subseq_idx < end && !is_synced) {
-            info = decode_subsequence<true, false>(
-                subseq_idx, nullptr, s_info, cstate, seg_info, segment_idx);
+            assert(seg_info.subseq_offset <= subseq_idx);
+            const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
+            info                     = decode_subsequence<true, false>(
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -507,20 +503,30 @@ __global__ void sync_subsequences(
 __global__ void decode_write(
     int16_t* out, subsequence_info* s_info, int num_subsequences, const_state cstate)
 {
-    const int si = blockIdx.x * blockDim.x + threadIdx.x;
-    if (si >= num_subsequences) {
+    const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (subseq_idx >= num_subsequences) {
         return;
     }
 
-    const int segment_idx  = cstate.segment_indices[si];
+    const int segment_idx  = cstate.segment_indices[subseq_idx];
     const segment seg_info = cstate.segments[segment_idx];
+    assert(seg_info.subseq_offset <= subseq_idx);
+    const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
+
+    // offset in pixels
+    const int segment_offset =
+        segment_idx * cstate.num_mcus_in_segment * cstate.num_data_units_in_mcu * data_unit_size;
+    // subsequence_info.n is relative to segment
+    const int position_in_output = segment_offset + s_info[subseq_idx].n;
 
     // only first thread does not do overflow
     constexpr bool do_write = true;
-    if (si == seg_info.subseq_offset) {
-        decode_subsequence<false, do_write>(si, out, s_info, cstate, seg_info, segment_idx);
+    if (subseq_idx_rel == 0) {
+        decode_subsequence<false, do_write>(
+            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, position_in_output);
     } else {
-        decode_subsequence<true, do_write>(si, out, s_info, cstate, seg_info, segment_idx);
+        decode_subsequence<true, do_write>(
+            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, position_in_output);
     }
 }
 
