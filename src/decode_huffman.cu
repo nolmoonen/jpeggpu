@@ -559,7 +559,8 @@ jpeggpu_status jpeggpu::decode_scan(
     const struct scan& scan,
     huffman_table* (&d_huff_tables)[max_huffman_count][HUFF_COUNT],
     stack_allocator& allocator,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    logger& logger)
 {
     // "N": number of subsequences, determined by JPEG stream
     const int num_subsequences = scan.num_subsequences;
@@ -616,7 +617,7 @@ jpeggpu_status jpeggpu::decode_scan(
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
     if (do_it) {
-        log("decoding %d subsequences\n", num_subsequences);
+        logger.log("decoding %d subsequences\n", num_subsequences);
         decode_subsequences<<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
             d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
@@ -624,7 +625,8 @@ jpeggpu_status jpeggpu::decode_scan(
 
     // synchronize intra sequence/inter subsequence
     if (do_it && num_subsequences > 1) {
-        log("intra sync of %d blocks of %d subsequences\n",
+        logger.log(
+            "intra sync of %d blocks of %d subsequences\n",
             num_sequences,
             num_subsequences_in_sequence);
         sync_subsequences<1, num_subsequences_in_sequence>
@@ -638,7 +640,8 @@ jpeggpu_status jpeggpu::decode_scan(
     const int num_supersequences =
         ceiling_div(num_sequences, static_cast<unsigned int>(num_sequences_in_supersequence));
     if (do_it && num_sequences > 1) {
-        log("intra sync of %d blocks of %d subsequences\n",
+        logger.log(
+            "intra sync of %d blocks of %d subsequences\n",
             num_supersequences,
             num_sequences_in_supersequence * num_subsequences_in_sequence);
         sync_subsequences<num_subsequences_in_sequence, num_sequences_in_supersequence>
@@ -650,7 +653,7 @@ jpeggpu_status jpeggpu::decode_scan(
     if (num_supersequences > num_sequences_in_supersequence) {
         constexpr int max_byte_size =
             subsequence_size_bytes * num_subsequences_in_sequence * num_sequences_in_supersequence;
-        log("byte stream is larger than max supported (%d bytes)\n", max_byte_size);
+        logger.log("byte stream is larger than max supported (%d bytes)\n", max_byte_size);
         return JPEGGPU_NOT_SUPPORTED;
     }
 
@@ -728,7 +731,8 @@ template jpeggpu_status jpeggpu::decode_scan<false>(
     const struct scan&,
     huffman_table* (&)[max_huffman_count][HUFF_COUNT],
     stack_allocator&,
-    cudaStream_t);
+    cudaStream_t,
+    logger&);
 
 template jpeggpu_status jpeggpu::decode_scan<true>(
     const jpeg_stream&,
@@ -739,4 +743,5 @@ template jpeggpu_status jpeggpu::decode_scan<true>(
     const struct scan&,
     huffman_table* (&)[max_huffman_count][HUFF_COUNT],
     stack_allocator&,
-    cudaStream_t);
+    cudaStream_t,
+    logger&);

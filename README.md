@@ -21,10 +21,9 @@ jpeggpu singlethreaded, throughput: 80.78 image/s, avg latency: 12.38ms, max lat
 
 - Address JPEG applications headers/extensions, like color profiles and EXIF metadata. Currently, this is mostly ignored. It would probably also be good to optionally disable this interpretation.
 - Add some test.
-- Add thread-safe logging.
-- Some optimization
+- Some optimization (try loading 32 at a time or buffer in shared memory)
 - Handling a mix of non-interleaved and interleaved scans.
 
 ## Other
 
-- The code has no support for non-standard JPEGs (no EOF, table idx OOB, etc.). This might be added later after the implementation is stable.
+- No attempt is made to support non-standard JPEGs (no EOF marker, table index out of bounds, etc.).

@@ -75,7 +75,11 @@ struct interleaved_transform_functor {
 
 template <bool do_it>
 jpeggpu_status jpeggpu::decode_dc(
-    const jpeg_stream& info, int16_t* d_out, stack_allocator& allocator, cudaStream_t stream)
+    const jpeg_stream& info,
+    int16_t* d_out,
+    stack_allocator& allocator,
+    cudaStream_t stream,
+    logger& logger)
 {
     int off_in_mcu  = 0; // number of data units, only used for interleaved
     int off_in_data = 0; // number of data elements, only used for non-interleaved
@@ -180,6 +184,6 @@ jpeggpu_status jpeggpu::decode_dc(
 }
 
 template jpeggpu_status jpeggpu::decode_dc<false>(
-    const jpeg_stream&, int16_t*, stack_allocator&, cudaStream_t);
+    const jpeg_stream&, int16_t*, stack_allocator&, cudaStream_t, logger&);
 template jpeggpu_status jpeggpu::decode_dc<true>(
-    const jpeg_stream&, int16_t*, stack_allocator&, cudaStream_t);
+    const jpeg_stream&, int16_t*, stack_allocator&, cudaStream_t, logger&);

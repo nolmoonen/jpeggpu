@@ -76,23 +76,23 @@ bool jpeggpu::reader::has_remaining(int size)
 
 bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::read_marker(uint8_t& marker)
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_marker(uint8_t& marker, logger& logger)
 {
     if (!has_remaining(2)) {
-        log("\ttoo few bytes for marker\n");
+        logger.log("\ttoo few bytes for marker\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint8_t ff = read_uint8();
     if (ff != 0xff) {
-        log("\tinvalid marker byte 0x%02x\n", ff);
+        logger.log("\tinvalid marker byte 0x%02x\n", ff);
         return JPEGGPU_INVALID_JPEG;
     }
     marker = read_uint8();
     return JPEGGPU_SUCCESS;
 }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::read_sof0()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_sof0(logger& logger)
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -115,7 +115,8 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
     }
     jpeg_stream.num_components = num_img_components;
 
-    log("\tsize_x: %" PRIu16 ", size_y: %" PRIu16 ", num_components: %" PRIu8 "\n",
+    logger.log(
+        "\tsize_x: %" PRIu16 ", size_y: %" PRIu16 ", num_components: %" PRIu8 "\n",
         jpeg_stream.size_x,
         jpeg_stream.size_y,
         jpeg_stream.num_components);
@@ -139,7 +140,8 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
         comp.ss_y        = ss_y_c;
         const uint8_t qi = read_uint8();
         comp.qtable_idx  = qi;
-        log("\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
+        logger.log(
+            "\tc_id: %" PRIu8 ", ssx: %d, ssy: %d, qi: %" PRIu8 "\n",
             component_id,
             comp.ss_x,
             comp.ss_y,
@@ -180,16 +182,16 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     }
 }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dht()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dht(logger& logger)
 {
     if (!has_remaining(2)) {
-        log("\ttoo few bytes in DHT segment\n");
+        logger.log("\ttoo few bytes in DHT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint16_t length = read_uint16() - 2;
     if (!has_remaining(length)) {
-        log("\ttoo few bytes in DHT segment\n");
+        logger.log("\ttoo few bytes in DHT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
@@ -201,20 +203,20 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         const int th = index & 0xf;
         // TODO check if these are already defined. if so, throw warning
         if (tc != 0 && tc != 1) {
-            log("\tinvalid Huffman table index\n");
+            logger.log("\tinvalid Huffman table index\n");
             return JPEGGPU_INVALID_JPEG;
         }
         if (th != 0 && th != 1) {
-            log("\tmore than two Huffman tables are not supported\n");
+            logger.log("\tmore than two Huffman tables are not supported\n");
             return JPEGGPU_NOT_SUPPORTED;
         }
 
         if (!has_remaining(16)) {
-            log("\ttoo few bytes in DHT segment\n");
+            logger.log("\ttoo few bytes in DHT segment\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
-        log("\t%s Huffman table index %d\n", tc == 0 ? "DC" : "AC", th);
+        logger.log("\t%s Huffman table index %d\n", tc == 0 ? "DC" : "AC", th);
         jpeggpu::huffman_table& table = *(h_huff_tables[th][tc]);
 
         /// num_codes[i] is # of symbols with codes of i + 1 bits
@@ -227,12 +229,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         remaining -= 16;
 
         if (!has_remaining(count)) {
-            log("\ttoo few bytes in DHT segment\n");
+            logger.log("\ttoo few bytes in DHT segment\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
         if (static_cast<size_t>(count) > sizeof(table.huffval)) {
-            log("\ttoo many values\n");
+            logger.log("\ttoo many values\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
@@ -248,23 +250,24 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     return JPEGGPU_SUCCESS;
 }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::read_sos()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_sos(logger& logger)
 {
     if (!has_remaining(3)) {
-        log("\ttoo few bytes in SOS segment\n");
+        logger.log("\ttoo few bytes in SOS segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint16_t length        = read_uint16();
     const uint8_t num_components = read_uint8();
     if (num_components < 1 || num_components > 4) {
-        log("\tinvalid number of components in scan\n");
+        logger.log("\tinvalid number of components in scan\n");
         return JPEGGPU_INVALID_JPEG;
     }
     jpeg_stream.is_interleaved = num_components > 1;
     if (jpeg_stream.is_interleaved && num_components != jpeg_stream.num_components) {
         // FIXME this is a wrong assumption, this is allowed! see ISO/IEC 10918-1 4.10
-        log("\tinvalid number of components in interleaved scan (%d) compared to stream (%d)\n",
+        logger.log(
+            "\tinvalid number of components in interleaved scan (%d) compared to stream (%d)\n",
             num_components,
             jpeg_stream.num_components);
         return JPEGGPU_INVALID_JPEG;
@@ -294,7 +297,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             }
         }
         if (comp_idx == -1) {
-            log("scan component %" PRIu8 " does not match any frame components (" PRIu8 " " PRIu8
+            logger.log(
+                "scan component %" PRIu8 " does not match any frame components (" PRIu8 " " PRIu8
                 " " PRIu8 " " PRIu8 ")\n",
                 selector,
                 jpeg_stream.components[0].id,
@@ -310,7 +314,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         if (id_dc > 3 || id_ac > 3) {
             return JPEGGPU_INVALID_JPEG;
         }
-        log("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
+        logger.log("\tc_id: %" PRIu8 ", dc: %d, ac: %d\n", selector, id_dc, id_ac);
         // TODO check if these Huffman indices are found
         jpeg_stream.components[comp_idx].dc_idx = id_dc;
         jpeg_stream.components[comp_idx].ac_idx = id_ac;
@@ -371,7 +375,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             break;
         }
 
-        log("unexpected marker \"%s\"\n", jpeggpu::get_marker_string(marker));
+        logger.log("unexpected marker \"%s\"\n", jpeggpu::get_marker_string(marker));
         return JPEGGPU_INVALID_JPEG;
     } while (reader_state.image < reader_state.image_end);
     scan.begin = scan_begin;
@@ -387,16 +391,16 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     return JPEGGPU_SUCCESS;
 }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dqt()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dqt(logger& logger)
 {
     if (!has_remaining(2)) {
-        log("\ttoo few bytes in DQT segment\n");
+        logger.log("\ttoo few bytes in DQT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
     const uint16_t length = read_uint16() - 2;
     if (!has_remaining(length)) {
-        log("\ttoo few bytes in DQT segment\n");
+        logger.log("\ttoo few bytes in DQT segment\n");
         return JPEGGPU_INVALID_JPEG;
     }
 
@@ -408,11 +412,11 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         const int id        = info & 0xf;
         // TODO warning if redefined
         if ((precision != 0 && precision != 1) || id > 3) {
-            log("\tinvalid precision or id value\n");
+            logger.log("\tinvalid precision or id value\n");
             return JPEGGPU_INVALID_JPEG;
         }
         if (precision != 0) {
-            log("\t16-bit quantization table is not supported\n");
+            logger.log("\t16-bit quantization table is not supported\n");
             return JPEGGPU_NOT_SUPPORTED;
         }
 
@@ -429,7 +433,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     return JPEGGPU_SUCCESS;
 }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dri()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::read_dri(logger& logger)
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -445,16 +449,16 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     if (seen_rsti_before && jpeg_stream.restart_interval != rsti) {
         // TODO is this even a problem?
         // do not support redefinining restart interval
-        log("\tredefined restart interval\n");
+        logger.log("\tredefined restart interval\n");
         return JPEGGPU_NOT_SUPPORTED;
     }
     jpeg_stream.restart_interval = rsti;
-    log("\trestart_interval: %" PRIu16 "\n", jpeg_stream.restart_interval);
+    logger.log("\trestart_interval: %" PRIu16 "\n", jpeg_stream.restart_interval);
 
     return JPEGGPU_SUCCESS;
 }
 
-[[nodiscard]] jpeggpu_status jpeggpu::reader::skip_segment()
+[[nodiscard]] jpeggpu_status jpeggpu::reader::skip_segment(logger& logger)
 {
     if (!has_remaining(2)) {
         return JPEGGPU_INVALID_JPEG;
@@ -465,7 +469,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         return JPEGGPU_INVALID_JPEG;
     }
 
-    log("\twarning: skipping this segment\n");
+    logger.log("\twarning: skipping this segment\n");
 
     reader_state.image += length;
     return JPEGGPU_SUCCESS;
@@ -479,22 +483,22 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         }                                                                                          \
     } while (0)
 
-jpeggpu_status jpeggpu::reader::read()
+jpeggpu_status jpeggpu::reader::read(logger& logger)
 {
     uint8_t marker_soi{};
-    JPEGGPU_CHECK_STATUS(read_marker(marker_soi));
-    log("marker %s\n", jpeggpu::get_marker_string(marker_soi));
+    JPEGGPU_CHECK_STATUS(read_marker(marker_soi, logger));
+    logger.log("marker %s\n", jpeggpu::get_marker_string(marker_soi));
     if (marker_soi != jpeggpu::MARKER_SOI) {
         return JPEGGPU_INVALID_JPEG;
     }
 
     uint8_t marker{};
     do {
-        JPEGGPU_CHECK_STATUS(read_marker(marker));
-        log("marker %s\n", get_marker_string(marker));
+        JPEGGPU_CHECK_STATUS(read_marker(marker, logger));
+        logger.log("marker %s\n", get_marker_string(marker));
         switch (marker) {
         case jpeggpu::MARKER_SOF0:
-            JPEGGPU_CHECK_STATUS(read_sof0());
+            JPEGGPU_CHECK_STATUS(read_sof0(logger));
             continue;
         case jpeggpu::MARKER_SOF1:
         case jpeggpu::MARKER_SOF2:
@@ -508,24 +512,24 @@ jpeggpu_status jpeggpu::reader::read()
         case jpeggpu::MARKER_SOF13:
         case jpeggpu::MARKER_SOF14:
         case jpeggpu::MARKER_SOF15:
-            log("\tunsupported JPEG type: %s\n", get_marker_string(marker));
+            logger.log("\tunsupported JPEG type: %s\n", get_marker_string(marker));
             return JPEGGPU_NOT_SUPPORTED;
         case jpeggpu::MARKER_DHT:
-            JPEGGPU_CHECK_STATUS(read_dht());
+            JPEGGPU_CHECK_STATUS(read_dht(logger));
             continue;
         case jpeggpu::MARKER_EOI:
             break; // nothing to skip
         case jpeggpu::MARKER_SOS:
-            JPEGGPU_CHECK_STATUS(read_sos());
+            JPEGGPU_CHECK_STATUS(read_sos(logger));
             continue;
         case jpeggpu::MARKER_DQT:
-            JPEGGPU_CHECK_STATUS(read_dqt());
+            JPEGGPU_CHECK_STATUS(read_dqt(logger));
             continue;
         case jpeggpu::MARKER_DRI:
-            JPEGGPU_CHECK_STATUS(read_dri());
+            JPEGGPU_CHECK_STATUS(read_dri(logger));
             continue;
         default:
-            JPEGGPU_CHECK_STATUS(skip_segment());
+            JPEGGPU_CHECK_STATUS(skip_segment(logger));
             continue;
         }
     } while (marker != jpeggpu::MARKER_EOI);
@@ -585,7 +589,7 @@ jpeggpu_status jpeggpu::reader::read()
         jpeg_stream.color_fmt = JPEGGPU_JPEG_GRAY;
         break;
     case 2:
-        log("\tcomponent count of two is not supported\n");
+        logger.log("\tcomponent count of two is not supported\n");
         return JPEGGPU_NOT_SUPPORTED;
     case 3:
         jpeg_stream.color_fmt = JPEGGPU_JPEG_YCBCR;

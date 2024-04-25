@@ -22,7 +22,8 @@ namespace jpeggpu {
     do {                                                                                           \
         cudaError_t err = call;                                                                    \
         if (err != cudaSuccess) {                                                                  \
-            log("CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__);     \
+            logger.log(                                                                            \
+                "CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__);     \
             return JPEGGPU_INTERNAL_ERROR;                                                         \
         }                                                                                          \
     } while (0)

@@ -53,7 +53,7 @@ enum jpeggpu_status jpeggpu_set_logging(jpeggpu_decoder_t decoder, int do_loggin
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    jpeggpu::set_logging(do_logging);
+    decoder->decoder.logger.set_logging(do_logging);
 
     return JPEGGPU_SUCCESS;
 }

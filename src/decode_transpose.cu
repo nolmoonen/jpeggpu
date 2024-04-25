@@ -186,7 +186,8 @@ jpeggpu_status jpeggpu::decode_transpose(
     const jpeg_stream& info,
     const int16_t* d_out,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
-    cudaStream_t stream)
+    cudaStream_t stream,
+    logger& logger)
 {
     const size_t total_data_size = info.components[0].data_size_x * info.components[0].data_size_y +
                                    info.components[1].data_size_x * info.components[1].data_size_y +

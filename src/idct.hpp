@@ -15,7 +15,8 @@ jpeggpu_status idct(
     int16_t* (&d_image_qdct)[max_comp_count],
     uint8_t* (&d_image)[max_comp_count],
     uint8_t* (&d_qtable)[max_comp_count],
-    cudaStream_t stream);
+    cudaStream_t stream,
+    logger& logger);
 
 } // namespace jpeggpu
 

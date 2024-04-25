@@ -54,6 +54,7 @@ struct decoder {
     uint8_t* d_image[max_comp_count];
 
     stack_allocator allocator;
+    struct logger logger;
 };
 
 } // namespace jpeggpu

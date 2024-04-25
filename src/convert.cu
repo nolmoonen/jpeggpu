@@ -281,7 +281,8 @@ jpeggpu_status jpeggpu::convert(
     int out_num_components,
     // TODO change naming, the same term is used to denote data unit interleaving
     bool is_interleaved,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    logger& logger)
 {
     // lcm of 1, 2, 3, and 4 is 12. pixels are processed in "cubes" of 12x12 to make subsampling
     //   conversion easier: no inter-block communication is needed at most size_x * size_y * num_components

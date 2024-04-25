@@ -26,7 +26,6 @@ add_library(jpeggpu STATIC
     "${SOURCE_DIR}/decoder.cpp"
     "${SOURCE_DIR}/defs.cpp"
     "${SOURCE_DIR}/idct.cu"
-    "${SOURCE_DIR}/logger.cpp"
     "${SOURCE_DIR}/reader.cpp")
 target_include_directories(jpeggpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(jpeggpu PUBLIC CUDA::cudart_static)

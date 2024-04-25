@@ -17,9 +17,9 @@ constexpr int num_data_units_x_block = 4;
 /// \brief Number of vertical data units processed by one kernel block.
 constexpr int num_data_units_y_block = 4;
 /// \brief Number of horizontal data elements processed by one kernel block.
-constexpr int num_data_x_block       = num_data_units_x_block * data_unit_vector_size;
+constexpr int num_data_x_block = num_data_units_x_block * data_unit_vector_size;
 /// \brief Number of vertical data elements processed by one kernel block.
-constexpr int num_data_y_block       = num_data_units_y_block * data_unit_vector_size;
+constexpr int num_data_y_block = num_data_units_y_block * data_unit_vector_size;
 
 /// \brief Convert fixed-point value to short value.
 __device__ inline int16_t unfixh(int x) { return static_cast<int16_t>((x + 0x8000) >> 16); }
@@ -163,7 +163,8 @@ __global__ void idct_kernel(
 
     if (is_inside) {
         idct_row(reinterpret_cast<uint32_t*>(
-            &block[(shared_y + threadIdx.x) * shared_stride + threadIdx.y * data_unit_vector_size]));
+            &block
+                [(shared_y + threadIdx.x) * shared_stride + threadIdx.y * data_unit_vector_size]));
     }
     __syncthreads();
 
@@ -189,7 +190,8 @@ jpeggpu_status jpeggpu::idct(
     int16_t* (&d_image_qdct)[max_comp_count],
     uint8_t* (&d_image)[max_comp_count],
     uint8_t* (&d_qtable)[max_comp_count], // TODO can be 16 bit?
-    cudaStream_t stream)
+    cudaStream_t stream,
+    logger& logger)
 {
     for (int c = 0; c < info.num_components; ++c) {
         const dim3 num_blocks(
@@ -197,7 +199,8 @@ jpeggpu_status jpeggpu::idct(
                 info.components[c].data_size_x, static_cast<unsigned int>(num_data_x_block)),
             ceiling_div(
                 info.components[c].data_size_y, static_cast<unsigned int>(num_data_y_block)));
-        const dim3 kernel_block_size(data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
+        const dim3 kernel_block_size(
+            data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
         idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
             d_image_qdct[c],
             d_image[c],

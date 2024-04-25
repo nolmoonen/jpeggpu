@@ -60,6 +60,9 @@ jpeggpu_status jpeggpu::decoder::init()
         return stat;
     }
 
+    allocator = stack_allocator{};
+    logger    = jpeggpu::logger{};
+
     return JPEGGPU_SUCCESS;
 }
 
@@ -83,7 +86,7 @@ jpeggpu_status jpeggpu::decoder::parse_header(
     jpeggpu_img_info& img_info, const uint8_t* data, size_t size)
 {
     reader.reset(data, data + size);
-    jpeggpu_status stat = reader.read();
+    jpeggpu_status stat = reader.read(logger);
     if (stat != JPEGGPU_SUCCESS) {
         return stat;
     }
@@ -205,7 +208,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
             d_segment_indices,
             scan,
             allocator,
-            stream));
+            stream,
+            logger));
 
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
             info,
@@ -216,7 +220,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
             scan,
             d_huff_tables,
             allocator,
-            stream));
+            stream,
+            logger));
     } else {
         size_t offset = 0;
         for (int c = 0; c < info.num_scans; ++c) {
@@ -240,7 +245,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
                 d_segment_indices,
                 scan,
                 allocator,
-                stream));
+                stream,
+                logger));
 
             JPEGGPU_CHECK_STAT(decode_scan<do_it>(
                 info,
@@ -251,7 +257,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
                 scan,
                 d_huff_tables,
                 allocator,
-                stream));
+                stream,
+                logger));
 
             const int comp_id = scan.ids[0];
             offset += info.components[comp_id].data_size_x * info.components[comp_id].data_size_y;
@@ -265,17 +272,17 @@ jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
     //   e.g. if color space is ycbcr, the components are in that order in the scan(s)
 
     // undo DC difference encoding
-    decode_dc<do_it>(info, d_out, allocator, stream);
+    decode_dc<do_it>(info, d_out, allocator, stream, logger);
 
     // TODO maybe the code can be simpler if doing transpose before DC decoding
 
     if (do_it) {
         // convert data order from data unit at a time to raster order
-        decode_transpose(info, d_out, d_image_qdct, stream);
+        decode_transpose(info, d_out, d_image_qdct, stream, logger);
 
         // data is now in raster order
 
-        idct(info, d_image_qdct, d_image, d_qtables, stream);
+        idct(info, d_image_qdct, d_image, d_qtables, stream, logger);
     }
 
     return JPEGGPU_SUCCESS;
@@ -412,7 +419,8 @@ jpeggpu_status jpeggpu::decoder::decode(
         subsampling,
         out_num_components,
         out_is_interleaved,
-        stream);
+        stream,
+        logger);
 
     return JPEGGPU_SUCCESS;
 }

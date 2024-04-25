@@ -1,6 +1,8 @@
 #ifndef JPEGGPU_CONVERT_HPP_
 #define JPEGGPU_CONVERT_HPP_
 
+#include "logger.hpp"
+
 #include <jpeggpu/jpeggpu.h>
 
 namespace jpeggpu {
@@ -36,7 +38,8 @@ jpeggpu_status convert(
     jpeggpu_subsampling out_subsampling,
     int out_num_components,
     bool is_interleaved,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    logger& logger);
 
 } // namespace jpeggpu
 

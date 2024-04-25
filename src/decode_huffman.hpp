@@ -37,7 +37,8 @@ jpeggpu_status decode_scan(
     const struct jpeggpu::scan& scan,
     huffman_table* (&d_huff_tables)[max_huffman_count][HUFF_COUNT],
     stack_allocator& allocator,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    logger& logger);
 
 } // namespace jpeggpu
 

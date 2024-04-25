@@ -15,7 +15,8 @@ jpeggpu_status destuff_scan(
     int* d_segment_indices, // for every subsequence, its segment
     const scan& scan,
     stack_allocator& allocator,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    logger& logger);
 
 } // namespace jpeggpu
 

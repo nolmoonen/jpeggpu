@@ -23,7 +23,8 @@ jpeggpu_status decode_transpose(
     const jpeg_stream& info,
     const int16_t* d_out,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
-    cudaStream_t stream);
+    cudaStream_t stream,
+    logger& logger);
 
 } // namespace jpeggpu
 

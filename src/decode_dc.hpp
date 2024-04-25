@@ -20,7 +20,11 @@ namespace jpeggpu {
 /// \param[in] stream
 template <bool do_it>
 jpeggpu_status decode_dc(
-    const jpeg_stream& info, int16_t* d_out, stack_allocator& allocator, cudaStream_t stream);
+    const jpeg_stream& info,
+    int16_t* d_out,
+    stack_allocator& allocator,
+    cudaStream_t stream,
+    logger& logger);
 
 } // namespace jpeggpu
 

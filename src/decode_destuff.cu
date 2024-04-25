@@ -136,7 +136,8 @@ jpeggpu_status jpeggpu::destuff_scan(
     int* d_segment_indices,
     const scan& scan,
     stack_allocator& allocator,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    logger& logger)
 {
     // TODO outdated
     // markers are d0 through d7
@@ -212,7 +213,7 @@ jpeggpu_status jpeggpu::destuff_scan(
             stuffed_scan_size * sizeof(int),
             cudaMemcpyDeviceToHost));
         if (h_offset_segment.back() + 1 != scan.num_segments) {
-            log("detected segment count inconsistent with calculated segment count\n");
+            logger.log("detected segment count inconsistent with calculated segment count\n");
             return JPEGGPU_INTERNAL_ERROR;
         }
     }
@@ -299,7 +300,8 @@ jpeggpu_status jpeggpu::destuff_scan(
             cudaMemcpyDeviceToHost));
         // h_offset_subsequence.back() is index + 1 of last stuffed byte, so it's equal to count
         if (h_offset_subsequence.back() != scan.num_subsequences) {
-            log("detected subsequence count inconsistent with calculated subsequence count\n");
+            logger.log(
+                "detected subsequence count inconsistent with calculated subsequence count\n");
             return JPEGGPU_INTERNAL_ERROR;
         }
     }
@@ -332,7 +334,8 @@ template jpeggpu_status jpeggpu::destuff_scan<false>(
     int*,
     const scan&,
     stack_allocator&,
-    cudaStream_t);
+    cudaStream_t,
+    logger&);
 template jpeggpu_status jpeggpu::destuff_scan<true>(
     const jpeg_stream&,
     const uint8_t*,
@@ -341,4 +344,5 @@ template jpeggpu_status jpeggpu::destuff_scan<true>(
     int*,
     const scan&,
     stack_allocator&,
-    cudaStream_t);
+    cudaStream_t,
+    logger&);

@@ -6,9 +6,23 @@
 
 namespace jpeggpu {
 
-void log(const char* t_format, ...);
+struct logger {
 
-void set_logging(bool do_logging);
+    void log(const char* t_format, ...)
+    {
+        if (!do_logging) {
+            return;
+        }
+        va_list argptr;
+        va_start(argptr, t_format);
+        vprintf(t_format, argptr);
+        va_end(argptr);
+    }
+
+    void set_logging(bool do_logging) { this->do_logging = do_logging; }
+
+    bool do_logging;
+};
 
 } // namespace jpeggpu
 

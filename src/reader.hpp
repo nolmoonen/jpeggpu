@@ -103,21 +103,21 @@ struct reader {
     bool has_remaining(int size);
     bool has_remaining();
 
-    jpeggpu_status read_marker(uint8_t& marker);
+    jpeggpu_status read_marker(uint8_t& marker, logger& logger);
 
-    jpeggpu_status read_sof0();
+    jpeggpu_status read_sof0(logger& logger);
 
-    jpeggpu_status read_dht();
+    jpeggpu_status read_dht(logger& logger);
 
-    jpeggpu_status read_sos();
+    jpeggpu_status read_sos(logger& logger);
 
-    jpeggpu_status read_dqt();
+    jpeggpu_status read_dqt(logger& logger);
 
-    jpeggpu_status read_dri();
+    jpeggpu_status read_dri(logger& logger);
 
-    jpeggpu_status skip_segment();
+    jpeggpu_status skip_segment(logger& logger);
 
-    jpeggpu_status read();
+    jpeggpu_status read(logger& logger);
 
     void reset(const uint8_t* image, const uint8_t* image_end);
 
