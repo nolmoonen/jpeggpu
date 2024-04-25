@@ -44,7 +44,7 @@ struct subsequence_info {
 struct reader_state {
     const uint8_t* data;
     const uint8_t* data_end;
-    int32_t cache; // new bits are at the least significant positions
+    uint64_t cache; // new bits are at the least significant positions
     int cache_num_bits;
 };
 
@@ -52,33 +52,34 @@ struct reader_state {
 __device__ void load_byte(reader_state& rstate)
 {
     assert(rstate.data < rstate.data_end);
-    assert(rstate.cache_num_bits + 8 < 32);
+    assert(rstate.cache_num_bits + 8 <= 64);
 
-    // byte stuffing and restart markers are removed beforehand, padding in front
-    //   of restart markers is not
+    // byte stuffing and restart markers are removed beforehand
     const uint8_t next_byte = *(rstate.data++);
     rstate.cache            = (rstate.cache << 8) | next_byte;
     rstate.cache_num_bits += 8;
 }
 
 /// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
-__device__ void load_bits(reader_state& rstate, int num_bits)
+__device__ int load_bits(reader_state& rstate, int num_bits)
 {
     while (rstate.cache_num_bits < num_bits) {
         if (rstate.data >= rstate.data_end) {
-            return; // no more data to load
+            return rstate.cache_num_bits; // no more data to load
         }
 
         load_byte(rstate);
     }
+
+    return min(rstate.cache_num_bits, num_bits);
 }
 
 /// \brief Peeks `num_bits` from cache, does not remove them.
 ///   Assumes enough bits are present.
-__device__ int select_bits(reader_state& rstate, int num_bits)
+__device__ uint32_t select_bits(reader_state& rstate, int num_bits)
 {
-    assert(num_bits < 31);
-    assert(rstate.cache_num_bits >= num_bits);
+    assert(num_bits <= 32); // can return at most 32 bits in uin32_t
+    assert(num_bits <= rstate.cache_num_bits);
 
     // upper bits are zero
     return rstate.cache >> (rstate.cache_num_bits - num_bits);
@@ -89,40 +90,42 @@ __device__ void discard_bits(reader_state& rstate, int num_bits)
 {
     assert(rstate.cache_num_bits >= num_bits);
     // set discarded bits to zero (upper bits in the cache)
-    rstate.cache = rstate.cache & ((1 << (rstate.cache_num_bits - num_bits)) - 1);
+    assert(rstate.cache_num_bits - num_bits < 64); // shift is not out of bounds
+    rstate.cache = rstate.cache & ((uint64_t{1} << (rstate.cache_num_bits - num_bits)) - 1);
     rstate.cache_num_bits -= num_bits;
+}
+
+/// \brief Returns the upper `num_bits` from `data`.
+__device__ uint32_t u32_select_bits(uint32_t data, int num_bits)
+{
+    assert(num_bits <= 32);
+    return data >> (32 - num_bits);
+}
+
+/// \brief Removes the upper `num_bits` from `data`.
+__device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
+{
+    assert(num_bits <= 32);
+    return data << num_bits;
 }
 
 /// \brief Get the Huffman category from stream.
 ///
-/// \tparam do_discard Whether to discard the bits that were read in the process.
+/// \param[in] data
 /// \param[out] length Number of bits read.
-template <bool do_discard = true>
-uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman_table& table)
+uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
 {
-    load_bits(rstate, 16);
-
-    // due to possibly guessing the huffman table wrong, there may not be enough bits left
-    const int max_bits = min(rstate.cache_num_bits, 16);
-    if (max_bits == 0) {
-        // exit if there are no bits
-        length = 0;
-        return 0;
-    }
     int i;
     int32_t code;
-    for (i = 0; i < 16; ++i) { // compile time loop for unrolling purposes
-        code                    = select_bits(rstate, i + 1);
-        const bool is_last_iter = i == (max_bits - 1);
+    for (i = 0; i < 16; ++i) {
+        code                    = u32_select_bits(data, i + 1);
+        const bool is_last_iter = i == 15;
         if (code <= table.maxcode[i] || is_last_iter) {
             break;
         }
     }
     assert(1 <= i + 1 && i + 1 <= 16);
     // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
-    if constexpr (do_discard) {
-        discard_bits(rstate, i + 1);
-    }
     length        = i + 1;
     const int idx = table.valptr[i] + (code - table.mincode[i]);
     if (idx < 0 || 256 <= idx) {
@@ -140,10 +143,10 @@ __device__ int get_value(int num_bits, int code)
 }
 
 __device__ void decode_next_symbol_dc(
-    reader_state& rstate, int& length, int& symbol, int& run_length, const huffman_table& table)
+    int& length, int& symbol, int& run_length, uint32_t data, const huffman_table& table)
 {
     int category_length    = 0;
-    const uint8_t category = get_category(rstate, category_length, table);
+    const uint8_t category = get_category(data, category_length, table);
 
     if (category == 0) {
         // coeff is zero
@@ -153,20 +156,11 @@ __device__ void decode_next_symbol_dc(
         return;
     }
 
+    data = u32_discard_bits(data, category_length);
+
     assert(0 < category && category <= 16);
-    load_bits(rstate, category);
-    // there might not be `category` bits left
-    if (rstate.cache_num_bits < category) {
-        // eat all remaining so the `decode_subsequence` loop does not get stuck
-        length = category_length + rstate.cache_num_bits;
-        discard_bits(rstate, rstate.cache_num_bits);
-        symbol     = 0; // arbitrary symbol
-        run_length = 0;
-        return;
-    }
-    const int offset = select_bits(rstate, category);
-    discard_bits(rstate, category);
-    const int value = get_value(category, offset);
+    const int offset = u32_select_bits(data, category);
+    const int value  = get_value(category, offset);
 
     length     = category_length + category;
     symbol     = value;
@@ -174,15 +168,10 @@ __device__ void decode_next_symbol_dc(
 };
 
 __device__ void decode_next_symbol_ac(
-    reader_state& rstate,
-    int& length,
-    int& symbol,
-    int& run_length,
-    const huffman_table& table,
-    int z)
+    int& length, int& symbol, int& run_length, uint32_t data, const huffman_table& table, int z)
 {
     int category_length = 0;
-    const uint8_t s     = get_category(rstate, category_length, table);
+    const uint8_t s     = get_category(data, category_length, table);
     const int run       = s >> 4;
     const int category  = s & 0xf;
 
@@ -195,20 +184,11 @@ __device__ void decode_next_symbol_ac(
         return;
     }
 
+    data = u32_discard_bits(data, category_length);
+
     assert(0 < category && category <= 16);
-    load_bits(rstate, category);
-    // there might not be `category` bits left
-    if (rstate.cache_num_bits < category) {
-        // eat all remaining so the `decode_subsequence` loop does not get stuck
-        length = category_length + rstate.cache_num_bits;
-        discard_bits(rstate, rstate.cache_num_bits);
-        symbol     = 0; // arbitrary symbol
-        run_length = 0; // arbitrary length
-        return;
-    }
-    const int offset = select_bits(rstate, category);
-    discard_bits(rstate, category);
-    const int value = get_value(category, offset);
+    const int offset = u32_select_bits(data, category);
+    const int value  = get_value(category, offset);
 
     length     = category_length + category;
     symbol     = value;
@@ -217,26 +197,26 @@ __device__ void decode_next_symbol_ac(
 
 /// \brief Extracts coefficients from the bitstream while switching between DC and AC Huffman tables.
 ///
-/// \param[inout] rstate Reader state.
 /// \param[out] length The number of processed bits. Will be non-zero.
 /// \param[out] symbol The decoded coefficient.
 /// \param[out] run_length The run-length of zeroes that preceeds the coefficient.
+/// \param[in] data The next 32 bits of encoded data, possibly appended with zeroes if OOB.
 /// \param[in] table_dc DC Huffman table.
 /// \param[in] table_ac AC Huffman table.
 /// \param[in] z Current index in the zig-zag sequence.
 __device__ void decode_next_symbol(
-    reader_state& rstate,
     int& length,
     int& symbol,
     int& run_length,
+    uint32_t data,
     const huffman_table& table_dc,
     const huffman_table& table_ac,
     int z)
 {
     if (z == 0) {
-        decode_next_symbol_dc(rstate, length, symbol, run_length, table_dc);
+        decode_next_symbol_dc(length, symbol, run_length, data, table_dc);
     } else {
-        decode_next_symbol_ac(rstate, length, symbol, run_length, table_ac, z);
+        decode_next_symbol_ac(length, symbol, run_length, data, table_ac, z);
     }
     assert(length > 0);
 }
@@ -354,8 +334,17 @@ __device__ subsequence_info decode_subsequence(
             ac = cstate.ac_3;
         }
 
+        // decode_next_symbol uses at most 32 bits. if fewer than 32 bits are available, append with zeroes
+        const int loaded_bits = load_bits(rstate, 32);
+        uint32_t data         = select_bits(rstate, loaded_bits) << (32 - loaded_bits);
+
         // always returns length > 0 if there are bits in `rstate` to ensure progress
-        decode_next_symbol(rstate, length, symbol, run_length, *dc, *ac, info.z);
+        decode_next_symbol(length, symbol, run_length, data, *dc, *ac, info.z);
+        // `length` can be greater than `loaded_bits` if data was appended with zeroes
+        discard_bits(rstate, min(length, loaded_bits));
+
+        // TODO if checking `info.p + length < end_subseq` before discarding, rstate does not need to be reinitialized
+
         if (do_write) {
             // TODO could make a separate kernel for this
             position_in_output += run_length;
@@ -364,6 +353,7 @@ __device__ subsequence_info decode_subsequence(
             out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
             ++position_in_output;
         }
+
         info.p += length;
         info.n += run_length + 1;
         info.z += run_length + 1;
@@ -383,31 +373,82 @@ __device__ subsequence_info decode_subsequence(
     return last_symbol;
 }
 
-/// \brief Decode all subsequences once without synchronizing.
-__global__ void decode_subsequences(
-    subsequence_info* s_info, int num_subsequences, const_state cstate)
-{
-    const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (subseq_idx >= num_subsequences) {
-        return;
-    }
-
-    // obtain the segment info for this subsequence
-    const int segment_idx  = cstate.segment_indices[subseq_idx];
-    const segment seg_info = cstate.segments[segment_idx];
-    assert(seg_info.subseq_offset <= subseq_idx);
-    const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
-
-    subsequence_info info = decode_subsequence<false, false>(
-        subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
-    // paper text does not mention `n` should be stored here, but if not storing `n`
-    //   the first subsequence info's `n` will not be initialized. for simplicity, store all
-    s_info[subseq_idx] = info;
-}
-
 struct logical_and {
     __device__ bool operator()(const bool& lhs, const bool& rhs) { return lhs && rhs; }
 };
+
+template <int block_size>
+__global__ void sync_intra_sequence(
+    subsequence_info* s_info, int num_subsequences, const_state cstate)
+{
+    assert(blockDim.x == block_size);
+    const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
+
+    // first subsequence index owned/read by the next thread block
+    const int subseq_idx_from_next_block = (blockIdx.x + 1) * block_size;
+
+    // last index dictated by block and JPEG stream
+    int end = min(subseq_idx_from_next_block, num_subsequences);
+
+    // since all threads must partipate in thread sync, some threads will be assigned to
+    //  a subsequence out of bounds
+    int segment_idx; // segment index of subseq_idx_begin
+    segment seg_info; // segment info of subseq_idx_begin
+    if (subseq_idx_begin < num_subsequences) {
+        segment_idx = cstate.segment_indices[subseq_idx_begin];
+        assert(segment_idx < cstate.num_segments);
+        seg_info = cstate.segments[segment_idx];
+
+        const int segment_subseq_end = seg_info.subseq_offset + seg_info.subseq_count;
+        assert(subseq_idx_begin < segment_subseq_end);
+        end = min(end, segment_subseq_end);
+
+        const int subeq_idx_begin_rel = subseq_idx_begin - seg_info.subseq_offset;
+        subsequence_info info         = decode_subsequence<false, false>(
+            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+        // paper text does not mention `n` should be stored here, but if not storing `n`
+        //   the first subsequence info's `n` will not be initialized. for simplicity, store all
+        s_info[subseq_idx_begin] = info;
+    }
+    __syncthreads();
+
+    __shared__ bool is_block_done;
+    using block_reduce = cub::BlockReduce<bool, block_size>;
+    __shared__ typename block_reduce::TempStorage temp_storage;
+
+    // TODO could read in entire sequence into shared memory first
+
+    bool is_synced = false;
+    bool do_write  = true;
+    for (int i = 0; i < block_size; ++i) {
+        // index of subsequence we are flowing into
+        const int subseq_idx = subseq_idx_begin + 1 + i;
+        subsequence_info info;
+        if (subseq_idx < end && !is_synced) {
+            assert(seg_info.subseq_offset <= subseq_idx);
+            const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
+            info                     = decode_subsequence<true, false>(
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+            const subsequence_info& stored_info = s_info[subseq_idx];
+            if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
+                // synchronization is achieved: the decoding process of this thread has found
+                //   the same "outcome" for the `subseq_idx`th subsequence as the stored result
+                //   of a decoding process that started from an earlier point in the JPEG stream,
+                //   meaning that this outcome is correct.
+                is_synced = true;
+            }
+        } else {
+            do_write = false;
+        }
+        bool is_thread_done      = is_synced || subseq_idx >= end;
+        bool is_block_done_local = block_reduce(temp_storage).Reduce(is_thread_done, logical_and{});
+        __syncthreads(); // await s_info reads
+        if (threadIdx.x == 0) is_block_done = is_block_done_local;
+        if (do_write) s_info[subseq_idx] = info;
+        __syncthreads(); // await s_info writes and is_block_done write
+        if (is_block_done) return;
+    }
+}
 
 /// \brief Synchronize between sequences. Each thread handles one sequence,
 ///   the last sequence requires no handling. Meaning is changed w.r.t. paper!
@@ -461,7 +502,7 @@ __global__ void sync_subsequences(
         seg_info = cstate.segments[segment_idx];
         // index of the final subsequence for this segment
         const int subseq_last_idx_segment = seg_info.subseq_offset + seg_info.subseq_count;
-        assert(subseq_idx_from <= subseq_last_idx_segment);
+        assert(subseq_idx_from < subseq_last_idx_segment);
         end = min(end, subseq_last_idx_segment);
     }
 
@@ -622,12 +663,6 @@ jpeggpu_status jpeggpu::decode_scan(
     // "B", number of sequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
-    if (do_it) {
-        logger.log("decoding %d subsequences\n", num_subsequences);
-        decode_subsequences<<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-            d_s_info, num_subsequences, cstate);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    }
 
     // synchronize intra sequence/inter subsequence
     if (do_it && num_subsequences > 1) {
@@ -635,7 +670,7 @@ jpeggpu_status jpeggpu::decode_scan(
             "intra sync of %d blocks of %d subsequences\n",
             num_sequences,
             num_subsequences_in_sequence);
-        sync_subsequences<1, num_subsequences_in_sequence>
+        sync_intra_sequence<num_subsequences_in_sequence>
             <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
                 d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
