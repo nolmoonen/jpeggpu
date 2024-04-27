@@ -49,29 +49,34 @@ struct reader_state {
 };
 
 /// \brief Loads the next eight bits.
-__device__ void load_byte(reader_state& rstate)
+__device__ void load_word(reader_state& rstate)
 {
-    assert(rstate.data < rstate.data_end);
-    assert(rstate.cache_num_bits + 8 <= 64);
+    assert(4 <= rstate.data_end - rstate.data);
+    assert(rstate.cache_num_bits + 32 <= 64);
 
-    // byte stuffing and restart markers are removed beforehand
-    const uint8_t next_byte = *(rstate.data++);
-    rstate.cache            = (rstate.cache << 8) | next_byte;
-    rstate.cache_num_bits += 8;
+    uint32_t val = *reinterpret_cast<const uint32_t*>(rstate.data);
+    rstate.data += 4;
+    // reverse byte order
+    val = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
+
+    rstate.cache = (rstate.cache << 32) | val;
+    rstate.cache_num_bits += 32;
 }
 
 /// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
 __device__ int load_bits(reader_state& rstate, int num_bits)
 {
-    while (rstate.cache_num_bits < num_bits) {
-        if (rstate.data >= rstate.data_end) {
-            return rstate.cache_num_bits; // no more data to load
-        }
-
-        load_byte(rstate);
+    if (num_bits <= rstate.cache_num_bits) {
+        return num_bits;
     }
 
-    return min(rstate.cache_num_bits, num_bits);
+    if (4 <= rstate.data_end - rstate.data) {
+        load_word(rstate);
+        assert(num_bits <= 32);
+        return num_bits;
+    }
+
+    return rstate.cache_num_bits;
 }
 
 /// \brief Peeks `num_bits` from cache, does not remove them.
@@ -278,15 +283,14 @@ __device__ subsequence_info decode_subsequence(
 
         // overflowing from saved state, restore the reader state
         rstate.data =
-            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
+            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 32) * 4;
         rstate.cache          = 0;
         rstate.cache_num_bits = 0;
 
-        const int in_cache = (8 - (info.p % 8)) % 8;
+        const int in_cache = (32 - (info.p % 32)) % 32;
         if (in_cache > 0) {
-            rstate.cache          = *(rstate.data++);
-            rstate.cache_num_bits = 8;
-            discard_bits(rstate, 8 - in_cache);
+            load_word(rstate);
+            discard_bits(rstate, 32 - in_cache);
         }
     } else {
         // start of i-th subsequence
@@ -297,7 +301,7 @@ __device__ subsequence_info decode_subsequence(
 
         // subsequence_size is multiple of eight, info.p is multiple of eight
         rstate.data =
-            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
+            cstate.scan + (segment_info.subseq_offset + subseq_idx_rel) * subsequence_size_bytes;
         rstate.cache          = 0;
         rstate.cache_num_bits = 0;
     }
