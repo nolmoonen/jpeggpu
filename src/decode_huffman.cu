@@ -383,31 +383,80 @@ __device__ subsequence_info decode_subsequence(
     return last_symbol;
 }
 
-/// \brief Decode all subsequences once without synchronizing.
-__global__ void decode_subsequences(
-    subsequence_info* s_info, int num_subsequences, const_state cstate)
-{
-    const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (subseq_idx >= num_subsequences) {
-        return;
-    }
-
-    // obtain the segment info for this subsequence
-    const int segment_idx  = cstate.segment_indices[subseq_idx];
-    const segment seg_info = cstate.segments[segment_idx];
-    assert(seg_info.subseq_offset <= subseq_idx);
-    const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
-
-    subsequence_info info = decode_subsequence<false, false>(
-        subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
-    // paper text does not mention `n` should be stored here, but if not storing `n`
-    //   the first subsequence info's `n` will not be initialized. for simplicity, store all
-    s_info[subseq_idx] = info;
-}
-
 struct logical_and {
     __device__ bool operator()(const bool& lhs, const bool& rhs) { return lhs && rhs; }
 };
+
+template <int block_size>
+__global__ void sync_intra_sequence(
+    subsequence_info* s_info, int num_subsequences, const_state cstate)
+{
+    assert(blockDim.x == block_size);
+    const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
+
+    // first subsequence index owned/read by the next thread block
+    const int subseq_idx_from_next_block = (blockIdx.x + 1) * block_size;
+
+    // last index dictated by block and JPEG stream
+    int end = min(subseq_idx_from_next_block, num_subsequences);
+
+    // since all threads must partipate in thread sync, some threads will be assigned to
+    //  a subsequence out of bounds
+    int segment_idx; // segment index of subseq_idx_begin
+    segment seg_info; // segment info of subseq_idx_begin
+    if (subseq_idx_begin < num_subsequences) {
+        segment_idx = cstate.segment_indices[subseq_idx_begin];
+        assert(segment_idx < cstate.num_segments);
+        seg_info = cstate.segments[segment_idx];
+
+        const int segment_subseq_end = seg_info.subseq_offset + seg_info.subseq_count;
+        assert(subseq_idx_begin < segment_subseq_end);
+        end = min(end, segment_subseq_end);
+
+        const int subeq_idx_begin_rel = subseq_idx_begin - seg_info.subseq_offset;
+        subsequence_info info         = decode_subsequence<false, false>(
+            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+        // paper text does not mention `n` should be stored here, but if not storing `n`
+        //   the first subsequence info's `n` will not be initialized. for simplicity, store all
+        s_info[subseq_idx_begin] = info;
+    }
+    __syncthreads();
+
+    __shared__ bool is_block_done;
+    using block_reduce = cub::BlockReduce<bool, block_size>;
+    __shared__ typename block_reduce::TempStorage temp_storage;
+
+    bool is_synced = false;
+    bool do_write  = true;
+    for (int i = 0; i < block_size; ++i) {
+        // index of subsequence we are flowing into
+        const int subseq_idx = subseq_idx_begin + 1 + i;
+        subsequence_info info;
+        if (subseq_idx < end && !is_synced) {
+            assert(seg_info.subseq_offset <= subseq_idx);
+            const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
+            info                     = decode_subsequence<true, false>(
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+            const subsequence_info& stored_info = s_info[subseq_idx];
+            if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
+                // synchronization is achieved: the decoding process of this thread has found
+                //   the same "outcome" for the `subseq_idx`th subsequence as the stored result
+                //   of a decoding process that started from an earlier point in the JPEG stream,
+                //   meaning that this outcome is correct.
+                is_synced = true;
+            }
+        } else {
+            do_write = false;
+        }
+        bool is_thread_done      = is_synced || subseq_idx >= end;
+        bool is_block_done_local = block_reduce(temp_storage).Reduce(is_thread_done, logical_and{});
+        __syncthreads(); // await s_info reads
+        if (threadIdx.x == 0) is_block_done = is_block_done_local;
+        if (do_write) s_info[subseq_idx] = info;
+        __syncthreads(); // await s_info writes and is_block_done write
+        if (is_block_done) return;
+    }
+}
 
 /// \brief Synchronize between sequences. Each thread handles one sequence,
 ///   the last sequence requires no handling. Meaning is changed w.r.t. paper!
@@ -461,7 +510,7 @@ __global__ void sync_subsequences(
         seg_info = cstate.segments[segment_idx];
         // index of the final subsequence for this segment
         const int subseq_last_idx_segment = seg_info.subseq_offset + seg_info.subseq_count;
-        assert(subseq_idx_from <= subseq_last_idx_segment);
+        assert(subseq_idx_from < subseq_last_idx_segment);
         end = min(end, subseq_last_idx_segment);
     }
 
@@ -622,12 +671,6 @@ jpeggpu_status jpeggpu::decode_scan(
     // "B", number of sequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
-    if (do_it) {
-        logger.log("decoding %d subsequences\n", num_subsequences);
-        decode_subsequences<<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-            d_s_info, num_subsequences, cstate);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    }
 
     // synchronize intra sequence/inter subsequence
     if (do_it && num_subsequences > 1) {
@@ -635,7 +678,7 @@ jpeggpu_status jpeggpu::decode_scan(
             "intra sync of %d blocks of %d subsequences\n",
             num_sequences,
             num_subsequences_in_sequence);
-        sync_subsequences<1, num_subsequences_in_sequence>
+        sync_intra_sequence<num_subsequences_in_sequence>
             <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
                 d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
