@@ -51,14 +51,14 @@ struct reader_state_global {
         data     = scan + byte_off + begin_bit / 8;
         data_end = scan + end_byte;
 
-        cache          = 0;
-        cache_num_bits = 0;
-
         const int in_cache = (8 - (begin_bit % 8)) % 8;
         if (in_cache > 0) {
             cache          = *(data++);
             cache_num_bits = 8;
             discard_bits(8 - in_cache);
+        } else {
+            cache          = 0;
+            cache_num_bits = 0;
         }
     }
 
@@ -67,7 +67,8 @@ struct reader_state_global {
     {
         assert(cache_num_bits >= num_bits);
         // set discarded bits to zero (upper bits in the cache)
-        cache = cache & ((1 << (cache_num_bits - num_bits)) - 1);
+        assert(cache_num_bits - num_bits < 64);
+        cache = cache & ((uint64_t{1} << (cache_num_bits - num_bits)) - 1);
         cache_num_bits -= num_bits;
     }
 
@@ -81,11 +82,11 @@ struct reader_state_global {
             }
 
             assert(data < data_end);
-            assert(cache_num_bits + 8 < 32);
 
             // byte stuffing and restart markers are removed beforehand
             const uint8_t next_byte = *(data++);
-            cache                   = (cache << 8) | next_byte;
+            assert(cache_num_bits <= 64 - 8); // shift on next line does not discard
+            cache = (cache << 8) | next_byte;
             cache_num_bits += 8;
         }
         return min(cache_num_bits, num_bits);
@@ -104,7 +105,7 @@ struct reader_state_global {
 
     const uint8_t* data;
     const uint8_t* data_end;
-    int32_t cache; // new bits are at the least significant positions
+    uint64_t cache; // new bits are at the least significant positions
     int cache_num_bits;
 
     const uint8_t* const scan;
@@ -146,49 +147,55 @@ struct reader_state_shared {
         assert(idx_in_shared < chunk_size * block_size);
 
         const int total_bit_off = byte_off * 8 + begin_bit;
-        bit_off                 = total_bit_off % 32;
+        const int in_cache      = (32 - (total_bit_off % 32)) % 32;
+        if (in_cache > 0) {
+            cache          = storage[idx_in_shared++];
+            cache_num_bits = 32;
+            discard_bits(32 - in_cache);
+        } else {
+            cache          = 0;
+            cache_num_bits = 0;
+        }
     }
 
     /// \brief Moves data pointer forwards `num_bits` bits.
     __device__ void discard_bits(int num_bits)
     {
-        assert(0 <= num_bits);
-        bit_off += num_bits;
-        if (32 <= bit_off) {
-            bit_off -= 32;
-            ++idx_in_shared;
-        }
+        assert(cache_num_bits >= num_bits);
+        // set discarded bits to zero (upper bits in the cache)
+        assert(cache_num_bits - num_bits < 64);
+        cache = cache & ((uint64_t{1} << (cache_num_bits - num_bits)) - 1);
+        cache_num_bits -= num_bits;
     }
 
     /// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
     /// \return Number of bits loaded.
     __device__ int load_bits(int num_bits)
     {
-        const int remaining = (chunk_size * block_size - 1 - idx_in_shared) * 32 + (32 - bit_off);
-        assert(0 <= remaining);
-        return min(num_bits, remaining);
+        assert(num_bits <= 32); // multiple loads are not needed
+        if (cache_num_bits < num_bits && idx_in_shared < chunk_size * block_size) {
+            assert(cache_num_bits <= 32); // shift on next line does not discard
+            cache = (cache << 32) | storage[idx_in_shared++];
+            cache_num_bits += 32;
+        }
+        return min(num_bits, cache_num_bits);
     }
 
     /// \brief Peeks `num_bits` from cache, does not remove them.
     ///   Assumes enough bits are present.
     __device__ int select_bits(int num_bits)
     {
-        assert(0 <= idx_in_shared);
-        uint64_t ret{};
-        if (idx_in_shared < chunk_size * block_size) {
-            ret = uint64_t{storage[idx_in_shared]} << 32;
-        }
-        if (idx_in_shared + 1 < chunk_size * block_size) {
-            ret |= uint64_t{storage[idx_in_shared + 1]};
-        }
-        ret <<= bit_off;
-        ret >>= 64 - num_bits;
-        assert(num_bits < 32);
-        return static_cast<uint32_t>(ret);
+        assert(num_bits <= 64);
+        assert(cache_num_bits >= num_bits);
+
+        // upper bits are zero
+        return cache >> (cache_num_bits - num_bits);
     }
 
     int idx_in_shared; // pointer to 32 bits word
-    int bit_off; // offset into the pointed 32 bits word
+
+    uint64_t cache;
+    int cache_num_bits;
 
     storage_t& storage;
     const uint8_t* const scan;
