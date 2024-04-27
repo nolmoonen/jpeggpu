@@ -41,69 +41,171 @@ struct subsequence_info {
     int z;
 };
 
-struct reader_state {
+/// \brief Cached reader from global memory.
+struct reader_state_global {
+    __device__ reader_state_global(const uint8_t* scan) : scan(scan) {}
+
+    // end_byte is index of first byte not included
+    __device__ void reset(int byte_off, int begin_bit, int end_byte)
+    {
+        data     = scan + byte_off + begin_bit / 8;
+        data_end = scan + end_byte;
+
+        cache          = 0;
+        cache_num_bits = 0;
+
+        const int in_cache = (8 - (begin_bit % 8)) % 8;
+        if (in_cache > 0) {
+            cache          = *(data++);
+            cache_num_bits = 8;
+            discard_bits(8 - in_cache);
+        }
+    }
+
+    /// \brief Moves data pointer forwards `num_bits` bits.
+    __device__ void discard_bits(int num_bits)
+    {
+        assert(cache_num_bits >= num_bits);
+        // set discarded bits to zero (upper bits in the cache)
+        cache = cache & ((1 << (cache_num_bits - num_bits)) - 1);
+        cache_num_bits -= num_bits;
+    }
+
+    /// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
+    /// \return Number of bits loaded.
+    __device__ int load_bits(int num_bits)
+    {
+        while (cache_num_bits < num_bits) {
+            if (data >= data_end) {
+                break; // no more data to load
+            }
+
+            assert(data < data_end);
+            assert(cache_num_bits + 8 < 32);
+
+            // byte stuffing and restart markers are removed beforehand
+            const uint8_t next_byte = *(data++);
+            cache                   = (cache << 8) | next_byte;
+            cache_num_bits += 8;
+        }
+        return min(cache_num_bits, num_bits);
+    }
+
+    /// \brief Peeks `num_bits` from cache, does not remove them.
+    ///   Assumes enough bits are present.
+    __device__ int select_bits(int num_bits)
+    {
+        assert(num_bits < 31);
+        assert(cache_num_bits >= num_bits);
+
+        // upper bits are zero
+        return cache >> (cache_num_bits - num_bits);
+    }
+
     const uint8_t* data;
     const uint8_t* data_end;
     int32_t cache; // new bits are at the least significant positions
     int cache_num_bits;
+
+    const uint8_t* const scan;
 };
 
-/// \brief Loads the next eight bits.
-__device__ void load_byte(reader_state& rstate)
-{
-    assert(rstate.data < rstate.data_end);
-    assert(rstate.cache_num_bits + 8 < 32);
+template <int block_size>
+struct reader_state_shared {
+    using storage_t = uint32_t[chunk_size * block_size];
 
-    // byte stuffing and restart markers are removed beforehand, padding in front
-    //   of restart markers is not
-    const uint8_t next_byte = *(rstate.data++);
-    rstate.cache            = (rstate.cache << 8) | next_byte;
-    rstate.cache_num_bits += 8;
-}
-
-/// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
-__device__ void load_bits(reader_state& rstate, int num_bits)
-{
-    while (rstate.cache_num_bits < num_bits) {
-        if (rstate.data >= rstate.data_end) {
-            return; // no more data to load
+    __device__ reader_state_shared(
+        storage_t& storage, const uint8_t* scan, const uint8_t* scan_end, int block_off_bytes)
+        : storage(storage), scan(scan), block_off_bytes(block_off_bytes)
+    {
+        assert(block_off_bytes % 4 == 0); // alignment requirement
+        const uint32_t* scan_block = reinterpret_cast<const uint32_t*>(scan + block_off_bytes);
+        assert((scan_end - scan) % 4 == 0); // true since rounded up to subsequence
+        const int num_words = (scan_end - scan) / 4;
+        for (int i = 0; i < chunk_size; ++i) {
+            const int idx = i * block_size + threadIdx.x;
+            if (num_words <= idx) {
+                break;
+            }
+            const uint32_t val = scan_block[idx];
+            // reverse byte order of loaded u32
+            storage[idx] = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
         }
-
-        load_byte(rstate);
+        __syncthreads();
     }
-}
 
-/// \brief Peeks `num_bits` from cache, does not remove them.
-///   Assumes enough bits are present.
-__device__ int select_bits(reader_state& rstate, int num_bits)
-{
-    assert(num_bits < 31);
-    assert(rstate.cache_num_bits >= num_bits);
+    // byte_off is absolute offset of segment
+    // begin_bit is relative to segment
+    // end_byte is index of first byte not included
+    __device__ void reset(int byte_off, int begin_bit, int end_byte)
+    {
+        assert(0 <= byte_off && 0 <= begin_bit);
+        const int total_byte_off = byte_off + begin_bit / 8;
+        assert(block_off_bytes <= total_byte_off);
+        idx_in_shared = (total_byte_off - block_off_bytes) / 4;
+        assert(idx_in_shared < chunk_size * block_size);
 
-    // upper bits are zero
-    return rstate.cache >> (rstate.cache_num_bits - num_bits);
-}
+        const int total_bit_off = byte_off * 8 + begin_bit;
+        bit_off                 = total_bit_off % 32;
+    }
 
-/// \brief Removes `num_bits` from cache.
-__device__ void discard_bits(reader_state& rstate, int num_bits)
-{
-    assert(rstate.cache_num_bits >= num_bits);
-    // set discarded bits to zero (upper bits in the cache)
-    rstate.cache = rstate.cache & ((1 << (rstate.cache_num_bits - num_bits)) - 1);
-    rstate.cache_num_bits -= num_bits;
-}
+    /// \brief Moves data pointer forwards `num_bits` bits.
+    __device__ void discard_bits(int num_bits)
+    {
+        assert(0 <= num_bits);
+        bit_off += num_bits;
+        if (32 <= bit_off) {
+            bit_off -= 32;
+            ++idx_in_shared;
+        }
+    }
+
+    /// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
+    /// \return Number of bits loaded.
+    __device__ int load_bits(int num_bits)
+    {
+        const int remaining = (chunk_size * block_size - 1 - idx_in_shared) * 32 + (32 - bit_off);
+        assert(0 <= remaining);
+        return min(num_bits, remaining);
+    }
+
+    /// \brief Peeks `num_bits` from cache, does not remove them.
+    ///   Assumes enough bits are present.
+    __device__ int select_bits(int num_bits)
+    {
+        assert(0 <= idx_in_shared);
+        uint64_t ret{};
+        if (idx_in_shared < chunk_size * block_size) {
+            ret = uint64_t{storage[idx_in_shared]} << 32;
+        }
+        if (idx_in_shared + 1 < chunk_size * block_size) {
+            ret |= uint64_t{storage[idx_in_shared + 1]};
+        }
+        ret <<= bit_off;
+        ret >>= 64 - num_bits;
+        assert(num_bits < 32);
+        return static_cast<uint32_t>(ret);
+    }
+
+    int idx_in_shared; // pointer to 32 bits word
+    int bit_off; // offset into the pointed 32 bits word
+
+    storage_t& storage;
+    const uint8_t* const scan;
+    const int block_off_bytes;
+};
 
 /// \brief Get the Huffman category from stream.
 ///
 /// \tparam do_discard Whether to discard the bits that were read in the process.
 /// \param[out] length Number of bits read.
-template <bool do_discard = true>
+template <typename reader_state>
 uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman_table& table)
 {
-    load_bits(rstate, 16);
+    const int loaded_bits = rstate.load_bits(16);
 
     // due to possibly guessing the huffman table wrong, there may not be enough bits left
-    const int max_bits = min(rstate.cache_num_bits, 16);
+    const int max_bits = min(loaded_bits, 16);
     if (max_bits == 0) {
         // exit if there are no bits
         length = 0;
@@ -112,7 +214,7 @@ uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman
     int i;
     int32_t code;
     for (i = 0; i < 16; ++i) { // compile time loop for unrolling purposes
-        code                    = select_bits(rstate, i + 1);
+        code                    = rstate.select_bits(i + 1);
         const bool is_last_iter = i == (max_bits - 1);
         if (code <= table.maxcode[i] || is_last_iter) {
             break;
@@ -120,9 +222,7 @@ uint8_t __device__ get_category(reader_state& rstate, int& length, const huffman
     }
     assert(1 <= i + 1 && i + 1 <= 16);
     // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
-    if constexpr (do_discard) {
-        discard_bits(rstate, i + 1);
-    }
+    rstate.discard_bits(i + 1);
     length        = i + 1;
     const int idx = table.valptr[i] + (code - table.mincode[i]);
     if (idx < 0 || 256 <= idx) {
@@ -139,6 +239,7 @@ __device__ int get_value(int num_bits, int code)
     return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
+template <typename reader_state>
 __device__ void decode_next_symbol_dc(
     reader_state& rstate, int& length, int& symbol, int& run_length, const huffman_table& table)
 {
@@ -154,18 +255,18 @@ __device__ void decode_next_symbol_dc(
     }
 
     assert(0 < category && category <= 16);
-    load_bits(rstate, category);
+    const int loaded_bits = rstate.load_bits(category);
     // there might not be `category` bits left
-    if (rstate.cache_num_bits < category) {
+    if (loaded_bits < category) {
         // eat all remaining so the `decode_subsequence` loop does not get stuck
-        length = category_length + rstate.cache_num_bits;
-        discard_bits(rstate, rstate.cache_num_bits);
+        length = category_length + loaded_bits;
+        rstate.discard_bits(loaded_bits);
         symbol     = 0; // arbitrary symbol
         run_length = 0;
         return;
     }
-    const int offset = select_bits(rstate, category);
-    discard_bits(rstate, category);
+    const int offset = rstate.select_bits(category);
+    rstate.discard_bits(category);
     const int value = get_value(category, offset);
 
     length     = category_length + category;
@@ -173,6 +274,7 @@ __device__ void decode_next_symbol_dc(
     run_length = 0;
 };
 
+template <typename reader_state>
 __device__ void decode_next_symbol_ac(
     reader_state& rstate,
     int& length,
@@ -196,18 +298,18 @@ __device__ void decode_next_symbol_ac(
     }
 
     assert(0 < category && category <= 16);
-    load_bits(rstate, category);
+    const int loaded_bits = rstate.load_bits(category);
     // there might not be `category` bits left
-    if (rstate.cache_num_bits < category) {
+    if (loaded_bits < category) {
         // eat all remaining so the `decode_subsequence` loop does not get stuck
-        length = category_length + rstate.cache_num_bits;
-        discard_bits(rstate, rstate.cache_num_bits);
+        length = category_length + loaded_bits;
+        rstate.discard_bits(loaded_bits);
         symbol     = 0; // arbitrary symbol
         run_length = 0; // arbitrary length
         return;
     }
-    const int offset = select_bits(rstate, category);
-    discard_bits(rstate, category);
+    const int offset = rstate.select_bits(category);
+    rstate.discard_bits(category);
     const int value = get_value(category, offset);
 
     length     = category_length + category;
@@ -224,6 +326,7 @@ __device__ void decode_next_symbol_ac(
 /// \param[in] table_dc DC Huffman table.
 /// \param[in] table_ac AC Huffman table.
 /// \param[in] z Current index in the zig-zag sequence.
+template <typename reader_state>
 __device__ void decode_next_symbol(
     reader_state& rstate,
     int& length,
@@ -273,7 +376,7 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 /// \param i Global subsequence index.
 /// \param segment_info Segment info for the segment that subsequence `i` is in.
 /// \param segment_idx The index of the segment subsequence `i` is in.
-template <bool is_overflow, bool do_write>
+template <bool is_overflow, bool do_write, typename reader_state>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
     int16_t* out,
@@ -281,11 +384,9 @@ __device__ subsequence_info decode_subsequence(
     const const_state& cstate,
     const segment& segment_info,
     int segment_idx,
+    reader_state& rstate,
     int position_in_output = 0)
 {
-    reader_state rstate;
-    rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
-                                        subsequence_size_bytes;
     subsequence_info info;
     if constexpr (is_overflow) {
         const int subseq_idx = segment_info.subseq_offset + subseq_idx_rel;
@@ -296,18 +397,10 @@ __device__ subsequence_info decode_subsequence(
         info.c = s_info[subseq_idx - 1].c;
         info.z = s_info[subseq_idx - 1].z;
 
-        // overflowing from saved state, restore the reader state
-        rstate.data =
-            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
-        rstate.cache          = 0;
-        rstate.cache_num_bits = 0;
-
-        const int in_cache = (8 - (info.p % 8)) % 8;
-        if (in_cache > 0) {
-            rstate.cache          = *(rstate.data++);
-            rstate.cache_num_bits = 8;
-            discard_bits(rstate, 8 - in_cache);
-        }
+        rstate.reset(
+            segment_info.subseq_offset * subsequence_size_bytes,
+            info.p,
+            (segment_info.subseq_offset + segment_info.subseq_count) * subsequence_size_bytes);
     } else {
         // start of i-th subsequence
         info.p = subseq_idx_rel * subsequence_size;
@@ -315,11 +408,10 @@ __device__ subsequence_info decode_subsequence(
         info.c = 0; // start from the first data unit of the Y component
         info.z = 0;
 
-        // subsequence_size is multiple of eight, info.p is multiple of eight
-        rstate.data =
-            cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (info.p / 8);
-        rstate.cache          = 0;
-        rstate.cache_num_bits = 0;
+        rstate.reset(
+            (segment_info.subseq_offset + subseq_idx_rel) * subsequence_size_bytes,
+            0,
+            (segment_info.subseq_offset + segment_info.subseq_count) * subsequence_size_bytes);
     }
 
     const int end_subseq = (subseq_idx_rel + 1) * subsequence_size; // first bit in next subsequence
@@ -400,6 +492,14 @@ __global__ void sync_intra_sequence(
     // last index dictated by block and JPEG stream
     int end = min(subseq_idx_from_next_block, num_subsequences);
 
+    // FIXME the use of this struct needs some explanation that we (may be?) are explicitly
+    //   forcing a desync between thread blocks because we are not reading symbols until we
+    //   have read more than the subsequence contains (like the paper does)
+    using reader_state_t = reader_state_shared<block_size>;
+    __shared__ typename reader_state_t::storage_t storage;
+    const int block_off = blockDim.x * blockIdx.x * subsequence_size_bytes;
+    reader_state_t rstate(storage, cstate.scan, cstate.scan_end, block_off);
+
     // since all threads must partipate in thread sync, some threads will be assigned to
     //  a subsequence out of bounds
     int segment_idx; // segment index of subseq_idx_begin
@@ -415,7 +515,7 @@ __global__ void sync_intra_sequence(
 
         const int subeq_idx_begin_rel = subseq_idx_begin - seg_info.subseq_offset;
         subsequence_info info         = decode_subsequence<false, false>(
-            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate);
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
         s_info[subseq_idx_begin] = info;
@@ -436,7 +536,7 @@ __global__ void sync_intra_sequence(
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
             info                     = decode_subsequence<true, false>(
-                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -518,6 +618,8 @@ __global__ void sync_subsequences(
     using block_reduce = cub::BlockReduce<bool, block_size>;
     __shared__ typename block_reduce::TempStorage temp_storage;
 
+    reader_state_global rstate(cstate.scan);
+
     bool is_synced = false;
     bool do_write  = true;
     for (int i = 0; i < block_size * size_in_subsequences; ++i) {
@@ -527,7 +629,7 @@ __global__ void sync_subsequences(
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
             info                     = decode_subsequence<true, false>(
-                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx);
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -568,14 +670,16 @@ __global__ void decode_write(
     // subsequence_info.n is relative to segment
     const int position_in_output = segment_offset + s_info[subseq_idx].n;
 
+    reader_state_global rstate(cstate.scan);
+
     // only first thread does not do overflow
     constexpr bool do_write = true;
     if (subseq_idx_rel == 0) {
         decode_subsequence<false, do_write>(
-            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, position_in_output);
+            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, rstate, position_in_output);
     } else {
         decode_subsequence<true, do_write>(
-            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, position_in_output);
+            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, rstate, position_in_output);
     }
 }
 
@@ -640,11 +744,11 @@ jpeggpu_status jpeggpu::decode_scan(
 
     const const_state cstate = {
         d_scan_destuffed,
-        // this is not the end of the destuffed data, but the end of the stuffed allocation.
-        //   the final subsequence may read garbage bits (but not bytes).
+        // this is not the end of the destuffed data, but the end of the destuffed allocation.
+        //   as a consequence, the final subsequence may read garbage.
         //   this can introduce additional (non-existent) symbols,
         //   but a check is in place to prevent writing more symbols than needed
-        d_scan_destuffed + (scan.end - scan.begin),
+        d_scan_destuffed + scan.num_subsequences * subsequence_size_bytes,
         d_segments,
         d_segment_indices,
         scan.num_segments,
@@ -673,7 +777,8 @@ jpeggpu_status jpeggpu::decode_scan(
         ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
 
     // synchronize intra sequence/inter subsequence
-    if (do_it && num_subsequences > 1) {
+    if (do_it) {
+        logger.log("decoding %d subsequences\n", num_subsequences);
         logger.log(
             "intra sync of %d blocks of %d subsequences\n",
             num_sequences,
