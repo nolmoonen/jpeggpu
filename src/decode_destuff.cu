@@ -30,7 +30,10 @@ __device__ bool is_byte_data(bool prev_is_stuffing, uint8_t byte, uint8_t& byte_
 /// \param[out] offset_data For each stuffed byte: one if it is encoded scan data, else zero.
 /// \param[out] offset_segment For each stuffed byte: one if it is a restart marker, else zero.
 __global__ void destuff_map_data_and_segment(
-    const uint8_t* scan_stuffed, int scan_size, int* offset_data, int* offset_segment)
+    const uint8_t* __restrict__ scan_stuffed,
+    int scan_size,
+    int* __restrict__ offset_data,
+    int* __restrict__ offset_segment)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= scan_size) {
@@ -49,14 +52,14 @@ __global__ void destuff_map_data_and_segment(
 }
 
 __global__ void destuff_write_and_map_subsequence(
-    const uint8_t* scan_stuffed,
+    const uint8_t* __restrict__ scan_stuffed,
     int scan_size,
-    const int* offset_data,
-    const int* offset_segment,
-    int* offset_subsequence,
-    const segment* segments,
+    const int* __restrict__ offset_data,
+    const int* __restrict__ offset_segment,
+    int* __restrict__ offset_subsequence,
+    const segment* __restrict__ segments,
     int num_segments,
-    uint8_t* scan_destuffed,
+    uint8_t* __restrict__ scan_destuffed,
     int scan_size_destuffed)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -89,16 +92,16 @@ __global__ void destuff_write_and_map_subsequence(
 }
 
 __global__ void write_segment_indices(
-    const uint8_t* scan_stuffed,
+    const uint8_t* __restrict__ scan_stuffed,
     int scan_size,
-    const int* offset_data,
-    const int* offset_segment,
-    int* offset_subsequence,
-    const segment* segments,
+    const int* __restrict__ offset_data,
+    const int* __restrict__ offset_segment,
+    int* __restrict__ offset_subsequence,
+    const segment* __restrict__ segments,
     int num_segments,
-    const uint8_t* scan_destuffed,
+    const uint8_t* __restrict__ scan_destuffed,
     int scan_size_destuffed,
-    int* segment_indices)
+    int* __restrict__ segment_indices)
 {
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= scan_size) {

@@ -261,8 +261,8 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 template <bool is_overflow, bool do_write>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
-    int16_t* out,
-    subsequence_info* s_info,
+    int16_t* __restrict__ out,
+    subsequence_info* __restrict__ s_info,
     const const_state& cstate,
     const segment& segment_info,
     int segment_idx,
@@ -383,7 +383,7 @@ struct logical_and {
 
 template <int block_size>
 __global__ void sync_intra_sequence(
-    subsequence_info* s_info, int num_subsequences, const_state cstate)
+    subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
     assert(blockDim.x == block_size);
     const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
@@ -478,7 +478,7 @@ __global__ void sync_intra_sequence(
 /// \tparam block_size Block size of the kernel.
 template <int size_in_subsequences, int block_size>
 __global__ void sync_subsequences(
-    subsequence_info* s_info, int num_subsequences, const_state cstate)
+    subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
     assert(blockDim.x == block_size);
     const int tid = blockDim.x * blockIdx.x + threadIdx.x;
@@ -546,7 +546,10 @@ __global__ void sync_subsequences(
 }
 
 __global__ void decode_write(
-    int16_t* out, subsequence_info* s_info, int num_subsequences, const_state cstate)
+    int16_t* __restrict__ out,
+    subsequence_info* __restrict__ s_info,
+    int num_subsequences,
+    const_state cstate)
 {
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {

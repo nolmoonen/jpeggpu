@@ -15,11 +15,11 @@ namespace {
 
 // TODO first version, optimize
 __global__ void transpose_interleaved(
-    const int16_t* data_in,
-    int16_t* data_out_0,
-    int16_t* data_out_1,
-    int16_t* data_out_2,
-    int16_t* data_out_3,
+    const int16_t* __restrict__ data_in,
+    int16_t* __restrict__ data_out_0,
+    int16_t* __restrict__ data_out_1,
+    int16_t* __restrict__ data_out_2,
+    int16_t* __restrict__ data_out_3,
     size_t data_size, /// Sum of all pixels in all components.
     int2
         size_0, /// Pixel size of first component, assumed to be a multiple of MCU size for this component.
@@ -107,11 +107,11 @@ __global__ void transpose_interleaved(
 
 // TODO first version, optimize
 __global__ void transpose_non_interleaved(
-    const int16_t* data_in,
-    int16_t* data_out_0,
-    int16_t* data_out_1,
-    int16_t* data_out_2,
-    int16_t* data_out_3,
+    const int16_t* __restrict__ data_in,
+    int16_t* __restrict__ data_out_0,
+    int16_t* __restrict__ data_out_1,
+    int16_t* __restrict__ data_out_2,
+    int16_t* __restrict__ data_out_3,
     size_t data_size,
     int2 size_0,
     int2 size_1,
