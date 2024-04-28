@@ -5,8 +5,7 @@ JPEGGPU is an experimental JPEG decoder implemented in CUDA. It works by decodin
 ## Features and aims
 
 - Implements DCT-based baseline JPEGs: 8-bits samples within each component, sequential, two DC and two AC Huffman tables, up to four components.
-- Thread safe (except logging, for the moment).
-- No implicit synchronization between host and device in the decoding process.
+- Flexible API: no implicit synchronization between host and device in the decoding process, explicit device memory management, allowing flexible reuse, and thread safe.
 
 ## Benchmarks
 
@@ -19,10 +18,8 @@ jpeggpu singlethreaded, throughput: 80.78 image/s, avg latency: 12.38ms, max lat
 
 ## To do
 
-- Address JPEG applications headers/extensions, like color profiles and EXIF metadata. Currently, this is mostly ignored. It would probably also be good to optionally disable this interpretation.
-- Add some test.
-- Some optimization (try loading 32 at a time or buffer in shared memory)
-- Handling a mix of non-interleaved and interleaved scans.
+- Address JPEG applications headers/extensions, like color profiles and EXIF metadata. The goal is to ignore this and interpret one channel as gray, (not support two channels), three channels as YCbCr, and four channels CMYK. No interpretation of application headers will happen. It should be possible to output the data unchanged so that a user themselves can interpret.
+- Issue in support of baseline standard implementation: handling a mix of non-interleaved and interleaved scans.
 
 ## Other
 

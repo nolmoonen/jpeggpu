@@ -5,12 +5,11 @@
 
 #include <fstream>
 #include <iostream>
-#include <mutex>
 
 int main(int argc, const char* argv[])
 {
     if (argc != 2) {
-        std::cerr << "usage: benchmark <jpeg file>\n";
+        std::cerr << "usage: jpeggpu_benchmark <jpeg file>\n";
         return EXIT_FAILURE;
     }
 

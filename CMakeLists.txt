@@ -34,3 +34,4 @@ add_executable(example_tool example_tool.c)
 target_link_libraries(example_tool PRIVATE jpeggpu)
 
 add_subdirectory(benchmark)
+add_subdirectory(test)

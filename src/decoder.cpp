@@ -357,7 +357,6 @@ jpeggpu_status jpeggpu::decoder::decode(
         out_num_components = 3;
         break;
     case JPEGGPU_OUT_YCBCR:
-        break;
         out_num_components = 3;
         break;
     case JPEGGPU_OUT_NO_CONVERSION:
