@@ -83,6 +83,7 @@ struct subsampling {
     int y_3;
 };
 
+/// \brief Generic conversion, possibly changing color format or subsampling.
 template <int cubes_per_block_x, int cubes_per_block_y>
 __global__ void kernel_convert(
     int size_x,
@@ -119,7 +120,6 @@ __global__ void kernel_convert(
 
     const int i = threadIdx.y * num_pixels_per_block_x + threadIdx.x;
 
-    // TODO optimize such that each thread loads at most one word at a time
     // load data, every thread loads one pixel
     // in_image will always be planar
     for (int c = 0; c < in_num_components; ++c) {
@@ -127,30 +127,40 @@ __global__ void kernel_convert(
         int pitch;
         int ssx;
         int ssy;
+        int size_x_c;
+        int size_y_c;
         switch (c) {
         case 0:
-            channel = in_image.channel_0;
-            pitch   = in_image.pitch_0;
-            ssx     = in_css_inv.x_0;
-            ssy     = in_css_inv.y_0;
+            channel  = in_image.channel_0;
+            pitch    = in_image.pitch_0;
+            ssx      = in_css_inv.x_0;
+            ssy      = in_css_inv.y_0;
+            size_x_c = size_x_0;
+            size_y_c = size_y_0;
             break;
         case 1:
-            channel = in_image.channel_1;
-            pitch   = in_image.pitch_1;
-            ssx     = in_css_inv.x_1;
-            ssy     = in_css_inv.y_1;
+            channel  = in_image.channel_1;
+            pitch    = in_image.pitch_1;
+            ssx      = in_css_inv.x_1;
+            ssy      = in_css_inv.y_1;
+            size_x_c = size_x_1;
+            size_y_c = size_y_1;
             break;
         case 2:
-            channel = in_image.channel_2;
-            pitch   = in_image.pitch_2;
-            ssx     = in_css_inv.x_2;
-            ssy     = in_css_inv.y_2;
+            channel  = in_image.channel_2;
+            pitch    = in_image.pitch_2;
+            ssx      = in_css_inv.x_2;
+            ssy      = in_css_inv.y_2;
+            size_x_c = size_x_2;
+            size_y_c = size_y_2;
             break;
         case 3:
-            channel = in_image.channel_3;
-            pitch   = in_image.pitch_3;
-            ssx     = in_css_inv.x_3;
-            ssy     = in_css_inv.y_3;
+            channel  = in_image.channel_3;
+            pitch    = in_image.pitch_3;
+            ssx      = in_css_inv.x_3;
+            ssy      = in_css_inv.y_3;
+            size_x_c = size_x_3;
+            size_y_c = size_y_3;
             break;
         default:
             __builtin_unreachable();
@@ -160,10 +170,11 @@ __global__ void kernel_convert(
         const int x_ss = x * ssx / 12;
         const int y_ss = y * ssy / 12;
 
-        if (x_ss < ceiling_div(size_x * 12, static_cast<unsigned int>(ssx)) &&
-            y_ss < ceiling_div(size_y * 12, static_cast<unsigned int>(ssy))) {
+        if (x_ss < size_x_c && y_ss < size_y_c) {
             // if image is subsampled, some redundant reads occur
             data[i][c] = channel[y_ss * pitch + x_ss];
+        } else {
+            data[i][c] = 0;
         }
     }
 
@@ -258,6 +269,73 @@ __global__ void kernel_convert(
     }
 }
 
+/// \brief Simple conversion without changing subsampling or color format.
+__global__ void kernel_convert_simple(
+    int size_x_0,
+    int size_x_1,
+    int size_x_2,
+    int size_x_3,
+    int size_y_0,
+    int size_y_1,
+    int size_y_2,
+    int size_y_3,
+    jpeggpu::image_desc in_image,
+    jpeggpu::image_desc out_image)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int c = blockIdx.z;
+
+    const uint8_t* data_in;
+    uint8_t* data_out;
+    int pitch_in;
+    int pitch_out;
+    int size_x_c;
+    int size_y_c;
+    switch (c) {
+    case 0:
+        data_in   = in_image.channel_0;
+        data_out  = out_image.channel_0;
+        pitch_in  = in_image.pitch_0;
+        pitch_out = out_image.pitch_0;
+        size_x_c  = size_x_0;
+        size_y_c  = size_y_0;
+        break;
+    case 1:
+        data_in   = in_image.channel_1;
+        data_out  = out_image.channel_1;
+        pitch_in  = in_image.pitch_1;
+        pitch_out = out_image.pitch_1;
+        size_x_c  = size_x_1;
+        size_y_c  = size_y_1;
+        break;
+    case 2:
+        data_in   = in_image.channel_2;
+        data_out  = out_image.channel_2;
+        pitch_in  = in_image.pitch_2;
+        pitch_out = out_image.pitch_2;
+        size_x_c  = size_x_2;
+        size_y_c  = size_y_2;
+        break;
+    case 3:
+        data_in   = in_image.channel_3;
+        data_out  = out_image.channel_3;
+        pitch_in  = in_image.pitch_3;
+        pitch_out = out_image.pitch_3;
+        size_x_c  = size_x_3;
+        size_y_c  = size_y_3;
+        break;
+    default:
+        __builtin_unreachable();
+    }
+
+    if (x >= size_x_c || y >= size_y_c) {
+        return;
+    }
+
+    data_out[y * pitch_out + x] = data_in[y * pitch_in + x];
+}
+
 } // namespace
 
 jpeggpu_status jpeggpu::convert(
@@ -284,6 +362,37 @@ jpeggpu_status jpeggpu::convert(
     cudaStream_t stream,
     logger& logger)
 {
+    const bool no_color_conv =
+        (in_color_fmt == JPEGGPU_JPEG_GRAY && out_color_fmt == JPEGGPU_OUT_GRAY) ||
+        (in_color_fmt == JPEGGPU_JPEG_YCBCR && out_color_fmt == JPEGGPU_OUT_YCBCR) ||
+        out_color_fmt == JPEGGPU_OUT_NO_CONVERSION;
+    if (no_color_conv && in_subsampling == out_subsampling &&
+        in_num_components == out_num_components) {
+        logger.log("performing simple conversion\n");
+
+        const dim3 block_size(32, 4);
+        const dim3 grid_size(
+            ceiling_div(size_x, static_cast<unsigned int>(block_size.x)),
+            ceiling_div(size_y, static_cast<unsigned int>(block_size.y)),
+            in_num_components);
+        kernel_convert_simple<<<grid_size, block_size, 0, stream>>>(
+            size_x_0,
+            size_x_1,
+            size_x_2,
+            size_x_3,
+            size_y_0,
+            size_y_1,
+            size_y_2,
+            size_y_3,
+            in_image,
+            out_image);
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+
+        return JPEGGPU_SUCCESS;
+    }
+
+    logger.log("performing generic conversion\n");
+
     // lcm of 1, 2, 3, and 4 is 12. pixels are processed in "cubes" of 12x12 to make subsampling
     //   conversion easier: no inter-block communication is needed at most size_x * size_y * num_components
     //   numer of reads and writes are done

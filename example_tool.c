@@ -107,6 +107,8 @@ int main(int argc, char* argv[])
     const size_t byte_stride = img.pitch;
     stbi_write_png(out_filename, img_info.sizes_x[0], img_info.sizes_y[0], 3, h_img, byte_stride);
 
+    printf("decoded image at: %s\n", out_filename);
+
     free(h_img);
 
     CHECK_JPEGGPU(jpeggpu_decoder_cleanup(decoder));

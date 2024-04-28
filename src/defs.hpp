@@ -69,6 +69,21 @@ __device__ constexpr int order_natural[64] = {
 /// \brief Enable additional, synchronous debugging. Intentionally not a compile-time constant.
 extern bool is_debug;
 
+inline bool operator==(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling& rhs)
+{
+    for (int c = 0; c < jpeggpu::max_comp_count; ++c) {
+        if (lhs.x[c] != rhs.x[c] || lhs.y[c] != rhs.y[c]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool operator!=(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling& rhs)
+{
+    return !(lhs == rhs);
+}
+
 } // namespace jpeggpu
 
 #endif // JPEGGPU_DEFS_HPP_

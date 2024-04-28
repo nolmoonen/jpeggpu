@@ -116,21 +116,6 @@ jpeggpu_status jpeggpu::decoder::parse_header(
 
 namespace {
 
-inline bool operator==(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling& rhs)
-{
-    for (int c = 0; c < jpeggpu::max_comp_count; ++c) {
-        if (lhs.x[c] != rhs.x[c] || lhs.y[c] != rhs.y[c]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-inline bool operator!=(const jpeggpu_subsampling& lhs, const jpeggpu_subsampling& rhs)
-{
-    return !(lhs == rhs);
-}
-
 template <bool do_it>
 jpeggpu_status reserve_transfer_data(
     const reader& reader,
