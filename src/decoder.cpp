@@ -49,11 +49,8 @@ jpeggpu_status jpeggpu::decoder::init()
     for (int c = 0; c < max_comp_count; ++c) {
         JPEGGPU_CHECK_CUDA(cudaMalloc(&(d_qtables[c]), sizeof(uint8_t) * data_unit_size));
     }
-    for (int i = 0; i < max_huffman_count; ++i) {
-        for (int j = 0; j < HUFF_COUNT; ++j) {
-            JPEGGPU_CHECK_CUDA(cudaMalloc(&(d_huff_tables[i][j]), sizeof(*d_huff_tables[i][j])));
-        }
-    }
+    JPEGGPU_CHECK_CUDA(
+        cudaMalloc(&d_huff_tables, sizeof(*d_huff_tables) * max_huffman_count * HUFF_COUNT));
 
     jpeggpu_status stat = JPEGGPU_SUCCESS;
     if ((stat = reader.startup()) != JPEGGPU_SUCCESS) {
@@ -70,12 +67,9 @@ void jpeggpu::decoder::cleanup()
 {
     reader.cleanup();
 
-    for (int i = 0; i < max_huffman_count; ++i) {
-        for (int j = 0; j < HUFF_COUNT; ++j) {
-            cudaFree(d_huff_tables[i][j]);
-            d_huff_tables[i][j] = nullptr;
-        }
-    }
+    cudaFree(d_huff_tables);
+    d_huff_tables = nullptr;
+
     for (int c = 0; c < max_comp_count; ++c) {
         cudaFree(d_qtables[c]);
         d_qtables[c] = nullptr;
@@ -299,7 +293,7 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
     for (int i = 0; i < max_huffman_count; ++i) {
         for (int j = 0; j < HUFF_COUNT; ++j) {
             JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-                d_huff_tables[i][j],
+                d_huff_tables + i * HUFF_COUNT + j,
                 reader.h_huff_tables[i][j],
                 sizeof(*reader.h_huff_tables[i][j]),
                 cudaMemcpyHostToDevice,

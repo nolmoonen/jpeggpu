@@ -155,29 +155,28 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
 
 void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_codes)[16])
 {
-    // generate Huffman
-    int huffcode[257]; // [1, 16]
-    int code_idx  = 0; // [0, 256]
+    uint16_t huffcode[256];
+    int code_idx  = 0;
     uint16_t code = 0;
     for (int l = 0; l < 16; ++l) {
         for (uint8_t i = 0; i < num_codes[l]; i++) {
+            assert(code_idx < 256);
             huffcode[code_idx++] = code;
             ++code;
         }
         code <<= 1;
     }
-    huffcode[code_idx] = 0;
 
     // generate decoding tables for bit-sequential decoding
     code_idx = 0;
     for (int l = 0; l < 16; ++l) {
         if (num_codes[l]) {
-            table.valptr[l]  = code_idx; // huffval[] index of 1st symbol of code length l
-            table.mincode[l] = huffcode[code_idx]; // minimum code of length l
+            table.entries[l].valptr  = code_idx; // huffval[] index of 1st symbol of code length l
+            table.entries[l].mincode = huffcode[code_idx]; // minimum code of length l
             code_idx += num_codes[l];
-            table.maxcode[l] = huffcode[code_idx - 1]; // maximum code of length l
+            table.entries[l].maxcode = huffcode[code_idx - 1]; // maximum code of length l
         } else {
-            table.maxcode[l] = -1; // -1 if no codes of this length
+            table.entries[l].maxcode = -1; // -1 if no codes of this length
         }
     }
 }
@@ -233,7 +232,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             return JPEGGPU_INVALID_JPEG;
         }
 
-        if (static_cast<size_t>(count) > sizeof(table.huffval)) {
+        if (static_cast<size_t>(count) > sizeof(table.huffval) / sizeof(table.huffval[0])) {
             logger.log("\ttoo many values\n");
             return JPEGGPU_INVALID_JPEG;
         }

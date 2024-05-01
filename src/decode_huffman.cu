@@ -54,14 +54,15 @@ struct const_state {
     const segment* segments;
     const int* segment_indices;
     const int num_segments;
-    const huffman_table* dc_0;
-    const huffman_table* ac_0;
-    const huffman_table* dc_1;
-    const huffman_table* ac_1;
-    const huffman_table* dc_2;
-    const huffman_table* ac_2;
-    const huffman_table* dc_3;
-    const huffman_table* ac_3;
+    const huffman_table* huffman_tables;
+    int dc_0;
+    int ac_0;
+    int dc_1;
+    int ac_1;
+    int dc_2;
+    int ac_2;
+    int dc_3;
+    int ac_3;
     int c0_inc_prefix; // inclusive prefix of number of JPEG blocks in MCU
     int c1_inc_prefix;
     int c2_inc_prefix;
@@ -71,8 +72,33 @@ struct const_state {
     int num_data_units;
     int num_mcus_in_segment;
 };
+// check that struct can be copied to device
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
 static_assert(std::is_trivially_copyable_v<const_state>);
+
+using huffman_tables = huffman_table[max_huffman_count * HUFF_COUNT];
+
+// TODO this always loads the maximum possible amount of tables.
+//   in the common case (one for luminance and one for chrominance),
+//   this results in twice as many loads as needed
+template <int block_size>
+__device__ void load_huffman_tables(
+    const huffman_table* tables_global, huffman_tables& tables_shared)
+{
+    // assert that loading a word at a time is valid
+    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
+    constexpr int num_words = sizeof(tables_shared) / 4;
+    constexpr int num_words_per_thread =
+        ceiling_div(num_words, static_cast<unsigned int>(block_size));
+    for (int i = 0; i < num_words_per_thread; ++i) {
+        const int idx = block_size * i + threadIdx.x;
+        if (idx < num_words) {
+            reinterpret_cast<uint32_t*>(tables_shared)[idx] =
+                reinterpret_cast<const uint32_t*>(tables_global)[idx];
+        }
+    }
+    __syncthreads();
+}
 
 /// \brief Loads the next eight bits.
 __device__ void load_word(reader_state& rstate)
@@ -178,17 +204,19 @@ uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table&
 {
     int i;
     int32_t code;
+    huffman_table::entry entry;
     for (i = 0; i < 16; ++i) {
         code                    = u32_select_bits(data, i + 1);
         const bool is_last_iter = i == 15;
-        if (code <= table.maxcode[i] || is_last_iter) {
+        entry                   = table.entries[i];
+        if (code <= entry.maxcode || is_last_iter) {
             break;
         }
     }
     assert(1 <= i + 1 && i + 1 <= 16);
     // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
     length        = i + 1;
-    const int idx = table.valptr[i] + (code - table.mincode[i]);
+    const int idx = entry.valptr + (code - entry.mincode);
     if (idx < 0 || 256 <= idx) {
         // found a value that does not make sense. this can happen if the wrong huffman
         //   table is used. return arbitrary value
@@ -303,6 +331,7 @@ __device__ subsequence_info decode_subsequence(
     const segment& segment_info,
     int segment_idx,
     reader_state& rstate,
+    const huffman_tables& tables,
     int position_in_output = 0)
 {
     subsequence_info info;
@@ -336,8 +365,8 @@ __device__ subsequence_info decode_subsequence(
         int length     = 0;
         int symbol     = 0;
         int run_length = 0;
-        const huffman_table* dc;
-        const huffman_table* ac;
+        int dc;
+        int ac;
         if (info.c < cstate.c0_inc_prefix) {
             dc = cstate.dc_0;
             ac = cstate.ac_0;
@@ -351,13 +380,15 @@ __device__ subsequence_info decode_subsequence(
             dc = cstate.dc_3;
             ac = cstate.ac_3;
         }
+        const huffman_table& table_dc = tables[dc * HUFF_COUNT + HUFF_DC];
+        const huffman_table& table_ac = tables[ac * HUFF_COUNT + HUFF_AC];
 
         // decode_next_symbol uses at most 32 bits. if fewer than 32 bits are available, append with zeroes
         const int loaded_bits = load_bits(rstate, 32);
         uint32_t data         = select_bits(rstate, loaded_bits) << (32 - loaded_bits);
 
         // always returns length > 0 if there are bits in `rstate` to ensure progress
-        decode_next_symbol<do_write>(length, symbol, run_length, data, *dc, *ac, info.z);
+        decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
 
         if (info.p + length > end_subseq) {
             // reading the next symbol will be outside the subsequence
@@ -403,6 +434,9 @@ template <int block_size>
 __global__ void sync_intra_sequence(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
+    __shared__ huffman_tables tables;
+    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+
     assert(blockDim.x == block_size);
     const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -431,7 +465,7 @@ __global__ void sync_intra_sequence(
         rstate = rstate_from_subseq_start(cstate, seg_info, subeq_idx_begin_rel);
 
         subsequence_info info = decode_subsequence<false, false>(
-            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate);
+            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
         s_info[subseq_idx_begin] = info;
@@ -454,7 +488,7 @@ __global__ void sync_intra_sequence(
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
             info                     = decode_subsequence<true, false>(
-                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate);
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -502,6 +536,9 @@ template <int size_in_subsequences, int block_size>
 __global__ void sync_subsequences(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
+    __shared__ huffman_tables tables;
+    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+
     assert(blockDim.x == block_size);
     const int tid = blockDim.x * blockIdx.x + threadIdx.x;
     // subsequence index this thread is overflowing from, this will be the first s_info read
@@ -548,7 +585,7 @@ __global__ void sync_subsequences(
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
             info                     = decode_subsequence<true, false>(
-                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate);
+                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -570,12 +607,16 @@ __global__ void sync_subsequences(
     }
 }
 
+template <int block_size>
 __global__ void decode_write(
     int16_t* __restrict__ out,
     const subsequence_info* __restrict__ s_info,
     int num_subsequences,
     const_state cstate)
 {
+    __shared__ huffman_tables tables;
+    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {
         return;
@@ -597,12 +638,28 @@ __global__ void decode_write(
     if (subseq_idx_rel == 0) {
         reader_state rstate = rstate_from_subseq_start(cstate, seg_info, 0);
         decode_subsequence<false, do_write>(
-            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, rstate, position_in_output);
+            subseq_idx_rel,
+            out,
+            s_info,
+            cstate,
+            seg_info,
+            segment_idx,
+            rstate,
+            tables,
+            position_in_output);
     } else {
         reader_state rstate =
             rstate_from_subseq_overflow(cstate, seg_info, s_info[subseq_idx - 1].p);
         decode_subsequence<true, do_write>(
-            subseq_idx_rel, out, s_info, cstate, seg_info, segment_idx, rstate, position_in_output);
+            subseq_idx_rel,
+            out,
+            s_info,
+            cstate,
+            seg_info,
+            segment_idx,
+            rstate,
+            tables,
+            position_in_output);
     }
 }
 
@@ -639,7 +696,7 @@ jpeggpu_status jpeggpu::decode_scan(
     const int* d_segment_indices,
     int16_t* d_out,
     const struct scan& scan,
-    huffman_table* (&d_huff_tables)[max_huffman_count][HUFF_COUNT],
+    huffman_table* d_huff_tables,
     stack_allocator& allocator,
     cudaStream_t stream,
     logger& logger)
@@ -675,14 +732,15 @@ jpeggpu_status jpeggpu::decode_scan(
         d_segments,
         d_segment_indices,
         scan.num_segments,
-        d_huff_tables[info.components[0].dc_idx][HUFF_DC],
-        d_huff_tables[info.components[0].ac_idx][HUFF_AC],
-        d_huff_tables[info.components[1].dc_idx][HUFF_DC],
-        d_huff_tables[info.components[1].ac_idx][HUFF_AC],
-        d_huff_tables[info.components[2].dc_idx][HUFF_DC],
-        d_huff_tables[info.components[2].ac_idx][HUFF_AC],
-        d_huff_tables[info.components[3].dc_idx][HUFF_DC],
-        d_huff_tables[info.components[3].ac_idx][HUFF_AC],
+        d_huff_tables,
+        info.components[0].dc_idx,
+        info.components[0].ac_idx,
+        info.components[1].dc_idx,
+        info.components[1].ac_idx,
+        info.components[2].dc_idx,
+        info.components[2].ac_idx,
+        info.components[3].dc_idx,
+        info.components[3].ac_idx,
         c0_count,
         c0_count + c1_count,
         c0_count + c1_count + c2_count,
@@ -790,8 +848,9 @@ jpeggpu_status jpeggpu::decode_scan(
 
     if (do_it) {
         // alg-1:09-15
-        decode_write<<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-            d_out, d_s_info, num_subsequences, cstate);
+        decode_write<num_subsequences_in_sequence>
+            <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
+                d_out, d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
@@ -805,7 +864,7 @@ template jpeggpu_status jpeggpu::decode_scan<false>(
     const int*,
     int16_t*,
     const struct scan&,
-    huffman_table* (&)[max_huffman_count][HUFF_COUNT],
+    huffman_table*,
     stack_allocator&,
     cudaStream_t,
     logger&);
@@ -817,7 +876,7 @@ template jpeggpu_status jpeggpu::decode_scan<true>(
     const int*,
     int16_t*,
     const struct scan&,
-    huffman_table* (&)[max_huffman_count][HUFF_COUNT],
+    huffman_table*,
     stack_allocator&,
     cudaStream_t,
     logger&);

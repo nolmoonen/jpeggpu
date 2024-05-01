@@ -45,7 +45,9 @@ struct decoder {
     struct reader reader;
 
     uint8_t* d_qtables[max_comp_count];
-    huffman_table* d_huff_tables[max_huffman_count][HUFF_COUNT];
+    // one allocation so this makes up one contiguous block of memory,
+    //  which is beneficial for coalescing
+    huffman_table* d_huff_tables;
 
     // output of decoding, quantized and cosine-transformed image data
     int16_t* d_image_qdct[max_comp_count];

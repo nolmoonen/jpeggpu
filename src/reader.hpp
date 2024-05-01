@@ -23,12 +23,11 @@ struct segment {
 };
 
 struct huffman_table {
-    /// mincode[k] is smallest code of length k+1
-    uint16_t mincode[16];
-    /// maxcode[k] is largest code of length k+1, -1 if no codes
-    int32_t maxcode[16];
-    /// Huffval[] index of 1st symbol of length k+1
-    uint16_t valptr[16];
+    struct entry {
+        int32_t maxcode; /// maxcode[k] is largest code of length k+1, -1 if no codes
+        uint16_t mincode; /// mincode[k] is smallest code of length k+1
+        uint8_t valptr; /// Huffval[] index of 1st symbol of length k+1
+    }  entries[16];
     /// Values associated with each Huffman code, in order of increasing code length
     uint8_t huffval[256];
 };

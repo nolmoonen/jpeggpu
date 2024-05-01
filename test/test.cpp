@@ -309,6 +309,7 @@ void test(const uint8_t* file_data, size_t file_size, color_fmt fmt)
     // TODO do MSE comparison
 }
 
+// FIXME there seems to be an issue with test_jpeggpu_1.ppm on 4:2:0
 int main(int argc, const char* argv[])
 {
     if (argc != 2) {

@@ -35,7 +35,7 @@ jpeggpu_status decode_scan(
     const int* d_segment_indices,
     int16_t* d_out,
     const struct jpeggpu::scan& scan,
-    huffman_table* (&d_huff_tables)[max_huffman_count][HUFF_COUNT],
+    huffman_table* d_huff_tables,
     stack_allocator& allocator,
     cudaStream_t stream,
     logger& logger);
