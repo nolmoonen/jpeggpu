@@ -44,8 +44,8 @@ struct subsequence_info {
 struct reader_state {
     const uint8_t* data;
     const uint8_t* data_end;
-    uint64_t cache; // new bits are at the least significant positions
-    int cache_num_bits;
+    ulonglong4* cache;
+    int cache_idx;
 };
 
 struct const_state {
@@ -78,6 +78,9 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 
 using huffman_tables = huffman_table[max_huffman_count * HUFF_COUNT];
 
+template <int block_size>
+using cache = ulonglong4[block_size];
+
 // TODO this always loads the maximum possible amount of tables.
 //   in the common case (one for luminance and one for chrominance),
 //   this results in twice as many loads as needed
@@ -100,85 +103,111 @@ __device__ void load_huffman_tables(
     __syncthreads();
 }
 
-/// \brief Loads the next eight bits.
-__device__ void load_word(reader_state& rstate)
+__device__ void global_load_uint4(reader_state& rstate, uint4* shared)
 {
-    assert(4 <= rstate.data_end - rstate.data);
-    assert(rstate.cache_num_bits + 32 <= 64);
-
-    uint32_t val = *reinterpret_cast<const uint32_t*>(rstate.data);
-    rstate.data += 4;
-    // reverse byte order
-    val = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
-
-    rstate.cache = (rstate.cache << 32) | val;
-    rstate.cache_num_bits += 32;
+    for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
+        uint32_t val                           = reinterpret_cast<const uint32_t*>(rstate.data)[i];
+        val                                    = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
+        reinterpret_cast<uint32_t*>(shared)[i] = val;
+    }
+    rstate.data += sizeof(uint4);
 }
 
 /// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
-__device__ int load_bits(reader_state& rstate, int num_bits)
+__device__ uint32_t load_32_bits(reader_state& rstate)
 {
-    if (num_bits <= rstate.cache_num_bits) {
-        return num_bits;
+    // check if more bits are needed
+    if (256 <= rstate.cache_idx + 32) {
+        // makes computation easier, means data is always multiple of the loaded size
+        static_assert(subsequence_size_bytes % sizeof(uint4) == 0);
+
+        // shift over to make place for 128 bits in z and w
+        rstate.cache->x = rstate.cache->z;
+        rstate.cache->y = rstate.cache->w;
+
+        // assert that the lo cache is fully used up
+        assert(128 <= rstate.cache_idx);
+        rstate.cache_idx -= 128;
+
+        if (sizeof(uint4) <= rstate.data_end - rstate.data) {
+            for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
+                uint32_t val = reinterpret_cast<const uint32_t*>(rstate.data)[i];
+                val          = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
+                reinterpret_cast<uint32_t*>(rstate.cache)[4 + i] = val;
+            }
+            rstate.data += sizeof(uint4);
+        } else {
+            // just set it to zero, but is not required
+            std::memset(&(reinterpret_cast<uint4*>(rstate.cache)[1]), 0, sizeof(uint4));
+        }
     }
+    // enough bits are present to pull 32 bits
+    assert(rstate.cache_idx + 32 <= 256);
 
-    if (4 <= rstate.data_end - rstate.data) {
-        load_word(rstate);
-        assert(num_bits <= 32);
-        return num_bits;
-    }
+    int word_32_idx = rstate.cache_idx / 32;
+    assert(word_32_idx < 8);
+    // load the 32-bits word and the next, i.e. load a 64-bits word at the position of the 32-bits word
+    word_32_idx  = min(word_32_idx, 6);
+    uint64_t ret = (uint64_t{reinterpret_cast<uint32_t*>(rstate.cache)[word_32_idx]} << 32) |
+                   reinterpret_cast<uint32_t*>(rstate.cache)[word_32_idx + 1];
 
-    return rstate.cache_num_bits;
+    // shift to get the relevant 32 from 64 bits
+    int off = word_32_idx * 32;
+    assert(off <= rstate.cache_idx);
+    int off_rel = rstate.cache_idx - off;
+    assert(off_rel <= 32 && off_rel + 32 <= 64);
+    int shift = 64 - off_rel - 32;
+
+    return static_cast<uint32_t>(ret >> shift);
 }
 
-/// \brief Peeks `num_bits` from cache, does not remove them.
-///   Assumes enough bits are present.
-__device__ uint32_t select_bits(reader_state& rstate, int num_bits)
-{
-    assert(num_bits <= 32); // can return at most 32 bits in uin32_t
-    assert(num_bits <= rstate.cache_num_bits);
-
-    // upper bits are zero
-    return rstate.cache >> (rstate.cache_num_bits - num_bits);
-}
-
-/// \brief Removes `num_bits` from cache.
-__device__ void discard_bits(reader_state& rstate, int num_bits)
-{
-    assert(rstate.cache_num_bits >= num_bits);
-    // set discarded bits to zero (upper bits in the cache)
-    assert(rstate.cache_num_bits - num_bits < 64); // shift is not out of bounds
-    rstate.cache = rstate.cache & ((uint64_t{1} << (rstate.cache_num_bits - num_bits)) - 1);
-    rstate.cache_num_bits -= num_bits;
-}
-
-__device__ reader_state
-rstate_from_subseq_start(const const_state& cstate, const segment& segment_info, int subseq_idx_rel)
+__device__ reader_state rstate_from_subseq_start(
+    const const_state& cstate, const segment& segment_info, ulonglong4* cache, int subseq_idx_rel)
 {
     reader_state rstate;
     rstate.data =
         cstate.scan + (segment_info.subseq_offset + subseq_idx_rel) * subsequence_size_bytes;
     rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
                                         subsequence_size_bytes;
-    rstate.cache          = 0;
-    rstate.cache_num_bits = 0;
+    rstate.cache     = cache;
+    rstate.cache_idx = 0;
+
+    // assert aligned load is valid
+    assert((rstate.data - cstate.scan) % sizeof(uint4) == 0);
+    // there should be at least one sector
+    assert(sizeof(uint4) <= rstate.data_end - rstate.data);
+    global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
+
+    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
+        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
+    }
+
     return rstate;
 }
 
-__device__ reader_state
-rstate_from_subseq_overflow(const const_state& cstate, const segment& segment_info, int p)
+__device__ reader_state rstate_from_subseq_overflow(
+    const const_state& cstate, const segment& segment_info, ulonglong4* cache, int p)
 {
     reader_state rstate;
-    rstate.data = cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + (p / 32) * 4;
+    // loaded in chunks of 128, each chunk has 16 bytes
+    const int byte_offset = (p / 128) * (sizeof(uint4));
+    rstate.data = cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + byte_offset;
     rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
                                         subsequence_size_bytes;
-    rstate.cache          = 0;
-    rstate.cache_num_bits = 0;
-    const int in_cache    = (32 - (p % 32)) % 32;
-    if (in_cache > 0) {
-        load_word(rstate);
-        discard_bits(rstate, 32 - in_cache);
+    rstate.cache     = cache;
+    rstate.cache_idx = p - byte_offset * 8;
+
+    // assert aligned load is valid
+    assert((rstate.data - cstate.scan) % sizeof(uint4) == 0);
+    // TODO why is there not always one sector?
+    // there should be at least one sector
+    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
+        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
     }
+    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
+        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
+    }
+
     return rstate;
 }
 
@@ -384,8 +413,7 @@ __device__ subsequence_info decode_subsequence(
         const huffman_table& table_ac = tables[ac * HUFF_COUNT + HUFF_AC];
 
         // decode_next_symbol uses at most 32 bits. if fewer than 32 bits are available, append with zeroes
-        const int loaded_bits = load_bits(rstate, 32);
-        uint32_t data         = select_bits(rstate, loaded_bits) << (32 - loaded_bits);
+        uint32_t data = load_32_bits(rstate);
 
         // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
@@ -395,8 +423,8 @@ __device__ subsequence_info decode_subsequence(
             break;
         }
 
-        // `length` can be greater than `loaded_bits` if data was appended with zeroes
-        discard_bits(rstate, min(length, loaded_bits));
+        // commit
+        rstate.cache_idx += length;
 
         if (do_write) {
             // TODO could make a separate kernel for this
@@ -437,6 +465,9 @@ __global__ void sync_intra_sequence(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
+    __shared__ cache<block_size> block_cache;
+    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+
     assert(blockDim.x == block_size);
     const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -462,7 +493,7 @@ __global__ void sync_intra_sequence(
 
         const int subeq_idx_begin_rel = subseq_idx_begin - seg_info.subseq_offset;
 
-        rstate = rstate_from_subseq_start(cstate, seg_info, subeq_idx_begin_rel);
+        rstate = rstate_from_subseq_start(cstate, seg_info, thread_cache, subeq_idx_begin_rel);
 
         subsequence_info info = decode_subsequence<false, false>(
             subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
@@ -539,6 +570,9 @@ __global__ void sync_subsequences(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
+    __shared__ cache<block_size> block_cache;
+    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+
     assert(blockDim.x == block_size);
     const int tid = blockDim.x * blockIdx.x + threadIdx.x;
     // subsequence index this thread is overflowing from, this will be the first s_info read
@@ -569,7 +603,8 @@ __global__ void sync_subsequences(
         assert(subseq_idx_from < subseq_last_idx_segment);
         end = min(end, subseq_last_idx_segment);
 
-        rstate = rstate_from_subseq_overflow(cstate, seg_info, s_info[subseq_idx_from].p);
+        rstate =
+            rstate_from_subseq_overflow(cstate, seg_info, thread_cache, s_info[subseq_idx_from].p);
     }
 
     __shared__ bool is_block_done;
@@ -617,6 +652,9 @@ __global__ void decode_write(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
+    __shared__ cache<block_size> block_cache;
+    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {
         return;
@@ -636,7 +674,7 @@ __global__ void decode_write(
     // only first thread does not do overflow
     constexpr bool do_write = true;
     if (subseq_idx_rel == 0) {
-        reader_state rstate = rstate_from_subseq_start(cstate, seg_info, 0);
+        reader_state rstate = rstate_from_subseq_start(cstate, seg_info, thread_cache, 0);
         decode_subsequence<false, do_write>(
             subseq_idx_rel,
             out,
@@ -649,7 +687,7 @@ __global__ void decode_write(
             position_in_output);
     } else {
         reader_state rstate =
-            rstate_from_subseq_overflow(cstate, seg_info, s_info[subseq_idx - 1].p);
+            rstate_from_subseq_overflow(cstate, seg_info, thread_cache, s_info[subseq_idx - 1].p);
         decode_subsequence<true, do_write>(
             subseq_idx_rel,
             out,
