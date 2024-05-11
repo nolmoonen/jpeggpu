@@ -132,7 +132,8 @@ void bench_nvjpeg_st(const char* file_data, size_t file_size)
         CHECK_CUDA(cudaMallocHost(&h_img[c], plane_bytes));
     }
 
-    CHECK_NVJPEG(nvjpegDecodeParamsSetOutputFormat(state.nvjpeg_decode_params, NVJPEG_OUTPUT_YUV));
+    CHECK_NVJPEG(
+        nvjpegDecodeParamsSetOutputFormat(state.nvjpeg_decode_params, NVJPEG_OUTPUT_UNCHANGED));
 
     const auto run_iter = [&]() {
         const int save_metadata = 0;
@@ -337,7 +338,7 @@ void bench_nvjpeg_mt_thread_startup(
     }
 
     CHECK_NVJPEG(nvjpegDecodeParamsSetOutputFormat(
-        thread_state.nv_state.nvjpeg_decode_params, NVJPEG_OUTPUT_YUV));
+        thread_state.nv_state.nvjpeg_decode_params, NVJPEG_OUTPUT_UNCHANGED));
 
     // run one warmup
     run_iter(state, thread_state);

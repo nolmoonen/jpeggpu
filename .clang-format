@@ -3,7 +3,6 @@ AlignConsecutiveAssignments: Consecutive
 AlignTrailingComments: Never
 AllowShortIfStatementsOnASingleLine: AllIfsAndElse
 AlwaysBreakTemplateDeclarations: Yes
-AttributeMacros: ['__device__']
 BinPackArguments: False
 BinPackParameters: False
 BreakBeforeBraces: Custom

@@ -46,8 +46,6 @@ void bench_jpeggpu_st(const char* file_data, size_t file_size)
         image_bytes += plane_bytes;
         CHECK_CUDA(cudaMallocHost(&h_img[c], plane_bytes));
     }
-    d_img.color_fmt   = JPEGGPU_OUT_NO_CONVERSION;
-    d_img.subsampling = img_info.subsampling;
 
     void* d_tmp     = nullptr;
     size_t tmp_size = 0;
@@ -210,8 +208,6 @@ void bench_jpeggpu_mt_thread_startup(
         image_bytes += plane_bytes;
         CHECK_CUDA(cudaMallocHost(&bench_thread_state.h_img[c], plane_bytes));
     }
-    bench_thread_state.d_img.color_fmt   = JPEGGPU_OUT_NO_CONVERSION;
-    bench_thread_state.d_img.subsampling = bench_thread_state.img_info.subsampling;
 
     bench_thread_state.d_tmp    = nullptr;
     bench_thread_state.tmp_size = 0;
@@ -297,6 +293,7 @@ void bench_jpeggpu(const char* file_data, size_t file_size)
 {
     bench_jpeggpu_st(file_data, file_size);
     // bench_jpeggpu_mt(file_data, file_size);
+    // FIXME add batched API benchmark
 }
 
 #endif // JPEGGPU_BENCHMARK_BENCHMARK_JPEGGPU_HPP_

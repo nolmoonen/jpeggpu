@@ -1,9 +1,18 @@
+#include "util/util.h"
+
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "util/stb_image_write.h"
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+
 #include <jpeggpu/jpeggpu.h>
 
 #include <cuda_runtime.h>
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -84,32 +93,65 @@ int main(int argc, char* argv[])
 
     CHECK_JPEGGPU(jpeggpu_decoder_transfer(decoder, d_tmp, tmp_size, stream));
 
-    const size_t image_size = img_info.sizes_x[0] * img_info.sizes_y[0];
-    struct jpeggpu_img_interleaved img;
-    CHECK_CUDA(cudaMalloc((void**)&img.image, image_size * 3));
-    img.pitch     = img_info.sizes_x[0] * 3;
-    img.color_fmt = JPEGGPU_OUT_SRGB;
+    struct jpeggpu_img h_img;
+    struct jpeggpu_img d_img;
+    for (int c = 0; c < img_info.num_components; ++c) {
+        const size_t comp_size = img_info.sizes_x[c] * img_info.sizes_y[c];
+        h_img.image[c]         = malloc(comp_size);
+        CHECK_CUDA(cudaMalloc((void**)&(d_img.image[c]), comp_size));
+        h_img.pitch[c] = img_info.sizes_x[c];
+        d_img.pitch[c] = img_info.sizes_x[c];
+    }
 
-    CHECK_JPEGGPU(jpeggpu_decoder_decode_interleaved(decoder, &img, d_tmp, tmp_size, stream));
+    CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &d_img, d_tmp, tmp_size, stream));
 
-    CHECK_CUDA(cudaFree(d_tmp));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 
     printf("gpu decode done\n");
 
-    uint8_t* h_img = malloc(image_size * 3);
-    CHECK_CUDA(cudaMemcpy(h_img, img.image, image_size * 3, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaFree(d_tmp));
+
+    for (int c = 0; c < img_info.num_components; ++c) {
+        CHECK_CUDA(cudaMemcpy(
+            h_img.image[c],
+            d_img.image[c],
+            img_info.sizes_x[c] * img_info.sizes_y[c],
+            cudaMemcpyDeviceToHost));
+    }
+
+    uint8_t* h_img_interleaved = malloc(img_info.sizes_x[0] * img_info.sizes_y[0] * 3);
+
+    if (conv_to_rgbi(
+            img_info.sizes_x,
+            img_info.sizes_y,
+            img_info.num_components,
+            img_info.subsampling,
+            h_img.image[0],
+            h_img.image[1],
+            h_img.image[2],
+            h_img_interleaved) != EXIT_SUCCESS) {
+        printf("simple conversion code cannot handle image\n");
+        goto cleanup;
+    }
 
     const char* out_filename = "out.png";
     if (argc >= 3) {
         out_filename = argv[2];
     }
 
-    const size_t byte_stride = img.pitch;
-    stbi_write_png(out_filename, img_info.sizes_x[0], img_info.sizes_y[0], 3, h_img, byte_stride);
+    const size_t byte_stride = img_info.sizes_x[0] * 3;
+    stbi_write_png(
+        out_filename, img_info.sizes_x[0], img_info.sizes_y[0], 3, h_img_interleaved, byte_stride);
 
     printf("decoded image at: %s\n", out_filename);
 
-    free(h_img);
+cleanup:
+    free(h_img_interleaved);
+
+    for (int c = 0; c < img_info.num_components; ++c) {
+        CHECK_CUDA(cudaFree(d_img.image[c]));
+        free(h_img.image[c]);
+    }
 
     CHECK_JPEGGPU(jpeggpu_decoder_cleanup(decoder));
 

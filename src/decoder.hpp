@@ -23,24 +23,11 @@ struct decoder {
     jpeggpu_status transfer(void* d_tmp, size_t tmp_size, cudaStream_t stream);
 
     template <bool do_it>
-    jpeggpu_status decode_impl(cudaStream_t stream);
+    jpeggpu_status decode_impl(jpeggpu_img* img, cudaStream_t stream);
 
     jpeggpu_status decode_get_size(size_t& tmp_size);
 
-    jpeggpu_status decode(
-        uint8_t* (&image)[max_comp_count],
-        int (&pitch)[max_comp_count],
-        jpeggpu_color_format_out color_fmt,
-        jpeggpu_subsampling subsampling,
-        bool out_is_interleaved,
-        void* d_tmp,
-        size_t tmp_size,
-        cudaStream_t stream);
-
     jpeggpu_status decode(jpeggpu_img* img, void* d_tmp, size_t tmp_size, cudaStream_t stream);
-
-    jpeggpu_status decode(
-        jpeggpu_img_interleaved* img, void* d_tmp, size_t tmp_size, cudaStream_t stream);
 
     struct reader reader;
 
@@ -51,9 +38,6 @@ struct decoder {
 
     // output of decoding, quantized and cosine-transformed image data
     int16_t* d_image_qdct[max_comp_count];
-
-    // output of dequantize and idct, the output image
-    uint8_t* d_image[max_comp_count];
 
     stack_allocator allocator;
     struct logger logger;

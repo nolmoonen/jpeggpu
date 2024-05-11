@@ -78,8 +78,6 @@ struct jpeg_stream {
 
     component components[max_comp_count];
 
-    jpeggpu_color_format_jpeg color_fmt;
-
     int num_mcus_x; /// Image x size in number of MCUs.
     int num_mcus_y; /// Image y size in number of MCUs.
 

@@ -125,7 +125,14 @@ __device__ void idct_row(uint32_t* v8)
 }
 
 __global__ void idct_kernel(
-    int16_t* d_image_qdct, uint8_t* d_image, int data_size_x, int data_size_y, uint8_t* qtable)
+    int16_t* image_qdct,
+    uint8_t* image,
+    int pitch,
+    int data_size_x,
+    int data_size_y,
+    int size_x,
+    int size_y,
+    uint8_t* qtable)
 {
     constexpr int shared_stride = (num_data_x_block + 2);
     // macroblock data in the image order
@@ -149,7 +156,7 @@ __global__ void idct_kernel(
                             data_unit_x * data_unit_vector_size + threadIdx.x;
             const int data_idx_in_data_unit = i * data_unit_vector_size + threadIdx.x;
             int16_t* bl_ptr                 = &block[shared_y * shared_stride + shared_x];
-            const int16_t val               = d_image_qdct[off];
+            const int16_t val               = image_qdct[off];
             const int8_t qval               = qtable[data_idx_in_data_unit];
             bl_ptr[i * shared_stride]       = val * qval;
         }
@@ -169,16 +176,29 @@ __global__ void idct_kernel(
     __syncthreads();
 
     // store one 8-wide col of data
-    // TODO store four values at once
     if (is_inside) {
+        // cannot write multiple bytes at once since it is not guaranteed that the
+        //   user-provided pitch is aligned.
+        // TODO can check pitch for alignment
+
+        const int off_x = data_unit_x * data_unit_vector_size + threadIdx.x;
+        if (off_x >= size_x) {
+            return;
+        }
+
         for (int i = 0; i < data_unit_vector_size; ++i) {
-            const int off = (data_unit_y * data_unit_vector_size + i) * data_size_x +
-                            data_unit_x * data_unit_vector_size + threadIdx.x;
+            const int off_y = data_unit_y * data_unit_vector_size + i;
+
+            if (off_y >= size_y) {
+                return;
+            }
+
             int16_t* bl_ptr = &block[shared_y * shared_stride + shared_x];
 
             // normalize
             const int16_t val = bl_ptr[i * shared_stride] + 128;
-            d_image[off]      = max(0, min(val, 255));
+            const int off     = off_y * pitch + off_x;
+            image[off]        = max(0, min(val, 255));
         }
     }
 }
@@ -189,6 +209,7 @@ jpeggpu_status jpeggpu::idct(
     const jpeg_stream& info,
     int16_t* (&d_image_qdct)[max_comp_count],
     uint8_t* (&d_image)[max_comp_count],
+    int (&pitch)[max_comp_count],
     uint8_t* (&d_qtable)[max_comp_count], // TODO can be 16 bit?
     cudaStream_t stream,
     logger& logger)
@@ -204,8 +225,11 @@ jpeggpu_status jpeggpu::idct(
         idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
             d_image_qdct[c],
             d_image[c],
+            pitch[c],
             info.components[c].data_size_x,
             info.components[c].data_size_y,
+            info.components[c].size_x,
+            info.components[c].size_y,
             d_qtable[c]);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }

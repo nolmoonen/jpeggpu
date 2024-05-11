@@ -118,20 +118,6 @@ enum jpeggpu_status jpeggpu_decoder_decode(
     return decoder->decoder.decode(img, d_tmp, tmp_size, stream);
 }
 
-enum jpeggpu_status jpeggpu_decoder_decode_interleaved(
-    jpeggpu_decoder_t decoder,
-    struct jpeggpu_img_interleaved* img,
-    void* d_tmp,
-    size_t tmp_size,
-    cudaStream_t stream)
-{
-    if (!decoder || !img) {
-        return JPEGGPU_INVALID_ARGUMENT;
-    }
-
-    return decoder->decoder.decode(img, d_tmp, tmp_size, stream);
-}
-
 enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder)
 {
     if (!decoder) {

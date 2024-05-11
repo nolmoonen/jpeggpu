@@ -582,24 +582,6 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
         jpeg_stream.total_data_size += comp.data_size_x * comp.data_size_y;
     }
 
-    // TODO read metadata to determine color formats
-    switch (jpeg_stream.num_components) {
-    case 1:
-        jpeg_stream.color_fmt = JPEGGPU_JPEG_GRAY;
-        break;
-    case 2:
-        logger.log("\tcomponent count of two is not supported\n");
-        return JPEGGPU_NOT_SUPPORTED;
-    case 3:
-        jpeg_stream.color_fmt = JPEGGPU_JPEG_YCBCR;
-        break;
-    case 4:
-        jpeg_stream.color_fmt = JPEGGPU_JPEG_CMYK;
-        break;
-    default:
-        return JPEGGPU_INTERNAL_ERROR;
-    }
-
     return JPEGGPU_SUCCESS;
 }
 
