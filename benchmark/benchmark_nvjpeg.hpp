@@ -175,14 +175,15 @@ void bench_nvjpeg_st(const char* file_data, size_t file_size)
         const auto t0 = std::chrono::high_resolution_clock::now();
         run_iter();
         const auto t1 = std::chrono::high_resolution_clock::now();
-        const double elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        sum_latency += elapsed_ms;
-        max_latency = std::max(max_latency, elapsed_ms);
+        const double elapsed_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        sum_latency += elapsed_us;
+        max_latency = std::max(max_latency, elapsed_us);
     }
-    const double avg_latency = sum_latency / num_iter;
+    const double avg_latency = sum_latency / num_iter / 1e3;
+    max_latency /= 1e3;
 
-    const double total_seconds = sum_latency / 1e3;
+    const double total_seconds = sum_latency / 1e6;
     const double throughput    = num_iter / total_seconds;
 
     for (int c = 0; c < channels; ++c) {
@@ -292,10 +293,10 @@ void bench_nvjpeg_mt_thread_perform(
         const auto t0 = std::chrono::high_resolution_clock::now();
         run_iter(state, thread_state);
         const auto t1 = std::chrono::high_resolution_clock::now();
-        const double elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        thread_state.sum_latency += elapsed_ms;
-        thread_state.max_latency = std::max(thread_state.max_latency, elapsed_ms);
+        const double elapsed_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        thread_state.sum_latency += elapsed_us;
+        thread_state.max_latency = std::max(thread_state.max_latency, elapsed_us);
     }
 }
 
@@ -384,10 +385,11 @@ void bench_nvjpeg_mt(const char* file_data, size_t file_size)
             sum_latency += thread_states[i].sum_latency;
             max_latency = std::max(max_latency, thread_states[i].max_latency);
         }
-        const double avg_latency = sum_latency / (num_threads * num_iter);
+        const double avg_latency = sum_latency / (num_threads * num_iter) / 1e3;
+        max_latency /= 1e3;
 
         const double total_seconds =
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() / 1e3;
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1e6;
         const double throughput = (num_iter * num_threads) / total_seconds;
 
         printf(

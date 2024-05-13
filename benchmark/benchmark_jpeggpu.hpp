@@ -77,14 +77,15 @@ void bench_jpeggpu(const char* file_data, size_t file_size)
         const auto t0 = std::chrono::high_resolution_clock::now();
         run_iter();
         const auto t1 = std::chrono::high_resolution_clock::now();
-        const double elapsed_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        sum_latency += elapsed_ms;
-        max_latency = std::max(max_latency, elapsed_ms);
+        const double elapsed_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        sum_latency += elapsed_us;
+        max_latency = std::max(max_latency, elapsed_us);
     }
-    const double avg_latency = sum_latency / num_iter;
+    const double avg_latency = sum_latency / num_iter / 1e3;
+    max_latency /= 1e3;
 
-    const double total_seconds = sum_latency / 1e3;
+    const double total_seconds = sum_latency / 1e6;
     const double throughput    = num_iter / total_seconds;
 
     if (d_tmp) CHECK_CUDA(cudaFree(d_tmp));
