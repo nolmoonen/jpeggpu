@@ -18,14 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "util/util.h"
+#include <util.h>
 
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #endif
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "util/stb_image_write.h"
+#include <stb_image_write.h>
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif

@@ -19,7 +19,7 @@ cmake --build build
 
 ## Example
 
-`example_tool.c` is built as `jpeggpu_example`. It demonstrates basic usage of jpeggpu and outputs some information about the file.
+`example/example_tool.c` is built as `jpeggpu_example`. It demonstrates basic usage of jpeggpu and outputs some information about the file.
 
 ```shell
 ./build/jpeggpu_example in.jpg
@@ -42,7 +42,7 @@ decoded image at: out.png
 
 ## Benchmark
 
-`jpeggpu_benchmark` compares performance with nvJPEG.
+`benchmark/benchmark.cpp` builds `jpeggpu_benchmark` that compares performance with nvJPEG.
 
 Possible output with AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070, 12MP 4:2:0 image with restart intervals, (`chunk_size = 32`):
 
@@ -69,7 +69,7 @@ jpeggpu singlethread               176.18               5.68               6.72
 
 ## Test
 
-`jpeggpu_test` compares output against nvJPEG. Helper script `test.sh` uses ImageMagick to convert an input image to a few different JPEG variations.
+`test/test.cpp` builds `jpeggpu_test` that compares output against nvJPEG. Helper script `test.sh` uses ImageMagick to convert an input image to a few different JPEG variations.
 
 ```shell
 ./build/jpeggpu_example test.jpg --write_out # writing out is optional

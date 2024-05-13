@@ -49,8 +49,6 @@ add_library(jpeggpu STATIC
 target_include_directories(jpeggpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(jpeggpu PUBLIC CUDA::cudart_static)
 
-add_executable(jpeggpu_example example_tool.c)
-target_link_libraries(jpeggpu_example PRIVATE jpeggpu)
-
 add_subdirectory(benchmark)
+add_subdirectory(example)
 add_subdirectory(test)

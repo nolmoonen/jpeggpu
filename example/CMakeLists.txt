@@ -18,8 +18,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-# TODO add option to disable test
-add_executable(jpeggpu_test test.cpp)
-target_link_libraries(jpeggpu_test PRIVATE jpeggpu CUDA::nvjpeg)
-target_include_directories(jpeggpu_test PRIVATE "${PROJECT_SOURCE_DIR}/util")
-configure_file(test.sh "${CMAKE_BINARY_DIR}/test.sh" COPYONLY)
+# TODO add option to disable example
+
+add_executable(jpeggpu_example example_tool.c)
+target_link_libraries(jpeggpu_example PRIVATE jpeggpu)
+target_include_directories(jpeggpu_example PRIVATE "${PROJECT_SOURCE_DIR}/util")
