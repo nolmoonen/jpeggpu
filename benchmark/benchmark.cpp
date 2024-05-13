@@ -22,9 +22,11 @@ int main(int argc, const char* argv[])
     file.read(file_data, file_size);
     file.close();
 
+    printf("                     throughput (image/s) | avg latency (ms) | max latency (ms)\n");
+
     bench_jpeggpu(file_data, file_size);
 
-    // bench_nvjpeg(file_data, file_size);
+    bench_nvjpeg(file_data, file_size);
 
     CHECK_CUDA(cudaFreeHost(file_data));
 }
