@@ -263,7 +263,7 @@ void run_iter(bench_nvjpeg_state& state, bench_nvjpeg_thread_state& thread_state
         // as a consequence of using two streams, explicit synchronization is inserted
         CHECK_CUDA(cudaEventRecord(thread_state.event_h2d, thread_state.stream));
         {
-            std::lock_guard<std::mutex>(state.mutex);
+            std::lock_guard<std::mutex> lock(state.mutex);
             CHECK_CUDA(cudaStreamWaitEvent(state.stream_kernel, thread_state.event_h2d));
             CHECK_NVJPEG(nvjpegDecodeJpegDevice(
                 thread_state.nv_state.nvjpeg_handle,

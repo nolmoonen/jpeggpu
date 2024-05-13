@@ -153,7 +153,7 @@ void bench_jpeggpu_run_iter(
     }
 
     {
-        std::lock_guard<std::mutex>(bench_state.mutex);
+        std::lock_guard<std::mutex> lock(bench_state.mutex);
         CHECK_JPEGGPU(jpeggpu_decoder_transfer(
             bench_thread_state.decoder,
             bench_thread_state.d_tmp,

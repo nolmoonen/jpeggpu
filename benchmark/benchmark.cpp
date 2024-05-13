@@ -21,7 +21,7 @@ int main(int argc, const char* argv[])
     CHECK_CUDA(cudaMallocHost(&file_data, file_size));
     file.read(file_data, file_size);
     file.close();
-   
+
     bench_jpeggpu(file_data, file_size);
 
     // bench_nvjpeg(file_data, file_size);
@@ -30,5 +30,4 @@ int main(int argc, const char* argv[])
 }
 
 // TODO
-//   - add jpegturbo comparison, also with many threads.
 //   - command line option to disable output copy?
