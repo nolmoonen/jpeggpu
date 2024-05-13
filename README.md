@@ -44,12 +44,27 @@ decoded image at: out.png
 
 `jpeggpu_benchmark` compares performance with nvJPEG.
 
-Possible output with AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070. 12MP 4:2:0 image with restart intervals, (`chunk_size = 16`):
+Possible output with AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070, 12MP 4:2:0 image with restart intervals, (`chunk_size = 32`):
 
 ```shell
 ./build/jpeggpu_benchmark in.jpg
-jpeggpu singlethreaded, throughput: 80.78 image/s, avg latency: 12.38ms, max latency: 15.00ms
- nvJPEG singlethreaded, throughput: 66.01 image/s, avg latency: 15.15ms, max latency: 19.00ms
+                     throughput (image/s) | avg latency (ms) | max latency (ms)
+jpeggpu singlethread               176.18               5.68               6.72
+ nvJPEG singlethread                71.82              13.92              15.51
+ nvJPEG batch 25                    22.31              44.82            1123.72
+ nvJPEG batch 50                    22.69              44.07            2214.65
+ nvJPEG batch 75                    22.89              43.68            3303.78
+ nvJPEG  4 threads                 268.95              14.69              39.53
+ nvJPEG  5 threads                 332.87              14.91              39.72
+ nvJPEG  6 threads                 386.19              15.19              35.15
+ nvJPEG  7 threads                 389.12              15.92              33.67
+ nvJPEG  8 threads                 447.42              16.44              33.00
+ nvJPEG  9 threads                 493.39              17.16              33.90
+ nvJPEG 10 threads                 531.90              17.85              35.43
+ nvJPEG 11 threads                 568.07              18.78              49.18
+ nvJPEG 12 threads                 620.45              19.21              45.74
+ nvJPEG 13 threads                 603.87              20.59              55.99
+ nvJPEG 14 threads                 609.44              22.21              66.65
 ```
 
 ## Test

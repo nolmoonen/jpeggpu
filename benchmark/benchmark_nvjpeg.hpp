@@ -100,7 +100,7 @@ struct nvjpeg_state {
     nvjpegDecodeParams_t nvjpeg_decode_params;
 };
 
-void bench_nvjpeg_st(const char* file_data, size_t file_size)
+void bench_nvjpeg_st(const uint8_t* file_data, size_t file_size)
 {
     cudaStream_t stream = 0;
 
@@ -121,12 +121,9 @@ void bench_nvjpeg_st(const char* file_data, size_t file_size)
         heights));
 
     nvjpegImage_t d_img;
-    size_t image_bytes = 0;
     for (int c = 0; c < channels; ++c) {
-        const size_t plane_bytes = widths[c] * heights[c];
-        CHECK_CUDA(cudaMalloc(&d_img.channel[c], plane_bytes));
+        CHECK_CUDA(cudaMalloc(&d_img.channel[c], widths[c] * heights[c]));
         d_img.pitch[c] = widths[c];
-        image_bytes += plane_bytes;
     }
 
     CHECK_NVJPEG(
@@ -167,7 +164,7 @@ void bench_nvjpeg_st(const char* file_data, size_t file_size)
         CHECK_CUDA(cudaStreamSynchronize(stream));
     };
 
-    run_iter();
+    run_iter(); // warmup; force allocation
 
     double sum_latency{};
     double max_latency{std::numeric_limits<double>::lowest()};
@@ -180,10 +177,10 @@ void bench_nvjpeg_st(const char* file_data, size_t file_size)
         sum_latency += elapsed_us;
         max_latency = std::max(max_latency, elapsed_us);
     }
-    const double avg_latency = sum_latency / num_iter / 1e3;
-    max_latency /= 1e3;
+    const double avg_latency = sum_latency / num_iter / us_in_ms;
+    max_latency /= us_in_ms;
 
-    const double total_seconds = sum_latency / 1e6;
+    const double total_seconds = sum_latency / us_in_s;
     const double throughput    = num_iter / total_seconds;
 
     for (int c = 0; c < channels; ++c) {
@@ -192,15 +189,95 @@ void bench_nvjpeg_st(const char* file_data, size_t file_size)
 
     state.cleanup();
 
-    printf(
-        " nvJPEG singlethread                %5.2f              %5.2f              %5.2f\n",
-        throughput,
-        avg_latency,
-        max_latency);
+    printf(" nvJPEG singlethread");
+    print_measurement(throughput, avg_latency, max_latency);
+}
+
+void bench_nvjpeg_batch(const uint8_t* file_data, size_t file_size, int batch_size)
+{
+    cudaStream_t stream = 0;
+
+    nvjpeg_state state;
+    state.startup();
+
+    int widths[NVJPEG_MAX_COMPONENT];
+    int heights[NVJPEG_MAX_COMPONENT];
+    int channels;
+    nvjpegChromaSubsampling_t subsampling;
+    CHECK_NVJPEG(nvjpegGetImageInfo(
+        state.nvjpeg_handle,
+        reinterpret_cast<const unsigned char*>(file_data),
+        file_size,
+        &channels,
+        &subsampling,
+        widths,
+        heights));
+
+    std::vector<nvjpegImage_t> d_img(batch_size);
+    for (int i = 0; i < batch_size; ++i) {
+        for (int c = 0; c < channels; ++c) {
+            CHECK_CUDA(cudaMalloc(&(d_img[i].channel[c]), widths[c] * heights[c]));
+            d_img[i].pitch[c] = widths[c];
+        }
+    }
+
+    CHECK_NVJPEG(nvjpegDecodeBatchedInitialize(
+        state.nvjpeg_handle,
+        state.nvjpeg_state,
+        batch_size,
+        std::thread::hardware_concurrency(),
+        NVJPEG_OUTPUT_UNCHANGED));
+
+    std::vector<const unsigned char*> file_datas(
+        batch_size, reinterpret_cast<const unsigned char*>(file_data));
+    std::vector<size_t> file_sizes(batch_size, file_size);
+
+    const auto run_iter = [&]() {
+        CHECK_NVJPEG(nvjpegDecodeBatched(
+            state.nvjpeg_handle,
+            state.nvjpeg_state,
+            file_datas.data(),
+            file_sizes.data(),
+            d_img.data(),
+            stream));
+
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+    };
+
+    run_iter(); // warmup; force allocation
+
+    const int num_iter_batch = (num_iter - 1 + batch_size) / batch_size;
+    double sum_latency{};
+    double max_latency{std::numeric_limits<double>::lowest()};
+    for (int i = 0; i < num_iter_batch; ++i) {
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        run_iter();
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        const double elapsed_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        sum_latency += elapsed_us;
+        max_latency = std::max(max_latency, elapsed_us);
+    }
+    const double avg_latency = sum_latency / (num_iter_batch * batch_size) / us_in_ms;
+    max_latency /= us_in_ms;
+
+    const double total_seconds = sum_latency / us_in_s;
+    const double throughput    = (num_iter_batch * batch_size) / total_seconds;
+
+    for (int i = 0; i < batch_size; ++i) {
+        for (int c = 0; c < channels; ++c) {
+            CHECK_CUDA(cudaFree(d_img[i].channel[c]));
+        }
+    }
+
+    state.cleanup();
+
+    printf(" nvJPEG batch %2d    ", batch_size);
+    print_measurement(throughput, avg_latency, max_latency);
 }
 
 struct bench_nvjpeg_state {
-    const char* file_data;
+    const uint8_t* file_data;
     size_t file_size;
 };
 
@@ -269,19 +346,16 @@ void bench_nvjpeg_mt_thread_startup(
         thread_state.widths,
         thread_state.heights));
 
-    size_t image_bytes = 0;
     for (int c = 0; c < thread_state.channels; ++c) {
         const size_t plane_bytes = thread_state.widths[c] * thread_state.heights[c];
         CHECK_CUDA(cudaMalloc(&thread_state.d_img.channel[c], plane_bytes));
         thread_state.d_img.pitch[c] = thread_state.widths[c];
-        image_bytes += plane_bytes;
     }
 
     CHECK_NVJPEG(nvjpegDecodeParamsSetOutputFormat(
         thread_state.nv_state.nvjpeg_decode_params, NVJPEG_OUTPUT_UNCHANGED));
 
-    // run one warmup
-    run_iter(state, thread_state);
+    run_iter(state, thread_state); // warmup; force allocation
 }
 
 void bench_nvjpeg_mt_thread_perform(
@@ -330,7 +404,7 @@ bool bench_nvjpeg_launch(Function function, std::vector<std::thread>& threads, i
     return all_are_finished;
 }
 
-void bench_nvjpeg_mt(const char* file_data, size_t file_size)
+void bench_nvjpeg_mt(const uint8_t* file_data, size_t file_size)
 {
     // Initialization, benchmark, and cleanup is done in separate threads, because the potential
     //   for OOM errors is large with high thread counts. Either these threads finish successfully and
@@ -385,28 +459,26 @@ void bench_nvjpeg_mt(const char* file_data, size_t file_size)
             sum_latency += thread_states[i].sum_latency;
             max_latency = std::max(max_latency, thread_states[i].max_latency);
         }
-        const double avg_latency = sum_latency / (num_threads * num_iter) / 1e3;
-        max_latency /= 1e3;
+        const double avg_latency = sum_latency / (num_threads * num_iter) / us_in_ms;
+        max_latency /= us_in_ms;
 
         const double total_seconds =
-            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1e6;
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / us_in_s;
         const double throughput = (num_iter * num_threads) / total_seconds;
 
-        printf(
-            "nvJPEG %2d threads                  %5.2f              %5.2f              %5.2f\n",
-            num_threads,
-            throughput,
-            avg_latency,
-            max_latency);
+        printf(" nvJPEG %2d threads  ", num_threads);
+        print_measurement(throughput, avg_latency, max_latency);
     }
 }
 
 // TODO specify iterations and override number of threads on command line
-void bench_nvjpeg(const char* file_data, size_t file_size)
+void bench_nvjpeg(const uint8_t* file_data, size_t file_size)
 {
     bench_nvjpeg_st(file_data, file_size);
+    bench_nvjpeg_batch(file_data, file_size, 25);
+    bench_nvjpeg_batch(file_data, file_size, 50);
+    bench_nvjpeg_batch(file_data, file_size, 75);
     bench_nvjpeg_mt(file_data, file_size);
-    // FIXME add batched API benchmark
 }
 
 #endif // JPEGGPU_BENCHMARK_BENCHMARK_NVJPEG_HPP_

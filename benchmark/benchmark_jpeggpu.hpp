@@ -23,7 +23,7 @@
         }                                                                                          \
     } while (0)
 
-void bench_jpeggpu(const char* file_data, size_t file_size)
+void bench_jpeggpu(const uint8_t* file_data, size_t file_size)
 {
     cudaStream_t stream = 0;
 
@@ -31,24 +31,19 @@ void bench_jpeggpu(const char* file_data, size_t file_size)
     CHECK_JPEGGPU(jpeggpu_decoder_startup(&decoder));
 
     jpeggpu_img_info img_info;
-    CHECK_JPEGGPU(jpeggpu_decoder_parse_header(
-        decoder, &img_info, reinterpret_cast<const uint8_t*>(file_data), file_size));
+    CHECK_JPEGGPU(jpeggpu_decoder_parse_header(decoder, &img_info, file_data, file_size));
 
-    size_t image_bytes = 0;
     jpeggpu_img d_img;
     for (int c = 0; c < img_info.num_components; ++c) {
-        const size_t plane_bytes = img_info.sizes_x[c] * img_info.sizes_y[c];
-        CHECK_CUDA(cudaMalloc(&d_img.image[c], plane_bytes));
+        CHECK_CUDA(cudaMalloc(&d_img.image[c], img_info.sizes_x[c] * img_info.sizes_y[c]));
         d_img.pitch[c] = img_info.sizes_x[c];
-        image_bytes += plane_bytes;
     }
 
     void* d_tmp     = nullptr;
     size_t tmp_size = 0;
 
     const auto run_iter = [&]() {
-        CHECK_JPEGGPU(jpeggpu_decoder_parse_header(
-            decoder, &img_info, reinterpret_cast<const uint8_t*>(file_data), file_size));
+        CHECK_JPEGGPU(jpeggpu_decoder_parse_header(decoder, &img_info, file_data, file_size));
 
         size_t this_tmp_size = 0;
         CHECK_JPEGGPU(jpeggpu_decoder_get_buffer_size(decoder, &this_tmp_size));
@@ -69,7 +64,7 @@ void bench_jpeggpu(const char* file_data, size_t file_size)
         CHECK_CUDA(cudaStreamSynchronize(stream));
     };
 
-    run_iter();
+    run_iter(); // warmup; force allocation
 
     double sum_latency{};
     double max_latency{std::numeric_limits<double>::lowest()};
@@ -82,10 +77,10 @@ void bench_jpeggpu(const char* file_data, size_t file_size)
         sum_latency += elapsed_us;
         max_latency = std::max(max_latency, elapsed_us);
     }
-    const double avg_latency = sum_latency / num_iter / 1e3;
-    max_latency /= 1e3;
+    const double avg_latency = sum_latency / num_iter / us_in_ms;
+    max_latency /= us_in_ms;
 
-    const double total_seconds = sum_latency / 1e6;
+    const double total_seconds = sum_latency / us_in_s;
     const double throughput    = num_iter / total_seconds;
 
     if (d_tmp) CHECK_CUDA(cudaFree(d_tmp));
@@ -95,11 +90,8 @@ void bench_jpeggpu(const char* file_data, size_t file_size)
 
     CHECK_JPEGGPU(jpeggpu_decoder_cleanup(decoder));
 
-    printf(
-        "jpeggpu singlethread               %5.2f              %5.2f              %5.2f\n",
-        throughput,
-        avg_latency,
-        max_latency);
+    printf("jpeggpu singlethread");
+    print_measurement(throughput, avg_latency, max_latency);
 }
 
 #endif // JPEGGPU_BENCHMARK_BENCHMARK_JPEGGPU_HPP_

@@ -2,6 +2,8 @@
 #define JPEGGPU_DECODER_DEFS_HPP_
 
 namespace jpeggpu {
+// TODO dynamically use different values based on input
+
 /// \brief "s", subsequence size in number of 32 bits words.
 ///   Configurable, paper uses 4 or 32 depending on the quality of the encoded image
 constexpr int chunk_size             = 32;
