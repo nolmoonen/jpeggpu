@@ -63,6 +63,10 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
     }
 
     *decoder = reinterpret_cast<jpeggpu_decoder*>(malloc(sizeof(jpeggpu_decoder)));
+    if (!*decoder) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    // TODO new without exceptions or placement new?
 
     return (*decoder)->decoder.init();
 }
@@ -78,6 +82,7 @@ enum jpeggpu_status jpeggpu_set_logging(jpeggpu_decoder_t decoder, int do_loggin
     return JPEGGPU_SUCCESS;
 }
 
+// TODO add other helper functions for 420, 410, etc.
 int is_css_444(struct jpeggpu_subsampling css, int num_components)
 {
     switch (num_components) {

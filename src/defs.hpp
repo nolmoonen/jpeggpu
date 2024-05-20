@@ -32,9 +32,11 @@
 #include <iostream>
 #include <stdint.h>
 
+// Accelerating JPEG Decompression on GPUs
 // https://arxiv.org/abs/2111.09219
+
+// JPEG Specification
 // https://www.w3.org/Graphics/JPEG/itu-t81.pdf
-// https://u.cs.biu.ac.il/~wisemay/computer2003.pdf
 
 namespace jpeggpu {
 
@@ -57,10 +59,16 @@ namespace jpeggpu {
     } while (0)
 
 /// \brief The number of rows or columns in a data unit, eight.
+///
+/// TODO "data unit" terminology is not correct, should be "block",
+///   however "block" is confusing with the thread block concept
 constexpr int data_unit_vector_size = 8;
 /// \brief The number of pixels in a data units, 64.
 constexpr int data_unit_size = 64;
 
+// TODO if Huffman tables are redefined between scans, this will be an issue.
+//  there should be memory for `max_huffman_count_per_scan * max_scan_count`
+//  but only `max_huffman_count_per_scan` should be passed to `decode_scan`
 constexpr int max_huffman_count = 2;
 /// as defined by jpeg spec
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;

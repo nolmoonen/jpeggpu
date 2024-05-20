@@ -148,8 +148,6 @@ __global__ void write_segment_indices(
 
 } // namespace
 
-// TODO this function needs documentation:
-//   why does it need to many kernels (to avoid sync)
 template <bool do_it>
 jpeggpu_status jpeggpu::destuff_scan(
     const jpeg_stream& info,
@@ -162,21 +160,33 @@ jpeggpu_status jpeggpu::destuff_scan(
     cudaStream_t stream,
     logger& logger)
 {
-    // TODO outdated
-    // markers are d0 through d7
+    // by using many map and reduce operations the logic is completely parallelized and requires
+    //   no synchronization with the host. an example of this process is given below
+
+    // markers are d0 through d7, for this example subseq is 4 bytes
+    // segment |                                      |                 |           |                    |
     // idx      00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
     // val      ?? ?? ?? ff 00 ?? ff 00 ?? ?? ?? ff d0 ?? ff 00 ?? ff d1 ?? ?? ff d2 ?? ff 00 ?? ?? ff d3 ?? ??
-    // pass 0
+    // destuff_map_data_and_segment
     // off_data  1  1  1  0  1  0  0  1  1  1  1  0  0  1  0  1  1  0  0  1  1  0  0  1  0  1  1  1  0  0  1  1
     // byte     ?? ?? ??    ff ??    ff ?? ?? ??       ??    ff ??       ?? ??       ??    ff ?? ??       ?? ??
     // off_seg   0  0  0  0  0  0  0  0  0  0  0  0  1  0  0  0  0  0  1  0  0  0  1  0  0  0  0  0  0  1  0  0
-    // scan exclusive, pass 1
-    // off_data  0  1  2  3  3  4  5  5  6  7  8  9  9  9 10 10 11 12 12 12 13 14 14 14 15 15 16 17 18 18 18 19
+    // exclusive sum off_seg
     // off_seg   0  0  0  0  0  0  0  0  0  0  0  0  1  1  1  1  1  1  2  2  2  2  3  3  3  3  3  3  3  4  4  4
-    // pass 2
-    // seg_idx   0  0  0     0  0     0  0  0  0        1     1  1        2  2        3     3  3  3        4  4
+    // exclusive sum off_data by off_seg
+    // off_data  0  1  2  3  3  4  5  5  6  7  8  9  0  0  1  1  2  3  0  0  1  2  0  0  1  1  2  3  4  0  0  1
+    // destuff_write_and_map_subsequence
+    // destuff  ?? ?? ??    ff ??    ff ?? ?? ??       ??    ff ??       ?? ??       ??    ff ?? ??       ?? ??
+    // off_sub   1  0  0  0  0  1  0  0  0  0  1  0  0  1  0  0  0  0  0  1  0  0  0  1  0  0  0  0  0  0  1  0
+    // inclusive sum off_sub
+    // off_sub   1  1  1  1  1  2  2  2  2  2  3  3  3  4  4  4  4  4  4  5  5  5  5  6  6  6  6  6  6  6  7  7
+    // write_segment_indices
+    // off_sub   0  0  0  0  0  1  1  1  1  1  2  2  2  3  3  3  3  3  3  4  4  4  4  5  5  5  5  5  5  5  6  6
+    // seg_idx   0              0              0        1                 2           3                    4
 
     if (do_it) {
+        // clear memory, only needed to satisfy `compute-sanitizer --tool=initcheck` since
+        //   the segments are rounded up to subsequence size, some may not get written
         JPEGGPU_CHECK_CUDA(cudaMemsetAsync(
             d_scan_destuffed, 0, scan.num_subsequences * subsequence_size_bytes, stream));
     }

@@ -37,14 +37,19 @@ typedef struct jpeggpu_decoder* jpeggpu_decoder_t;
 
 enum jpeggpu_status {
     JPEGGPU_SUCCESS,
+    /// \brief The user provided an illegal argument to a function.
     JPEGGPU_INVALID_ARGUMENT,
-    JPEGGPU_INVALID_JPEG, /// the jpeg stream is not compatible with the specification
+    /// \brief The JPEG stream is not compatible with the specification.
+    JPEGGPU_INVALID_JPEG,
+    /// \brief An error inside the library occurred.
     JPEGGPU_INTERNAL_ERROR,
-    /// the jpeg stream is compatible with the specification, but not supported by jpeggpu
+    /// \brief The JPEG stream is compatible with the specification, but not supported.
     JPEGGPU_NOT_SUPPORTED,
+    /// \brief The system is out of host memory.
     JPEGGPU_OUT_OF_HOST_MEMORY,
 };
 
+/// \brief Return a description of the status code.
 const char* jpeggpu_get_status_string(enum jpeggpu_status stat);
 
 enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder);
@@ -58,24 +63,27 @@ struct jpeggpu_subsampling {
     int y[JPEGGPU_MAX_COMP];
 };
 
-// TODO add other help functions
 int is_css_444(struct jpeggpu_subsampling css, int num_components);
 
 struct jpeggpu_img_info {
     /// Horizontal size of the image planes.
     int sizes_x[JPEGGPU_MAX_COMP];
+    /// Vertical size of the image planes.
     int sizes_y[JPEGGPU_MAX_COMP];
     int num_components;
     struct jpeggpu_subsampling subsampling;
 };
 
-/// \brief Caller should already allocate file data in pinned memory
-///   (`cudaMallocHost`).
+/// \brief Parse the JPEG header, no GPU work is performed.
+///
+/// For best performance, the file data should be allocated in pinned memory (e.g. with `cudaMallocHost`).
 enum jpeggpu_status jpeggpu_decoder_parse_header(
     jpeggpu_decoder_t decoder, struct jpeggpu_img_info* img_info, const uint8_t* data, size_t size);
 
+/// \brief Returns the size of the temporary GPU memory required.
 enum jpeggpu_status jpeggpu_decoder_get_buffer_size(jpeggpu_decoder_t decoder, size_t* tmp_size);
 
+/// \brief Performs the host to device copies required by GPU decoding.
 /// \param[in] d_tmp Temporary device memory, should be aligned to 256 byte boundary.
 enum jpeggpu_status jpeggpu_decoder_transfer(
     jpeggpu_decoder_t decoder, void* d_tmp, size_t tmp_size, cudaStream_t stream);
@@ -87,6 +95,7 @@ struct jpeggpu_img {
     int pitch[JPEGGPU_MAX_COMP];
 };
 
+/// \brief Performs the GPU decode.
 /// \param[in] d_tmp Temporary device memory, should be aligned to 256 byte boundary.
 enum jpeggpu_status jpeggpu_decoder_decode(
     jpeggpu_decoder_t decoder,

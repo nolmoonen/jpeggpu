@@ -61,32 +61,48 @@ struct subsequence_info {
     int z;
 };
 
+/// \brief Reader state.
 struct reader_state {
+    /// \brief Pointer to first data byte, will always be aligned to cudaMalloc alignment.
     const uint8_t* data;
+    /// \brief Pointer to byte following the last data byte.
     const uint8_t* data_end;
+    /// \brief Cache of two sectors, which are each 128 bits (4x32-bits words).
+    ///   The oldest bits are in the most significant positions.
+    ///
+    /// TODO get clarity on "sector" definition
     ulonglong4* cache;
+    /// \brief Index of the next bit in the cache to read.
     int cache_idx;
 };
 
+/// \brief Helper struct to pass constant inputs to the kernels.
 struct const_state {
+    /// \brief Pointer to first data byte, will always be aligned to cudaMalloc alignment.
     const uint8_t* scan;
+    /// \brief Pointer to byte following the last data byte.
     const uint8_t* scan_end;
+    /// \brief Segment info.
     const segment* segments;
+    /// \brief For each subsequence, its segment index.
     const int* segment_indices;
+    /// \brief Number of segments in the scan.
+    ///   TODO zero for a scan without restart markers, could optimize?
     const int num_segments;
+    /// \brief Huffman tables.
     const huffman_table* huffman_tables;
-    int dc_0;
-    int ac_0;
-    int dc_1;
-    int ac_1;
-    int dc_2;
-    int ac_2;
-    int dc_3;
-    int ac_3;
-    int c0_inc_prefix; // inclusive prefix of number of JPEG blocks in MCU
-    int c1_inc_prefix;
-    int c2_inc_prefix;
-    int c3_inc_prefix;
+    int dc_0; /// DC Huffman table index for component 0.
+    int ac_0; /// AC Huffman table index for component 0.
+    int dc_1; /// DC Huffman table index for component 1.
+    int ac_1; /// AC Huffman table index for component 1.
+    int dc_2; /// DC Huffman table index for component 2.
+    int ac_2; /// AC Huffman table index for component 2.
+    int dc_3; /// DC Huffman table index for component 3.
+    int ac_3; /// AC Huffman table index for component 3.
+    int c0_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 0.
+    int c1_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 1.
+    int c2_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 2.
+    int c3_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 3.
     int num_data_units_in_mcu;
     int num_components;
     int num_data_units;
@@ -96,14 +112,18 @@ struct const_state {
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
 static_assert(std::is_trivially_copyable_v<const_state>);
 
+/// \brief Typedef for the maximum amount of Huffman tables for a scan.
 using huffman_tables = huffman_table[max_huffman_count * HUFF_COUNT];
 
+/// \brief Typedef for one cache per thread.
 template <int block_size>
 using cache = ulonglong4[block_size];
 
-// TODO this always loads the maximum possible amount of tables.
-//   in the common case (one for luminance and one for chrominance),
-//   this results in twice as many loads as needed
+/// \brief Load Huffman tables from global memory into shared.
+///
+/// TODO this always loads the maximum possible amount of tables.
+///   in the common case (one for luminance and one for chrominance),
+///   this results in twice as many loads as needed
 template <int block_size>
 __device__ void load_huffman_tables(
     const huffman_table* tables_global, huffman_tables& tables_shared)
@@ -123,6 +143,7 @@ __device__ void load_huffman_tables(
     __syncthreads();
 }
 
+/// \brief Load the next sector (128 bits) into shared memory cache.
 __device__ void global_load_uint4(reader_state& rstate, uint4* shared)
 {
     for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
@@ -133,7 +154,7 @@ __device__ void global_load_uint4(reader_state& rstate, uint4* shared)
     rstate.data += sizeof(uint4);
 }
 
-/// \brief If there are enough bits in the input stream, loads `num_bits` into cache.
+/// \brief Return the next 32 bits from cache, padded with zero bits if not enough available.
 __device__ uint32_t load_32_bits(reader_state& rstate)
 {
     // check if more bits are needed
@@ -181,6 +202,12 @@ __device__ uint32_t load_32_bits(reader_state& rstate)
     return static_cast<uint32_t>(ret >> shift);
 }
 
+/// \brief Constructs the reader state from the start of a subsequence (fills the cache).
+///
+/// \param[in] cstate
+/// \param[in] segment_info Segment info for this subsequence.
+/// \param[in] cache Pointer to shared memory cache.
+/// \param[in] subseq_idx_rel Subsequence index relative to segment.
 __device__ reader_state rstate_from_subseq_start(
     const const_state& cstate, const segment& segment_info, ulonglong4* cache, int subseq_idx_rel)
 {
@@ -205,6 +232,13 @@ __device__ reader_state rstate_from_subseq_start(
     return rstate;
 }
 
+/// \brief Constructs the reader state from overflow, which need not be
+///   the start of a subsequence (fills the cache).
+///
+/// \param[in] cstate
+/// \param[in] segment_info Segment info for this subsequence.
+/// \param[in] cache Pointer to shared memory cache.
+/// \param[in] p Bit offset in segment.
 __device__ reader_state rstate_from_subseq_overflow(
     const const_state& cstate, const segment& segment_info, ulonglong4* cache, int p)
 {
@@ -220,7 +254,7 @@ __device__ reader_state rstate_from_subseq_overflow(
     // assert aligned load is valid
     assert((rstate.data - cstate.scan) % sizeof(uint4) == 0);
     // TODO why is there not always one sector?
-    // there should be at least one sector
+    //   there should be at least one sector
     if (sizeof(uint4) <= rstate.data_end - rstate.data) {
         global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
     }
@@ -231,24 +265,25 @@ __device__ reader_state rstate_from_subseq_overflow(
     return rstate;
 }
 
-/// \brief Returns the upper `num_bits` from `data`.
+/// \brief Returns the oldest (most significant) `num_bits` from `data`.
 __device__ uint32_t u32_select_bits(uint32_t data, int num_bits)
 {
     assert(num_bits <= 32);
     return data >> (32 - num_bits);
 }
 
-/// \brief Removes the upper `num_bits` from `data`.
+/// \brief Discards the oldest (most significant) `num_bits` from `data`.
 __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 {
     assert(num_bits <= 32);
     return data << num_bits;
 }
 
-/// \brief Get the Huffman category from stream.
+/// \brief Get the Huffman category from stream. Reads at most 16 bits.
 ///
-/// \param[in] data
+/// \param[in] data Holds at least 16 data bits in the most significant positions.
 /// \param[out] length Number of bits read.
+/// \param[in] table
 uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
 {
     int i;
@@ -364,13 +399,21 @@ __device__ void decode_next_symbol(
     assert(length > 0);
 }
 
-/// \brief Algorithm 2.
+/// \brief Decodes a subsequence (related to paper alg-2).
 ///
-/// \tparam is_overflow Whether `i` was decoded by another thread already. TODO word this better.
+/// \tparam is_overflow Whether decoding (and decoder state) is continued from a previous subsequence.
 /// \tparam do_write Whether to write the coefficients to the output buffer.
-/// \param i Global subsequence index.
-/// \param segment_info Segment info for the segment that subsequence `i` is in.
-/// \param segment_idx The index of the segment subsequence `i` is in.
+///
+/// \param[in] subseq_idx_rel Subsequence index relative to segment.
+/// \param[out] out Output memory for coefficients, may be `nullptr` if `do_write` is false.
+/// \param[in] s_info Array of all subsequence infos.
+/// \param[in] cstate
+/// \param[in] segment_info The segment info for this subsequence.
+/// \param[in] segment_idx The segment index for this subsequence.
+/// \param[inout] rstate
+/// \param[in] tables
+/// \param[in] position_in_output Offset in `out` where the decoded coefficients of this subsequence
+///   will be written. Only relevant if `do_write` is true.
 template <bool is_overflow, bool do_write>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
@@ -478,6 +521,13 @@ struct logical_and {
     __device__ bool operator()(const bool& lhs, const bool& rhs) { return lhs && rhs; }
 };
 
+/// \brief Synchronize all subsequences in a subsequence (relates to paper alg-3:05-23).
+///   Thread i decodes subsequence i, decoding subsequent subsequences until the state
+///   is equal to the state of a thread with a higher index. If the states are the same
+///   synchronization is achieved.
+///
+/// \tparam block_size The constant "b", the number of adjacent subsequences that form a sequence,
+///   equal to the block size of this kernel.
 template <int block_size>
 __global__ void sync_intra_sequence(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
@@ -561,25 +611,11 @@ __global__ void sync_intra_sequence(
     }
 }
 
-/// \brief Synchronize between sequences. Each thread handles one sequence,
-///   the last sequence requires no handling. Meaning is changed w.r.t. paper!
-
-/// \brief Intra sequence synchronization (alg-3:05-23).
-///   Each thread handles one subsequence at a time. Starting from each unique subsequence,
-///   decode one subsequence at a time until the result is equal to the result of a different
-///   thread having decoded that subsequence. If that is the case, the result is correct and
-///   this thread is done.
-///
-/// \tparam block_size "b", the number of adjacent subsequences that form a sequence,
-///   equal to the block size of this kernel.
-
-/// \brief Synchronizes subsequences in multiple contiguous arrays of subsequences.
-///   Each thread handles such a contiguous array.
+/// \brief Synchronizes subsequences in multiple contiguous arrays of subsequences,
+///   (relates to paper alg-3:25-41). Each thread handles such a contiguous array.
 ///
 ///   W.r.t. the paper, `size_in_subsequences` of 1 and `block_size` equal to "b" will be
 ///     equivalent to "intersequence synchronization".
-///
-///
 ///
 /// \tparam size_in_subsequences Amount of contigous subsequences are synchronized.
 /// \tparam block_size Block size of the kernel.
@@ -662,6 +698,10 @@ __global__ void sync_subsequences(
     }
 }
 
+/// \brief Redo the decoding of each subsequence once, this time writing the coefficients
+///   (relates to paper alg-1:9-14).
+///
+/// \tparam block_size The constant "b". TODO is that required?
 template <int block_size>
 __global__ void decode_write(
     int16_t* __restrict__ out,

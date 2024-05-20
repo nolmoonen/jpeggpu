@@ -43,16 +43,16 @@
 #include <type_traits>
 #include <vector>
 
-/// TODO update, sequences are no longer the same as in the paper
 /// TODO place in some development document
 /// stream
 ///   The JPEG file defining an image with multiple components (color channels).
 /// scan
-///   A stream contains scans. Either a single scan contains all components (interleaved mode)
-///     or there are multiple scans that each contain a single component.
+///   A stream contains one or more scans. A scan contains one or more components contains.
+///     The scan contains byte padding, which is removed in the destuffing process.
+///   FIXME currently the code assumes one scan to have all components or one component per scan.
 /// segment
 ///   Within a scan, there can be restart markers that define segments. The DC difference decoding does
-///     not cross segment boundaries. Between segments there may be sub-byte padding to ensure each
+///     not cross segment boundaries. In the scan, there may be sub-byte padding to ensure each
 ///     segments starts at a byte-boundary. The size of segments is arbitrary and is defined by the
 ///     encoding process.
 /// sequence
@@ -60,6 +60,8 @@
 ///     handled by a thread block are grouped together as a sequence. Sequences may cover multiple segments.
 /// subsequence
 ///   Practical fixed-sizes chunk of data that each thread handles. Subsequences do not cross segment boundaries.
+///     The destuffing process pads the subsequence with zeroes such that each sequence starts on the beginning
+///     of a subsequence.
 
 using namespace jpeggpu;
 
@@ -104,7 +106,7 @@ jpeggpu_status jpeggpu::decoder::parse_header(
         return stat;
     }
 
-    // set jpeggpu_img_info
+    // set all fields of jpeggpu_img_info
     for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
         img_info.sizes_x[c] = reader.jpeg_stream.components[c].size_x;
         img_info.sizes_y[c] = reader.jpeg_stream.components[c].size_y;
@@ -128,6 +130,10 @@ jpeggpu_status jpeggpu::decoder::parse_header(
 
 namespace {
 
+/// \brief Reserves data in the temporary memory for the portion that should be copied from
+///   device to host. Since these pointers are created twice in two different functions
+///   `jpeggpu_decoder_transfer` and `jpeggpu_decoder_decode`/`jpeggpu_decoder_get_buffer_size`,
+///   these allocation will be at the front of the allocation.
 template <bool do_it>
 jpeggpu_status reserve_transfer_data(
     const reader& reader,
@@ -161,12 +167,14 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
     segment* d_segments[max_scan_count] = {};
     JPEGGPU_CHECK_STAT(reserve_transfer_data<true>(reader, allocator, d_image_data, d_segments));
 
+    // JPEG stream
     JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
         d_image_data,
         reader.reader_state.image_begin,
         reader.get_file_size(),
         cudaMemcpyHostToDevice,
         stream));
+    /// Huffman tables
     for (int i = 0; i < max_huffman_count; ++i) {
         for (int j = 0; j < HUFF_COUNT; ++j) {
             JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
@@ -177,6 +185,7 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
                 stream));
         }
     }
+    // quantization tables
     const jpeg_stream& info = reader.jpeg_stream;
     for (int c = 0; c < info.num_components; ++c) {
         JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
@@ -186,7 +195,7 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
             cudaMemcpyHostToDevice,
             stream));
     }
-
+    // segment info
     for (int s = 0; s < info.num_scans; ++s) {
         JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_segments[s],
@@ -199,8 +208,9 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
     return JPEGGPU_SUCCESS;
 }
 
-/// \tparam do_it If true, this function (and all other functions) should not perform any work. Instead,
-///   They should just walk through the entire decoding process to calculate memory requirements.
+/// \tparam do_it If true, this function (and all other functions with this parameter) should not
+///   perform any work. Instead, they should just walk through the entire decoding process to
+///   calculate memory requirements.
 template <bool do_it>
 jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, cudaStream_t stream)
 {
@@ -221,21 +231,26 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     int16_t* d_out;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
     if (do_it) {
-        // initialize to zero, since only non-zeros are written
+        // initialize to zero, since only non-zeros are written by Huffman decoding
         JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
     }
 
     // FIXME interleaved does not imply there is only one scan!
     //   make a better distinction between "scan" and "component" concepts
 
+    // TODO launch all destuff kernels for all scans in stream at once,
+    //   same for decode kernels, for better performance
+
     // destuff the scan and decode the Huffman stream
     if (info.is_interleaved) {
         const scan& scan = info.scans[0];
 
         uint8_t* d_scan_destuffed = nullptr;
-        // this effectively rounds up the size, is needed for easy offset calculation in huffman decoder
+        // all subsequences are "rounded up" in size, which allows for easier offset
+        //   calculations in the Huffman decoder
         const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
-        // scan should be properly aligned by allocator to do optimized reads in huffman decoder
+        // scan should be properly aligned by allocator to do optimized reads
+        //   (reading more bytes than one at a time) in the Huffman decoder
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
 
         // for each subsequence, its segment
@@ -309,21 +324,23 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         }
     }
 
-    // after decoding, the data is as how it appears in the encoded stream: one data unit at a time, possibly interleaved
+    // TODO is "data unit" the correct terminology?
+
+    // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
+    //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
 
     // undo DC difference encoding
-    decode_dc<do_it>(info, d_out, allocator, stream, logger);
+    JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, d_out, allocator, stream, logger));
 
     // TODO maybe the code can be simpler if doing transpose before DC decoding
 
     if (do_it) {
         // convert data order from data unit at a time to raster order
-        decode_transpose(info, d_out, d_image_qdct, stream, logger);
-
-        // data is now in raster order
+        JPEGGPU_CHECK_STAT(decode_transpose(info, d_out, d_image_qdct, stream, logger));
 
         // invert DCT and output directly into user-provided buffer
-        idct(info, d_image_qdct, img->image, img->pitch, d_qtables, stream, logger);
+        JPEGGPU_CHECK_STAT(
+            idct(info, d_image_qdct, img->image, img->pitch, d_qtables, stream, logger));
     }
 
     return JPEGGPU_SUCCESS;
@@ -332,7 +349,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 jpeggpu_status jpeggpu::decoder::decode_get_size(size_t& tmp_size_param)
 {
     allocator.reset();
-    // TODO add check if stream is accessed when do_it is false
+    // TODO add check if stream is "dereferenced" when do_it is false, doing so is an error
     JPEGGPU_CHECK_STAT(decode_impl<false>(nullptr, nullptr));
     tmp_size_param = allocator.size;
     return JPEGGPU_SUCCESS;
@@ -342,6 +359,7 @@ jpeggpu_status jpeggpu::decoder::decode(
     jpeggpu_img* img, void* d_tmp_param, size_t tmp_size_param, cudaStream_t stream)
 {
     if (!img) {
+        // not invalid argument since this is an internal function
         return JPEGGPU_INTERNAL_ERROR;
     }
 

@@ -32,12 +32,14 @@
 
 namespace jpeggpu {
 
-/// \brief Undo DC difference encoding
+/// \brief Undo DC difference encoding: performs the component-wise inplace sum of the
+///   DC values by segment index.
 ///
 /// \param[in] info
 /// \param[inout] d_out Device pointer to quantized and cosine-transformed data how it appears in the encoded JPEG stream.
-/// \param[in] allocator
-/// \param[in] stream
+/// \param[inout] allocator
+/// \param[inout] stream
+/// \param[inout] logger
 template <bool do_it>
 jpeggpu_status decode_dc(
     const jpeg_stream& info,
