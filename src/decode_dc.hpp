@@ -36,6 +36,7 @@ namespace jpeggpu {
 ///   DC values by segment index.
 ///
 /// \param[in] info
+/// \param[in] scan
 /// \param[inout] d_out Device pointer to quantized and cosine-transformed data how it appears in the encoded JPEG stream.
 /// \param[inout] allocator
 /// \param[inout] stream
@@ -43,6 +44,7 @@ namespace jpeggpu {
 template <bool do_it>
 jpeggpu_status decode_dc(
     const jpeg_stream& info,
+    const scan& scan,
     int16_t* d_out,
     stack_allocator& allocator,
     cudaStream_t stream,

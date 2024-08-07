@@ -805,8 +805,8 @@ jpeggpu_status jpeggpu::decode_scan(
     // alg-1:01
     int num_data_units = 0;
     for (int c = 0; c < info.num_components; ++c) {
-        num_data_units += (info.components[c].data_size_x / jpeggpu::data_unit_vector_size) *
-                          (info.components[c].data_size_y / jpeggpu::data_unit_vector_size);
+        num_data_units += (info.components[c].data_size.x / jpeggpu::data_unit_vector_size) *
+                          (info.components[c].data_size.y / jpeggpu::data_unit_vector_size);
     }
 
     // alg-1:05
@@ -815,10 +815,10 @@ jpeggpu_status jpeggpu::decode_scan(
         allocator.reserve<do_it>(&d_s_info, num_subsequences * sizeof(subsequence_info)));
 
     // block count in MCU
-    const int c0_count = info.components[0].ss_x * info.components[0].ss_y;
-    const int c1_count = info.components[1].ss_x * info.components[1].ss_y;
-    const int c2_count = info.components[2].ss_x * info.components[2].ss_y;
-    const int c3_count = info.components[3].ss_x * info.components[3].ss_y;
+    const int c0_count = info.components[0].ss.x * info.components[0].ss.y;
+    const int c1_count = info.components[1].ss.x * info.components[1].ss.y;
+    const int c2_count = info.components[2].ss.x * info.components[2].ss.y;
+    const int c3_count = info.components[3].ss.x * info.components[3].ss.y;
 
     const const_state cstate = {
         d_scan_destuffed,
@@ -843,10 +843,10 @@ jpeggpu_status jpeggpu::decode_scan(
         c0_count + c1_count,
         c0_count + c1_count + c2_count,
         c0_count + c1_count + c2_count + c3_count,
-        info.num_data_units_in_mcu,
+        scan.num_data_units_in_mcu,
         info.num_components,
         num_data_units,
-        info.restart_interval != 0 ? info.restart_interval : info.num_mcus_x * info.num_mcus_y};
+        info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
 
     // decode all subsequences
     // "b", sequence size in number of subsequences, configurable

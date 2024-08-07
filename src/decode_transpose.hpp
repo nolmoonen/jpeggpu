@@ -37,12 +37,14 @@ namespace jpeggpu {
 ///
 /// \param[in] info
 /// \param[in] d_out Device memory, holds output of Huffman decoding.
+/// \param[in] scan
 /// \param[out] d_image_qdct Device memory, for each component, where image data should be stored.
 /// \param[inout] stream
 /// \param[inout] logger
 jpeggpu_status decode_transpose(
     const jpeg_stream& info,
     const int16_t* d_out,
+    const scan& scan,
     int16_t* (&d_image_qdct)[jpeggpu::max_comp_count],
     cudaStream_t stream,
     logger& logger);

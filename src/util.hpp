@@ -21,6 +21,7 @@
 #ifndef JPEGGPU_UTIL_HPP_
 #define JPEGGPU_UTIL_HPP_
 
+#include <cassert>
 #include <type_traits>
 
 template <
@@ -30,6 +31,13 @@ template <
 __device__ __host__ inline constexpr auto ceiling_div(const T a, const U b)
 {
     return a / b + (a % b > 0 ? 1 : 0);
+}
+
+// TODO replace
+__device__ __host__ inline constexpr auto ceiling_div_(int dividend, int divisor)
+{
+    assert(dividend > 0 && divisor > 0);
+    return (dividend + divisor - 1) / dividend * dividend;
 }
 
 namespace jpeggpu {
@@ -78,6 +86,11 @@ struct stack_allocator {
     allocation alloc; /// Device allocation
 
     size_t size; /// Current size of stack.
+};
+
+struct ivec2 {
+    int x;
+    int y;
 };
 
 } // namespace jpeggpu
