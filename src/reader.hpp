@@ -47,61 +47,57 @@ struct huffman_table {
         int32_t maxcode; /// maxcode[k] is largest code of length k+1, -1 if no codes
         uint16_t mincode; /// mincode[k] is smallest code of length k+1
         uint8_t valptr; /// Huffval[] index of 1st symbol of length k+1
-    }  entries[16];
+    } entries[16];
     /// Values associated with each Huffman code, in order of increasing code length
     uint8_t huffval[256];
 };
 
 struct scan {
-    uint8_t ids[max_comp_count];
+    int num_components;
+    int component_indices[max_comp_count];
 
     int begin; ///< index, relative to image data, of first byte in scan
     int end; ///< index, relative to image data, of first byte not in scan
 
+    int num_data_units_in_mcu;
+
     int num_subsequences;
     int num_segments;
+
+    ivec2 num_mcus;
 };
 
-// TODO make vector class, e.g. int2?
+inline bool is_interleaved(scan& scan) { return scan.num_components > 1; }
+
 struct component {
     uint8_t id; /// Id as defined in the start of frame header.
     uint8_t qtable_idx; /// Index of quantization table.
     uint8_t dc_idx; /// Index of DC Huffman table.
     uint8_t ac_idx; /// Index of AC Huffman table.
-    int size_x; /// Actual image size in pixels.
-    int size_y;
+    ivec2 size; /// Actual image size in pixels.
     // TODO add some variable for number of data units in MCU?
-    int mcu_size_x; /// Number of pixels in one MCU.
-    int mcu_size_y;
-    int data_size_x; /// Image size in pixels, rounded up to the MCU.
-    int data_size_y;
+    ivec2 mcu_size; /// Number of pixels in one MCU.
+    ivec2 data_size; /// Image size in pixels, rounded up to the MCU.
     /// \brief Subsampling factor as defined in the start of frame header,
     ///   i.e. The number of data units in the MCU (if scan is interleaved).
-    int ss_x;
-    int ss_y;
+    ivec2 ss;
+    /// \brief Sum of all `data_size` of components before this one in frame header.
+    int offset;
 };
 
 /// cleared with memset
 struct jpeg_stream {
     scan scans[max_comp_count];
 
-    int size_x; /// Actual image size in pixels.
-    int size_y;
+    ivec2 size; /// Actual image size in pixels.
     int num_components; ///< Number of image components.
 
     // max of header-defined ss for each component, to calculate MCU size. 1, 2, or 4
-    int ss_x_max;
-    int ss_y_max;
+    ivec2 ss_max;
 
-    int num_data_units_in_mcu;
     size_t total_data_size;
 
     component components[max_comp_count];
-
-    int num_mcus_x; /// Image x size in number of MCUs.
-    int num_mcus_y; /// Image y size in number of MCUs.
-
-    bool is_interleaved;
 
     /// \brief Restart interval for differential DC encoding, in number of MCUs.
     ///   Zero if no restart interval is defined.
@@ -142,7 +138,6 @@ struct reader {
     struct jpeg_stream jpeg_stream; // TODO name it info?
 
     struct reader_state {
-        int scan_idx; /// Index of next scan.
         const uint8_t* image; /// Modifiable pointer to parsing head.
         const uint8_t* image_begin; /// Non-modifiable pointer to start of image.
         const uint8_t* image_end; /// Non-modifiable pointer to end of image.

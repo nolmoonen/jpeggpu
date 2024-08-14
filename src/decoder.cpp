@@ -47,9 +47,8 @@
 /// stream
 ///   The JPEG file defining an image with multiple components (color channels).
 /// scan
-///   A stream contains one or more scans. A scan contains one or more components contains.
+///   A stream contains one or more scans. A scan contains one or more components.
 ///     The scan contains byte padding, which is removed in the destuffing process.
-///   FIXME currently the code assumes one scan to have all components or one component per scan.
 /// segment
 ///   Within a scan, there can be restart markers that define segments. The DC difference decoding does
 ///     not cross segment boundaries. In the scan, there may be sub-byte padding to ensure each
@@ -108,8 +107,8 @@ jpeggpu_status jpeggpu::decoder::parse_header(
 
     // set all fields of jpeggpu_img_info
     for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        img_info.sizes_x[c] = reader.jpeg_stream.components[c].size_x;
-        img_info.sizes_y[c] = reader.jpeg_stream.components[c].size_y;
+        img_info.sizes_x[c] = reader.jpeg_stream.components[c].size.x;
+        img_info.sizes_y[c] = reader.jpeg_stream.components[c].size.y;
     }
     for (int c = reader.jpeg_stream.num_components; c < max_comp_count; ++c) {
         img_info.sizes_x[c] = 0;
@@ -117,8 +116,8 @@ jpeggpu_status jpeggpu::decoder::parse_header(
     }
     img_info.num_components = reader.jpeg_stream.num_components;
     for (int c = 0; c < reader.jpeg_stream.num_components; ++c) {
-        img_info.subsampling.x[c] = reader.jpeg_stream.components[c].ss_x;
-        img_info.subsampling.y[c] = reader.jpeg_stream.components[c].ss_y;
+        img_info.subsampling.x[c] = reader.jpeg_stream.components[c].ss.x;
+        img_info.subsampling.y[c] = reader.jpeg_stream.components[c].ss.y;
     }
     for (int c = reader.jpeg_stream.num_components; c < max_comp_count; ++c) {
         img_info.subsampling.x[c] = 0;
@@ -220,13 +219,13 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 
     const jpeg_stream& info = reader.jpeg_stream;
     for (int c = 0; c < info.num_components; ++c) {
-        const size_t size = info.components[c].data_size_x * info.components[c].data_size_y;
+        const size_t size = info.components[c].data_size.x * info.components[c].data_size.y;
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
     }
 
     size_t total_data_size = 0;
     for (int c = 0; c < info.num_components; ++c) {
-        total_data_size += info.components[c].data_size_x * info.components[c].data_size_y;
+        total_data_size += info.components[c].data_size.x * info.components[c].data_size.y;
     }
     int16_t* d_out;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
@@ -235,15 +234,13 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
     }
 
-    // FIXME interleaved does not imply there is only one scan!
-    //   make a better distinction between "scan" and "component" concepts
-
-    // TODO launch all destuff kernels for all scans in stream at once,
-    //   same for decode kernels, for better performance
+    // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
+    //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
 
     // destuff the scan and decode the Huffman stream
-    if (info.is_interleaved) {
-        const scan& scan = info.scans[0];
+    size_t offset = 0;
+    for (int c = 0; c < info.num_scans; ++c) {
+        const scan& scan = info.scans[c];
 
         uint8_t* d_scan_destuffed = nullptr;
         // all subsequences are "rounded up" in size, which allows for easier offset
@@ -263,7 +260,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             info,
             d_scan,
             d_scan_destuffed,
-            d_segments[0],
+            d_segments[c],
             d_segment_indices,
             scan,
             allocator,
@@ -273,54 +270,18 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
             info,
             d_scan_destuffed,
-            d_segments[0],
+            d_segments[c],
             d_segment_indices,
-            d_out,
+            d_out + offset,
             scan,
             d_huff_tables,
             allocator,
             stream,
             logger));
-    } else {
-        size_t offset = 0;
-        for (int c = 0; c < info.num_scans; ++c) {
-            const scan& scan = info.scans[c];
 
-            uint8_t* d_scan_destuffed   = nullptr;
-            const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
-            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
-
-            // for each subsequence, its segment
-            int* d_segment_indices = nullptr;
-            JPEGGPU_CHECK_STAT(
-                allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
-
-            const uint8_t* d_scan = d_image_data + scan.begin;
-            JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
-                info,
-                d_scan,
-                d_scan_destuffed,
-                d_segments[c],
-                d_segment_indices,
-                scan,
-                allocator,
-                stream,
-                logger));
-
-            JPEGGPU_CHECK_STAT(decode_scan<do_it>(
-                info,
-                d_scan_destuffed,
-                d_segments[c],
-                d_segment_indices,
-                d_out + offset,
-                scan,
-                d_huff_tables,
-                allocator,
-                stream,
-                logger));
-
-            const int comp_id = scan.ids[0];
-            offset += info.components[comp_id].data_size_x * info.components[comp_id].data_size_y;
+        for (int c = 0; c < scan.num_components; ++c) {
+            const component& comp = info.components[scan.component_indices[c]];
+            offset += comp.data_size.x * comp.data_size.y;
         }
     }
 
@@ -329,14 +290,25 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
     //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
 
-    // undo DC difference encoding
-    JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, d_out, allocator, stream, logger));
-
-    // TODO maybe the code can be simpler if doing transpose before DC decoding
+    for (int c = 0; c < info.num_scans; ++c) {
+        // undo DC difference encoding
+        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, info.scans[c], d_out, allocator, stream, logger));
+    }
 
     if (do_it) {
-        // convert data order from data unit at a time to raster order
-        JPEGGPU_CHECK_STAT(decode_transpose(info, d_out, d_image_qdct, stream, logger));
+        size_t offset = 0;
+        for (int c = 0; c < info.num_scans; ++c) {
+            // Convert data order from data unit at a time to raster order,
+            //   and place the components from scan order to frame order.
+            const scan& scan = info.scans[c];
+            JPEGGPU_CHECK_STAT(
+                decode_transpose(info, d_out + offset, scan, d_image_qdct, stream, logger));
+
+            for (int c = 0; c < scan.num_components; ++c) {
+                const component& comp = info.components[scan.component_indices[c]];
+                offset += comp.data_size.x * comp.data_size.y;
+            }
+        }
 
         // invert DCT and output directly into user-provided buffer
         JPEGGPU_CHECK_STAT(
@@ -365,7 +337,7 @@ jpeggpu_status jpeggpu::decoder::decode(
 
     const jpeg_stream& info = reader.jpeg_stream;
     for (int c = 0; c < info.num_components; ++c) {
-        if (!img->image[c] || img->pitch[c] < info.components[c].size_x) {
+        if (!img->image[c] || img->pitch[c] < info.components[c].size.x) {
             return JPEGGPU_INVALID_ARGUMENT;
         }
     }

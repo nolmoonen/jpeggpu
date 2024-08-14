@@ -21,6 +21,9 @@
 #ifndef JPEGGPU_DECODER_DEFS_HPP_
 #define JPEGGPU_DECODER_DEFS_HPP_
 
+// TODO https://github.com/chromium/chromium/blob/5e3a68156ec558f36b977bfae79f18e668fca1d5/third_party/blink/web_tests/images/resources/2-dht.jpg
+// TODO https://github.com/chromium/chromium/blob/5e3a68156ec558f36b977bfae79f18e668fca1d5/third_party/blink/web_tests/images/resources/motion-jpeg-single-frame.jpg
+
 namespace jpeggpu {
 // TODO dynamically use different values based on input
 
