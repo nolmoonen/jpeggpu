@@ -80,6 +80,11 @@ struct stack_allocator {
     size_t size; /// Current size of stack.
 };
 
+struct ivec2 {
+    int x;
+    int y;
+};
+
 } // namespace jpeggpu
 
 #endif // JPEGGPU_UTIL_HPP_
