@@ -82,3 +82,10 @@ component 0 MSE: 0.202032 component 1 MSE: 0.155791 component 2 MSE: 0.155672
 creating tmp file test.jpg.2x1.jpg..
 ...
 ```
+
+## To do
+
+- fix segment cudamallochost/cudafreehost in reader to keep memory allocated
+- get representative set of benchmark images
+- check that the decode_write improvements hold for all images
+- optimize transpose kernel and misc others

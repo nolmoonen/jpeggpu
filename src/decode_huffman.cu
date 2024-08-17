@@ -59,6 +59,8 @@ struct subsequence_info {
     int c;
     /// \brief Zig-zag index.
     int z;
+
+    uint32_t cache;
 };
 
 /// \brief Reader state.
@@ -74,6 +76,13 @@ struct reader_state {
     ulonglong4* cache;
     /// \brief Index of the next bit in the cache to read.
     int cache_idx;
+};
+
+struct reader_state_ {
+    uint64_t cache;
+    int bits_in_cache;
+    int next_word;
+    uint32_t* smem;
 };
 
 /// \brief Helper struct to pass constant inputs to the kernels.
@@ -202,6 +211,8 @@ __device__ uint32_t load_32_bits(reader_state& rstate)
     return static_cast<uint32_t>(ret >> shift);
 }
 
+__device__ void discard_bits(reader_state& rstate, int bit_count) { rstate.cache_idx += bit_count; }
+
 /// \brief Constructs the reader state from the start of a subsequence (fills the cache).
 ///
 /// \param[in] cstate
@@ -261,6 +272,72 @@ __device__ reader_state rstate_from_subseq_overflow(
     if (sizeof(uint4) <= rstate.data_end - rstate.data) {
         global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
     }
+
+    return rstate;
+}
+
+__device__ uint32_t load_32_bits(reader_state_& rstate)
+{
+    if (rstate.bits_in_cache < 32) {
+        constexpr int block_size = 256;
+        if (rstate.next_word < block_size * chunk_size) {
+            rstate.cache |= uint64_t{rstate.smem[rstate.next_word++]}
+                            << (32 - rstate.bits_in_cache);
+        }
+        rstate.bits_in_cache += 32;
+    }
+
+    return rstate.cache >> 32;
+}
+
+__device__ void discard_bits(reader_state_& rstate, int bit_count)
+{
+    assert(bit_count <= rstate.bits_in_cache);
+    rstate.cache <<= bit_count;
+    rstate.bits_in_cache -= bit_count;
+}
+
+__device__ reader_state_ rstate_from_subseq_start_(
+    const const_state& cstate,
+    const segment& segment_info,
+    uint32_t* smem,
+    int subseq_idx_rel,
+    int block_word_off)
+{
+    const int thread_word_off = (segment_info.subseq_offset + subseq_idx_rel) * chunk_size;
+    assert(block_word_off <= thread_word_off);
+
+    reader_state_ rstate;
+    rstate.next_word     = thread_word_off - block_word_off;
+    rstate.bits_in_cache = 0;
+    rstate.cache         = 0;
+    rstate.smem          = smem;
+
+    return rstate;
+}
+
+__device__ reader_state_ rstate_from_subseq_overflow_(
+    const const_state& cstate,
+    const segment& segment_info,
+    uint32_t* smem,
+    int subseq_idx_rel,
+    int block_word_off,
+    const subsequence_info& info)
+{
+    const int thread_word_off = (segment_info.subseq_offset + subseq_idx_rel) * chunk_size;
+    assert(block_word_off <= thread_word_off);
+
+    reader_state_ rstate;
+    // number of bits that are from the previous subsequence
+    const int tmp = (subsequence_size - (info.p % subsequence_size)) % subsequence_size;
+    assert(tmp < 32);
+    rstate.next_word     = thread_word_off - block_word_off;
+    rstate.bits_in_cache = tmp;
+    // select the upper tmp bits of the 32 bits word
+    uint32_t mask = ((1 << tmp) - 1) << (32 - tmp);
+    // place them in the upper bits of the 64 bits word
+    rstate.cache = uint64_t{info.cache & mask} << 32;
+    rstate.smem  = smem;
 
     return rstate;
 }
@@ -414,7 +491,7 @@ __device__ void decode_next_symbol(
 /// \param[in] tables
 /// \param[in] position_in_output Offset in `out` where the decoded coefficients of this subsequence
 ///   will be written. Only relevant if `do_write` is true.
-template <bool is_overflow, bool do_write>
+template <bool is_overflow, bool do_write, typename reader_state_t>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
     int16_t* __restrict__ out,
@@ -422,7 +499,7 @@ __device__ subsequence_info decode_subsequence(
     const const_state& cstate,
     const segment& segment_info,
     int segment_idx,
-    reader_state& rstate,
+    reader_state_t& rstate,
     const huffman_tables& tables,
     int position_in_output = 0)
 {
@@ -483,11 +560,12 @@ __device__ subsequence_info decode_subsequence(
 
         if (info.p + length > end_subseq) {
             // reading the next symbol will be outside the subsequence
+            info.cache = data;
             break;
         }
 
         // commit
-        rstate.cache_idx += length;
+        discard_bits(rstate, length);
 
         if (do_write) {
             // TODO could make a separate kernel for this
@@ -535,6 +613,8 @@ __global__ void sync_intra_sequence(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
+    // Don't load all subsequences into memory from the beginning as it hurts occupancy
+    //   to have so much shared memory.
     __shared__ cache<block_size> block_cache;
     ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
 
@@ -712,8 +792,18 @@ __global__ void decode_write(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
-    __shared__ cache<block_size> block_cache;
-    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+    constexpr int word_count_block = block_size * chunk_size;
+    const int block_word_off       = blockIdx.x * word_count_block;
+    __shared__ uint32_t cache[word_count_block];
+    for (int i = threadIdx.x; i < word_count_block; i += block_size) {
+        // TODO do assert alignment etc
+        // TODO only do if statement in last block
+        if (block_word_off + i < num_subsequences * chunk_size) {
+            const uint32_t val = reinterpret_cast<const uint32_t*>(cstate.scan)[block_word_off + i];
+            cache[i]           = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
+        }
+    }
+    __syncthreads();
 
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {
@@ -734,7 +824,8 @@ __global__ void decode_write(
     // only first thread does not do overflow
     constexpr bool do_write = true;
     if (subseq_idx_rel == 0) {
-        reader_state rstate = rstate_from_subseq_start(cstate, seg_info, thread_cache, 0);
+        reader_state_ rstate =
+            rstate_from_subseq_start_(cstate, seg_info, cache, 0, block_word_off);
         decode_subsequence<false, do_write>(
             subseq_idx_rel,
             out,
@@ -746,8 +837,8 @@ __global__ void decode_write(
             tables,
             position_in_output);
     } else {
-        reader_state rstate =
-            rstate_from_subseq_overflow(cstate, seg_info, thread_cache, s_info[subseq_idx - 1].p);
+        reader_state_ rstate = rstate_from_subseq_overflow_(
+            cstate, seg_info, cache, subseq_idx_rel, block_word_off, s_info[subseq_idx - 1]);
         decode_subsequence<true, do_write>(
             subseq_idx_rel,
             out,
