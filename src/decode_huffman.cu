@@ -18,9 +18,25 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// Current scheme:
+// - Hierarchical, intra sync and inter sync just like the paper.
+//   Biggest difference w.r.t. the paper is that no multiple inter launches
+//   are needed since the syncing is performed in lockstep since there is
+//   only one block (and block syncs are introduced).
+// Schemes that might be considered
+// - Within intra sync, wait for the next block to become available.
+//   This would mean to finish the current part, set some atomic flag.
+//   It would not be possible to wait for the fully sync of the next block
+//   but just the current intra sync part. Confirm whether this will produce
+//   correct results.
+// - Do a fixed number of iterations for every block, e.g. four, and set some
+//   flag for each subsequence whether it's synced. For the sequences that are
+//   not synced, look back until a synced sequence is found and decode from there.
+
 #include "decode_dc.hpp"
 #include "decode_destuff.hpp"
 #include "decode_huffman.hpp"
+#include "decode_huffman_reader.hpp"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
@@ -48,7 +64,10 @@ namespace {
 /// \brief Contains all required information about the last synchronization point for the
 ///   subsequence. All information is relative to the segment.
 struct subsequence_info {
-    /// \brief Bit(!) position in scan. "Location of the last detected codeword."
+    /// \brief Bit position in scan after decoding subsequence.
+    ///   If `p` is a multiple of the subsequence size in bits, it will be inside the subsequence
+    ///   and the distance between `p` and the subsequence boundary is less than 32 bits (because an
+    ///   encoded symbol is at most 32 bits).
     ///   TODO size_t?
     int p;
     /// \brief The number of decoded symbols.
@@ -59,21 +78,9 @@ struct subsequence_info {
     int c;
     /// \brief Zig-zag index.
     int z;
-};
-
-/// \brief Reader state.
-struct reader_state {
-    /// \brief Pointer to first data byte, will always be aligned to cudaMalloc alignment.
-    const uint8_t* data;
-    /// \brief Pointer to byte following the last data byte.
-    const uint8_t* data_end;
-    /// \brief Cache of two sectors, which are each 128 bits (4x32-bits words).
-    ///   The oldest bits are in the most significant positions.
-    ///
-    /// TODO get clarity on "sector" definition
-    ulonglong4* cache;
-    /// \brief Index of the next bit in the cache to read.
-    int cache_idx;
+    /// \brief In the case that `p` is not a multiple of the subsequence size in bits, contains the data bits
+    ///   between `p` and the boundary in the most significant positions.
+    uint32_t cache;
 };
 
 /// \brief Helper struct to pass constant inputs to the kernels.
@@ -115,10 +122,6 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 /// \brief Typedef for the maximum amount of Huffman tables for a scan.
 using huffman_tables = huffman_table[max_huffman_count * HUFF_COUNT];
 
-/// \brief Typedef for one cache per thread.
-template <int block_size>
-using cache = ulonglong4[block_size];
-
 /// \brief Load Huffman tables from global memory into shared.
 ///
 /// TODO this always loads the maximum possible amount of tables.
@@ -141,128 +144,6 @@ __device__ void load_huffman_tables(
         }
     }
     __syncthreads();
-}
-
-/// \brief Load the next sector (128 bits) into shared memory cache.
-__device__ void global_load_uint4(reader_state& rstate, uint4* shared)
-{
-    for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
-        uint32_t val                           = reinterpret_cast<const uint32_t*>(rstate.data)[i];
-        val                                    = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
-        reinterpret_cast<uint32_t*>(shared)[i] = val;
-    }
-    rstate.data += sizeof(uint4);
-}
-
-/// \brief Return the next 32 bits from cache, padded with zero bits if not enough available.
-__device__ uint32_t load_32_bits(reader_state& rstate)
-{
-    // check if more bits are needed
-    if (256 <= rstate.cache_idx + 32) {
-        // makes computation easier, means data is always multiple of the loaded size
-        static_assert(subsequence_size_bytes % sizeof(uint4) == 0);
-
-        // shift over to make place for 128 bits in z and w
-        rstate.cache->x = rstate.cache->z;
-        rstate.cache->y = rstate.cache->w;
-
-        // assert that the lo cache is fully used up
-        assert(128 <= rstate.cache_idx);
-        rstate.cache_idx -= 128;
-
-        if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-            for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
-                uint32_t val = reinterpret_cast<const uint32_t*>(rstate.data)[i];
-                val          = __byte_perm(val, uint32_t{0}, uint32_t{0x0123});
-                reinterpret_cast<uint32_t*>(rstate.cache)[4 + i] = val;
-            }
-            rstate.data += sizeof(uint4);
-        } else {
-            // just set it to zero, but is not required
-            std::memset(&(reinterpret_cast<uint4*>(rstate.cache)[1]), 0, sizeof(uint4));
-        }
-    }
-    // enough bits are present to pull 32 bits
-    assert(rstate.cache_idx + 32 <= 256);
-
-    int word_32_idx = rstate.cache_idx / 32;
-    assert(word_32_idx < 8);
-    // load the 32-bits word and the next, i.e. load a 64-bits word at the position of the 32-bits word
-    word_32_idx  = min(word_32_idx, 6);
-    uint64_t ret = (uint64_t{reinterpret_cast<uint32_t*>(rstate.cache)[word_32_idx]} << 32) |
-                   reinterpret_cast<uint32_t*>(rstate.cache)[word_32_idx + 1];
-
-    // shift to get the relevant 32 from 64 bits
-    int off = word_32_idx * 32;
-    assert(off <= rstate.cache_idx);
-    int off_rel = rstate.cache_idx - off;
-    assert(off_rel <= 32 && off_rel + 32 <= 64);
-    int shift = 64 - off_rel - 32;
-
-    return static_cast<uint32_t>(ret >> shift);
-}
-
-/// \brief Constructs the reader state from the start of a subsequence (fills the cache).
-///
-/// \param[in] cstate
-/// \param[in] segment_info Segment info for this subsequence.
-/// \param[in] cache Pointer to shared memory cache.
-/// \param[in] subseq_idx_rel Subsequence index relative to segment.
-__device__ reader_state rstate_from_subseq_start(
-    const const_state& cstate, const segment& segment_info, ulonglong4* cache, int subseq_idx_rel)
-{
-    reader_state rstate;
-    rstate.data =
-        cstate.scan + (segment_info.subseq_offset + subseq_idx_rel) * subsequence_size_bytes;
-    rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
-                                        subsequence_size_bytes;
-    rstate.cache     = cache;
-    rstate.cache_idx = 0;
-
-    // assert aligned load is valid
-    assert((rstate.data - cstate.scan) % sizeof(uint4) == 0);
-    // there should be at least one sector
-    assert(sizeof(uint4) <= rstate.data_end - rstate.data);
-    global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
-
-    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
-    }
-
-    return rstate;
-}
-
-/// \brief Constructs the reader state from overflow, which need not be
-///   the start of a subsequence (fills the cache).
-///
-/// \param[in] cstate
-/// \param[in] segment_info Segment info for this subsequence.
-/// \param[in] cache Pointer to shared memory cache.
-/// \param[in] p Bit offset in segment.
-__device__ reader_state rstate_from_subseq_overflow(
-    const const_state& cstate, const segment& segment_info, ulonglong4* cache, int p)
-{
-    reader_state rstate;
-    // loaded in chunks of 128, each chunk has 16 bytes
-    const int byte_offset = (p / 128) * (sizeof(uint4));
-    rstate.data = cstate.scan + segment_info.subseq_offset * subsequence_size_bytes + byte_offset;
-    rstate.data_end = cstate.scan + (segment_info.subseq_offset + segment_info.subseq_count) *
-                                        subsequence_size_bytes;
-    rstate.cache     = cache;
-    rstate.cache_idx = p - byte_offset * 8;
-
-    // assert aligned load is valid
-    assert((rstate.data - cstate.scan) % sizeof(uint4) == 0);
-    // TODO why is there not always one sector?
-    //   there should be at least one sector
-    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
-    }
-    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
-    }
-
-    return rstate;
 }
 
 /// \brief Returns the oldest (most significant) `num_bits` from `data`.
@@ -414,7 +295,7 @@ __device__ void decode_next_symbol(
 /// \param[in] tables
 /// \param[in] position_in_output Offset in `out` where the decoded coefficients of this subsequence
 ///   will be written. Only relevant if `do_write` is true.
-template <bool is_overflow, bool do_write>
+template <bool is_overflow, bool do_write, typename reader_state>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
     int16_t* __restrict__ out,
@@ -482,12 +363,14 @@ __device__ subsequence_info decode_subsequence(
         decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
 
         if (info.p + length > end_subseq) {
-            // reading the next symbol will be outside the subsequence
+            // Reading the next symbol will be outside the subsequence, so stop here.
+            //   Save the remaining data for uniform data loading in the write kernel.
+            info.cache = data;
             break;
         }
 
         // commit
-        rstate.cache_idx += length;
+        discard_bits(rstate, length);
 
         if (do_write) {
             // TODO could make a separate kernel for this
@@ -535,8 +418,10 @@ __global__ void sync_intra_sequence(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
-    __shared__ cache<block_size> block_cache;
-    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+    // Don't load all subsequences of the block into memory at the beginning as it
+    //   hurts occupancy to have so much shared memory.
+    using reader_state = reader_state_thread_cache<block_size>;
+    __shared__ typename reader_state::smem_type rstate_memory;
 
     assert(blockDim.x == block_size);
     const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
@@ -563,7 +448,8 @@ __global__ void sync_intra_sequence(
 
         const int subeq_idx_begin_rel = subseq_idx_begin - seg_info.subseq_offset;
 
-        rstate = rstate_from_subseq_start(cstate, seg_info, thread_cache, subeq_idx_begin_rel);
+        rstate = rstate_from_subseq_start<block_size>(
+            cstate.scan, seg_info, rstate_memory, subeq_idx_begin_rel);
 
         subsequence_info info = decode_subsequence<false, false>(
             subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
@@ -626,8 +512,8 @@ __global__ void sync_subsequences(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
-    __shared__ cache<block_size> block_cache;
-    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+    using reader_state = reader_state_thread_cache<block_size>;
+    __shared__ typename reader_state::smem_type rstate_memory;
 
     assert(blockDim.x == block_size);
     const int tid = blockDim.x * blockIdx.x + threadIdx.x;
@@ -659,8 +545,8 @@ __global__ void sync_subsequences(
         assert(subseq_idx_from < subseq_last_idx_segment);
         end = min(end, subseq_last_idx_segment);
 
-        rstate =
-            rstate_from_subseq_overflow(cstate, seg_info, thread_cache, s_info[subseq_idx_from].p);
+        rstate = rstate_from_subseq_overflow<block_size>(
+            cstate.scan, seg_info, rstate_memory, s_info[subseq_idx_from].p);
     }
 
     __shared__ bool is_block_done;
@@ -712,8 +598,9 @@ __global__ void decode_write(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
-    __shared__ cache<block_size> block_cache;
-    ulonglong4* thread_cache = &(block_cache[threadIdx.x]);
+    using reader_state = reader_state_all_subsequences<block_size>;
+    __shared__ typename reader_state::smem_type rstate_memory;
+    load_all_subsequences<block_size>(cstate.scan, num_subsequences, rstate_memory);
 
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {
@@ -734,7 +621,8 @@ __global__ void decode_write(
     // only first thread does not do overflow
     constexpr bool do_write = true;
     if (subseq_idx_rel == 0) {
-        reader_state rstate = rstate_from_subseq_start(cstate, seg_info, thread_cache, 0);
+        reader_state rstate =
+            rstate_from_subseq_start<block_size>(seg_info, rstate_memory, subseq_idx_rel);
         decode_subsequence<false, do_write>(
             subseq_idx_rel,
             out,
@@ -746,8 +634,9 @@ __global__ void decode_write(
             tables,
             position_in_output);
     } else {
-        reader_state rstate =
-            rstate_from_subseq_overflow(cstate, seg_info, thread_cache, s_info[subseq_idx - 1].p);
+        const subsequence_info& info = s_info[subseq_idx - 1];
+        reader_state rstate          = rstate_from_subseq_overflow<block_size>(
+            seg_info, rstate_memory, subseq_idx_rel, info.p, info.cache);
         decode_subsequence<true, do_write>(
             subseq_idx_rel,
             out,

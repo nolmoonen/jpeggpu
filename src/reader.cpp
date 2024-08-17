@@ -659,6 +659,7 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
         }
     }
 
+    // FIXME prevent reallocation of this buffer
     // TODO optionally let user provide pinned host buffer?
     for (int s = 0; s < max_scan_count; ++s) {
         if (h_segments[s]) {
