@@ -23,36 +23,39 @@
 
 #include <cuda_runtime.h>
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 
 int main(int argc, const char* argv[])
 {
     if (argc < 2) {
-        std::cerr << "usage: jpeggpu_benchmark <jpeg file> (optional: --jpeggpu_only)\n";
+        std::cerr << "usage: jpeggpu_benchmark <jpeg file_0> <jpeg_file_1>\n";
         return EXIT_FAILURE;
     }
 
-    const bool do_jpeggpu_only = argc >= 3;
-
-    std::ifstream file(argv[1]);
-    file.seekg(0, std::ios_base::end);
-    const std::streampos file_size = file.tellg();
-    file.seekg(0);
-    uint8_t* file_data = nullptr;
-    CHECK_CUDA(cudaMallocHost(&file_data, file_size));
-    file.read(reinterpret_cast<char*>(file_data), file_size);
-    file.close();
-
     printf("                     throughput (image/s) | avg latency (ms) | max latency (ms)\n");
+    for (int i = 1; i < argc; ++i) {
+        std::filesystem::path file_path(argv[i]);
+        std::cout << file_path << "\n";
 
-    bench_jpeggpu(file_data, file_size);
+        std::ifstream file(file_path);
+        file.seekg(0, std::ios_base::end);
+        const std::streampos file_size = file.tellg();
+        file.seekg(0);
+        uint8_t* file_data = nullptr;
+        CHECK_CUDA(cudaMallocHost(&file_data, file_size));
+        file.read(reinterpret_cast<char*>(file_data), file_size);
+        file.close();
 
-    if (!do_jpeggpu_only) {
-        bench_nvjpeg(file_data, file_size);
+        bench_jpeggpu(file_data, file_size);
+
+        if (false) {
+            bench_nvjpeg(file_data, file_size);
+        }
+
+        CHECK_CUDA(cudaFreeHost(file_data));
     }
-
-    CHECK_CUDA(cudaFreeHost(file_data));
 }
 
 // TODO
