@@ -316,7 +316,6 @@ __device__ subsequence_info decode_subsequence(
         info.n = 0;
         info.c = s_info[subseq_idx - 1].c;
         info.z = s_info[subseq_idx - 1].z;
-
     } else {
         // start of i-th subsequence
         info.p = subseq_idx_rel * subsequence_size;
@@ -413,8 +412,13 @@ struct logical_and {
 ///   equal to the block size of this kernel.
 template <int block_size>
 __global__ void sync_intra_sequence(
-    subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
+    subsequence_info* __restrict__ s_info,
+    int num_subsequences,
+    const_state cstate,
+    volatile int* __restrict__ flags)
 {
+    // TODO s_info in shared?
+
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
@@ -437,12 +441,13 @@ __global__ void sync_intra_sequence(
     int segment_idx; // segment index of subseq_idx_begin
     segment seg_info; // segment info of subseq_idx_begin
     reader_state rstate;
+    int segment_subseq_end;
     if (subseq_idx_begin < num_subsequences) {
         segment_idx = cstate.segment_indices[subseq_idx_begin];
         assert(segment_idx < cstate.num_segments);
         seg_info = cstate.segments[segment_idx];
 
-        const int segment_subseq_end = seg_info.subseq_offset + seg_info.subseq_count;
+        segment_subseq_end = seg_info.subseq_offset + seg_info.subseq_count;
         assert(subseq_idx_begin < segment_subseq_end);
         end = min(end, segment_subseq_end);
 
@@ -462,8 +467,6 @@ __global__ void sync_intra_sequence(
     __shared__ bool is_block_done;
     using block_reduce = cub::BlockReduce<bool, block_size>;
     __shared__ typename block_reduce::TempStorage temp_storage;
-
-    // TODO could read in entire sequence into shared memory first
 
     bool is_synced = false;
     bool do_write  = true;
@@ -493,94 +496,40 @@ __global__ void sync_intra_sequence(
         if (threadIdx.x == 0) is_block_done = is_block_done_local;
         if (do_write) s_info[subseq_idx] = info;
         __syncthreads(); // await s_info writes and is_block_done write
-        if (is_block_done) return;
+        if (is_block_done) break;
     }
-}
+    const bool is_last_thread = threadIdx.x == blockDim.x - 1;
+    if (is_last_thread) flags[blockIdx.x] = 1; // mark this block as done
 
-/// \brief Synchronizes subsequences in multiple contiguous arrays of subsequences,
-///   (relates to paper alg-3:25-41). Each thread handles such a contiguous array.
-///
-///   W.r.t. the paper, `size_in_subsequences` of 1 and `block_size` equal to "b" will be
-///     equivalent to "intersequence synchronization".
-///
-/// \tparam size_in_subsequences Amount of contigous subsequences are synchronized.
-/// \tparam block_size Block size of the kernel.
-template <int size_in_subsequences, int block_size>
-__global__ void sync_subsequences(
-    subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
-{
-    __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    if (blockIdx.x == gridDim.x - 1) return; // return if last block
 
-    using reader_state = reader_state_thread_cache<block_size>;
-    __shared__ typename reader_state::smem_type rstate_memory;
+    if (is_last_thread) {
+        // await next block to come online
+        while (flags[blockIdx.x + 1] != 1) {
+            __nanosleep(350);
+        }
 
-    assert(blockDim.x == block_size);
-    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    // subsequence index this thread is overflowing from, this will be the first s_info read
-    const int subseq_idx_from = (tid + 1) * size_in_subsequences - 1;
-    // overflowing to
-    const int subseq_idx_to = subseq_idx_from + 1;
-
-    // first subsequence index owned/read by the next thread block, follow from `subseq_idx_from`
-    //   calculation, substituting `blockDim.x` by `blockDim.x + 1` and `threadIdx.x` by `0`
-    const int subseq_idx_from_next_block =
-        ((blockIdx.x + 1) * block_size + 1) * size_in_subsequences - 1;
-
-    // last index dictated by block and JPEG stream
-    int end = min(subseq_idx_from_next_block, num_subsequences);
-
-    // since all threads must partipate, some threads will be assigned to
-    //  a subsequence out of bounds
-    int segment_idx;
-    segment seg_info;
-    reader_state rstate;
-    if (subseq_idx_from < num_subsequences) {
-        // segment index from the subsequence we are flowing from
-        segment_idx = cstate.segment_indices[subseq_idx_from];
-        assert(segment_idx < cstate.num_segments);
-        seg_info = cstate.segments[segment_idx];
-        // index of the final subsequence for this segment
-        const int subseq_last_idx_segment = seg_info.subseq_offset + seg_info.subseq_count;
-        assert(subseq_idx_from < subseq_last_idx_segment);
-        end = min(end, subseq_last_idx_segment);
-
+        // reinitialize state as lower threads have written to the info for this subsequence
         rstate = rstate_from_subseq_overflow<block_size>(
-            cstate.scan, seg_info, rstate_memory, s_info[subseq_idx_from].p);
-    }
+            cstate.scan, seg_info, rstate_memory, s_info[subseq_idx_begin].p);
 
-    __shared__ bool is_block_done;
-    using block_reduce = cub::BlockReduce<bool, block_size>;
-    __shared__ typename block_reduce::TempStorage temp_storage;
+        const int subseq_idx_from_next_next_block = (blockIdx.x + 2) * block_size;
+        end = min(subseq_idx_from_next_next_block, num_subsequences);
+        end = min(end, segment_subseq_end);
 
-    bool is_synced = false;
-    bool do_write  = true;
-    for (int i = 0; i < block_size * size_in_subsequences; ++i) {
-        const int subseq_idx = subseq_idx_to + i;
-        subsequence_info info;
-        if (subseq_idx < end && !is_synced) {
+        for (int subseq_idx = subseq_idx_begin + 1; subseq_idx < end; ++subseq_idx) {
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
-            info                     = decode_subsequence<true, false>(
+            subsequence_info info    = decode_subsequence<true, false>(
                 subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
-                // synchronization is achieved: the decoding process of this thread has found
-                //   the same "outcome" for the `subseq_idx`th subsequence as the stored result
-                //   of a decoding process that started from an earlier point in the JPEG stream,
-                //   meaning that this outcome is correct.
-                is_synced = true;
+                s_info[subseq_idx].n = info.n;
+                break;
             }
-        } else {
-            do_write = false;
+
+            s_info[subseq_idx] = info;
         }
-        bool is_thread_done      = is_synced || subseq_idx >= end;
-        bool is_block_done_local = block_reduce(temp_storage).Reduce(is_thread_done, logical_and{});
-        __syncthreads(); // await s_info reads
-        if (threadIdx.x == 0) is_block_done = is_block_done_local;
-        if (do_write) s_info[subseq_idx] = info;
-        __syncthreads(); // await s_info writes and is_block_done write
-        if (is_block_done) return;
     }
 }
 
@@ -748,38 +697,20 @@ jpeggpu_status jpeggpu::decode_scan(
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
 
+    int* flags = nullptr;
+    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&flags, num_sequences * sizeof(int)));
+
     // synchronize intra sequence/inter subsequence
     if (do_it && num_subsequences > 1) {
         logger.log(
             "intra sync of %d blocks of %d subsequences\n",
             num_sequences,
             num_subsequences_in_sequence);
+        JPEGGPU_CHECK_CUDA(cudaMemsetAsync(flags, 0, num_sequences * sizeof(int), stream));
         sync_intra_sequence<num_subsequences_in_sequence>
             <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-                d_s_info, num_subsequences, cstate);
+                d_s_info, num_subsequences, cstate, flags);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    }
-
-    // synchronize intra supersequence/inter sequence
-    constexpr int num_sequences_in_supersequence = 512; // configurable
-    const int num_supersequences =
-        ceiling_div(num_sequences, static_cast<unsigned int>(num_sequences_in_supersequence));
-    if (do_it && num_sequences > 1) {
-        logger.log(
-            "intra sync of %d blocks of %d subsequences\n",
-            num_supersequences,
-            num_sequences_in_supersequence * num_subsequences_in_sequence);
-        sync_subsequences<num_subsequences_in_sequence, num_sequences_in_supersequence>
-            <<<num_supersequences, num_sequences_in_supersequence, 0, stream>>>(
-                d_s_info, num_subsequences, cstate);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    }
-
-    if (num_supersequences > num_sequences_in_supersequence) {
-        constexpr int max_byte_size =
-            subsequence_size_bytes * num_subsequences_in_sequence * num_sequences_in_supersequence;
-        logger.log("byte stream is larger than max supported (%d bytes)\n", max_byte_size);
-        return JPEGGPU_NOT_SUPPORTED;
     }
 
     // TODO consider SoA or do in-place
