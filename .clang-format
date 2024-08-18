@@ -1,5 +1,6 @@
 AlignAfterOpenBracket: AlwaysBreak
 AlignConsecutiveAssignments: Consecutive
+AlignEscapedNewlines: Left
 AlignTrailingComments: Never
 AllowShortIfStatementsOnASingleLine: AllIfsAndElse
 AlwaysBreakTemplateDeclarations: Yes

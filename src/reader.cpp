@@ -398,6 +398,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         scan.num_data_units_in_mcu += comp.ss.x * comp.ss.y;
     }
 
+    if (10 < scan.num_data_units_in_mcu) {
+        // B.2.3 Sum of product of horizontal and vertical sampling factors shall be leq 10.
+        logger.log("\ttoo many data units in mcu\n");
+        return JPEGGPU_INVALID_JPEG;
+    }
+
     // Now comes the encoded data: skip through and keep track of segments.
 
     std::vector<segment> segments;
