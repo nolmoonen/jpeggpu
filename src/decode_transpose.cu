@@ -33,6 +33,11 @@ using namespace jpeggpu;
 
 namespace {
 
+// Every thread loads and stores one data unit row (8 values) of a total 8 * 2 = 16 bytes.
+//   This is because the minimum memory transaction is 32 bytes, and each row must go to a
+//   "random" address so coalescing is not possible for storing.
+constexpr int num_values_per_thread = 8;
+
 template <int num_data_units_in_mcu>
 __global__ void transpose_interleaved(
     const int16_t* __restrict__ data_in,
@@ -52,15 +57,16 @@ __global__ void transpose_interleaved(
     ivec2 ss_2,
     ivec2 ss_3)
 {
-    const size_t idx_pixel_in = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t idx_pixel_in = (blockIdx.x * blockDim.x + threadIdx.x) * num_values_per_thread;
 
+    // Check is valid for both pixels.
+    assert(data_size % num_values_per_thread == 0);
     if (idx_pixel_in >= data_size) return;
 
-    const int idx_data_unit    = idx_pixel_in / data_unit_size;
-    const int idx_in_data_unit = idx_pixel_in % data_unit_size;
-
-    const int idx_mcu    = idx_data_unit / num_data_units_in_mcu;
-    const int idx_in_mcu = idx_data_unit % num_data_units_in_mcu;
+    // Variables hold for both pixels.
+    const int idx_data_unit = idx_pixel_in / data_unit_size;
+    const int idx_mcu       = idx_data_unit / num_data_units_in_mcu;
+    const int idx_in_mcu    = idx_data_unit % num_data_units_in_mcu;
 
     int x_in_mcu = 0;
     int y_in_mcu = 0;
@@ -106,7 +112,7 @@ __global__ void transpose_interleaved(
         __builtin_unreachable();
     }();
 
-    const uint16_t val = data_in[idx_pixel_in];
+    const int idx_in_data_unit = idx_pixel_in % data_unit_size;
 
     const int x_mcu = idx_mcu % data_size_mcu_x;
     const int y_mcu = idx_mcu / data_size_mcu_x;
@@ -120,8 +126,10 @@ __global__ void transpose_interleaved(
     const int x = x_data_unit * data_unit_vector_size + x_in_data_unit;
     const int y = y_data_unit * data_unit_vector_size + y_in_data_unit;
 
-    const int idx_pixel_out = y * size.x + x;
-    data_out[idx_pixel_out] = val;
+    using load_type = uint4;
+    static_assert(sizeof(load_type) == num_values_per_thread * sizeof(uint16_t));
+    const load_type val = *reinterpret_cast<const load_type*>(data_in + idx_pixel_in);
+    *reinterpret_cast<load_type*>(data_out + y * size.x + x) = val;
 }
 
 } // namespace
@@ -145,8 +153,8 @@ jpeggpu_status jpeggpu::decode_transpose(
         (num_components > 3 ? comps[indices[3]].data_size.x * comps[indices[3]].data_size.y : 0);
 
     const dim3 transpose_block_dim(256);
-    const dim3 transpose_grid_dim(
-        ceiling_div(total_data_size, static_cast<unsigned int>(transpose_block_dim.x)));
+    const dim3 transpose_grid_dim(ceiling_div(
+        total_data_size / num_values_per_thread, static_cast<unsigned int>(transpose_block_dim.x)));
 
 // Provide the num_data_units_in_mcu as a compile-time constant so the compiler can generate efficient
 //   division and modulo instructions.
