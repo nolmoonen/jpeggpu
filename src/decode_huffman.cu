@@ -22,16 +22,20 @@
 // - Hierarchical, intra sync and inter sync just like the paper.
 //   Biggest difference w.r.t. the paper is that no multiple inter launches
 //   are needed since the syncing is performed in lockstep since there is
-//   only one block (and block syncs are introduced).
-// Schemes that might be considered
-// - Within intra sync, wait for the next block to become available.
-//   This would mean to finish the current part, set some atomic flag.
-//   It would not be possible to wait for the fully sync of the next block
-//   but just the current intra sync part. Confirm whether this will produce
-//   correct results.
+//   only one block (and block syncs are introduced). Having one thread block
+//   for inter-sequence synchronization seems sufficient for even the largest images.
+// Alternative schemes:
+// - Within intra sync kernel, wait for the next block to become available.
+//   This can be done by sleeping and checking a global flag for each block.
+//   Waiting only for the next block is simple, the caveat is that in theory
+//   a block can overflow into all subsequent blocks, causing the implementation
+//   to not be very simple. Waiting only for the next block seemed to give slightly
+//   beter performance than the standard scheme.
 // - Do a fixed number of iterations for every block, e.g. four, and set some
 //   flag for each subsequence whether it's synced. For the sequences that are
 //   not synced, look back until a synced sequence is found and decode from there.
+// - Have some "halo" for each intra-sequence thread block of threads that only
+//   decode subsequences for the purpose of synchronization.
 
 #include "decode_dc.hpp"
 #include "decode_destuff.hpp"
@@ -287,44 +291,24 @@ __device__ void decode_next_symbol(
 ///
 /// \param[in] subseq_idx_rel Subsequence index relative to segment.
 /// \param[out] out Output memory for coefficients, may be `nullptr` if `do_write` is false.
-/// \param[in] s_info Array of all subsequence infos.
 /// \param[in] cstate
-/// \param[in] segment_info The segment info for this subsequence.
 /// \param[in] segment_idx The segment index for this subsequence.
 /// \param[inout] rstate
 /// \param[in] tables
+/// \param[in] info
 /// \param[in] position_in_output Offset in `out` where the decoded coefficients of this subsequence
 ///   will be written. Only relevant if `do_write` is true.
-template <bool is_overflow, bool do_write, typename reader_state>
+template <bool do_write, typename reader_state>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
     int16_t* __restrict__ out,
-    const subsequence_info* __restrict__ s_info,
     const const_state& cstate,
-    const segment& segment_info,
     int segment_idx,
     reader_state& rstate,
     const huffman_tables& tables,
+    subsequence_info info,
     int position_in_output = 0)
 {
-    subsequence_info info;
-    if constexpr (is_overflow) {
-        const int subseq_idx = segment_info.subseq_offset + subseq_idx_rel;
-        info.p               = s_info[subseq_idx - 1].p;
-        // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
-        //   only for each subsequence (and not an aggregate)
-        info.n = 0;
-        info.c = s_info[subseq_idx - 1].c;
-        info.z = s_info[subseq_idx - 1].z;
-
-    } else {
-        // start of i-th subsequence
-        info.p = subseq_idx_rel * subsequence_size;
-        info.n = 0;
-        info.c = 0; // start from the first data unit of the Y component
-        info.z = 0;
-    }
-
     const int end_subseq = (subseq_idx_rel + 1) * subsequence_size; // first bit in next subsequence
     while (true) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
@@ -382,7 +366,7 @@ __device__ subsequence_info decode_subsequence(
         }
 
         info.p += length;
-        info.n += run_length + 1;
+        if (!do_write) info.n += run_length + 1;
         info.z += run_length + 1;
 
         if (info.z >= 64) {
@@ -415,6 +399,8 @@ template <int block_size>
 __global__ void sync_intra_sequence(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
+    __shared__ subsequence_info s_info_shared[block_size];
+
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
@@ -424,7 +410,8 @@ __global__ void sync_intra_sequence(
     __shared__ typename reader_state::smem_type rstate_memory;
 
     assert(blockDim.x == block_size);
-    const int subseq_idx_begin = blockDim.x * blockIdx.x + threadIdx.x;
+    const int block_off        = blockDim.x * blockIdx.x;
+    const int subseq_idx_begin = block_off + threadIdx.x;
 
     // first subsequence index owned/read by the next thread block
     const int subseq_idx_from_next_block = (blockIdx.x + 1) * block_size;
@@ -451,19 +438,23 @@ __global__ void sync_intra_sequence(
         rstate = rstate_from_subseq_start<block_size>(
             cstate.scan, seg_info, rstate_memory, subeq_idx_begin_rel);
 
-        subsequence_info info = decode_subsequence<false, false>(
-            subeq_idx_begin_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
+        subsequence_info info;
+        // start of i-th subsequence
+        info.p = subeq_idx_begin_rel * subsequence_size;
+        info.n = 0;
+        info.c = 0;
+        info.z = 0;
+
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
-        s_info[subseq_idx_begin] = info;
+        s_info_shared[threadIdx.x] = decode_subsequence<false>(
+            subeq_idx_begin_rel, nullptr, cstate, segment_idx, rstate, tables, info);
     }
     __syncthreads();
 
     __shared__ bool is_block_done;
     using block_reduce = cub::BlockReduce<bool, block_size>;
     __shared__ typename block_reduce::TempStorage temp_storage;
-
-    // TODO could read in entire sequence into shared memory first
 
     bool is_synced = false;
     bool do_write  = true;
@@ -474,9 +465,20 @@ __global__ void sync_intra_sequence(
         if (subseq_idx < end && !is_synced) {
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
-            info                     = decode_subsequence<true, false>(
-                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
-            const subsequence_info& stored_info = s_info[subseq_idx];
+
+            assert(block_off <= subseq_idx - 1 && subseq_idx - 1 - block_off < block_size);
+            subsequence_info old_info;
+            old_info.p = s_info_shared[subseq_idx - 1 - block_off].p;
+            // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
+            //   only for each subsequence (and not an aggregate)
+            old_info.n = 0;
+            old_info.c = s_info_shared[subseq_idx - 1 - block_off].c;
+            old_info.z = s_info_shared[subseq_idx - 1 - block_off].z;
+
+            info = decode_subsequence<false>(
+                subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
+            assert(block_off <= subseq_idx && subseq_idx - block_off < block_size);
+            const subsequence_info& stored_info = s_info_shared[subseq_idx - block_off];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
                 //   the same "outcome" for the `subseq_idx`th subsequence as the stored result
@@ -491,9 +493,15 @@ __global__ void sync_intra_sequence(
         bool is_block_done_local = block_reduce(temp_storage).Reduce(is_thread_done, logical_and{});
         __syncthreads(); // await s_info reads
         if (threadIdx.x == 0) is_block_done = is_block_done_local;
-        if (do_write) s_info[subseq_idx] = info;
+        if (do_write) {
+            assert(block_off <= subseq_idx && subseq_idx - block_off < block_size);
+            s_info_shared[subseq_idx - block_off] = info;
+        }
         __syncthreads(); // await s_info writes and is_block_done write
-        if (is_block_done) return;
+        if (is_block_done) break;
+    }
+    if (subseq_idx_begin < num_subsequences) {
+        s_info[subseq_idx_begin] = s_info_shared[threadIdx.x];
     }
 }
 
@@ -561,8 +569,17 @@ __global__ void sync_subsequences(
         if (subseq_idx < end && !is_synced) {
             assert(seg_info.subseq_offset <= subseq_idx);
             const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
-            info                     = decode_subsequence<true, false>(
-                subseq_idx_rel, nullptr, s_info, cstate, seg_info, segment_idx, rstate, tables);
+
+            subsequence_info old_info;
+            old_info.p = s_info[subseq_idx - 1].p;
+            // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
+            //   only for each subsequence (and not an aggregate)
+            old_info.n = 0;
+            old_info.c = s_info[subseq_idx - 1].c;
+            old_info.z = s_info[subseq_idx - 1].z;
+
+            info = decode_subsequence<false>(
+                subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -623,30 +640,23 @@ __global__ void decode_write(
     if (subseq_idx_rel == 0) {
         reader_state rstate =
             rstate_from_subseq_start<block_size>(seg_info, rstate_memory, subseq_idx_rel);
-        decode_subsequence<false, do_write>(
-            subseq_idx_rel,
-            out,
-            s_info,
-            cstate,
-            seg_info,
-            segment_idx,
-            rstate,
-            tables,
-            position_in_output);
+
+        subsequence_info info;
+        info.p = 0;
+        // n is not used in writing
+        info.c = 0;
+        info.z = 0;
+
+        decode_subsequence<do_write>(
+            subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
     } else {
-        const subsequence_info& info = s_info[subseq_idx - 1];
-        reader_state rstate          = rstate_from_subseq_overflow<block_size>(
+        subsequence_info info = s_info[subseq_idx - 1];
+
+        reader_state rstate = rstate_from_subseq_overflow<block_size>(
             seg_info, rstate_memory, subseq_idx_rel, info.p, info.cache);
-        decode_subsequence<true, do_write>(
-            subseq_idx_rel,
-            out,
-            s_info,
-            cstate,
-            seg_info,
-            segment_idx,
-            rstate,
-            tables,
-            position_in_output);
+
+        decode_subsequence<do_write>(
+            subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
     }
 }
 
