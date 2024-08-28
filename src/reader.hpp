@@ -23,6 +23,7 @@
 
 #include "defs.hpp"
 #include "logger.hpp"
+#include "marker.hpp"
 #include "util.hpp"
 
 #include <jpeggpu/jpeggpu.h>
@@ -64,6 +65,11 @@ struct scan {
     int num_subsequences;
     int num_segments;
 
+    int spectral_start;
+    int spectral_end;
+    int successive_approx_hi;
+    int successive_approx_lo;
+
     ivec2 num_mcus;
 };
 
@@ -87,7 +93,7 @@ struct component {
 
 /// cleared with memset
 struct jpeg_stream {
-    scan scans[max_comp_count];
+    scan scans[max_scan_count];
 
     ivec2 size; /// Actual image size in pixels.
     int num_components; ///< Number of image components.
@@ -105,6 +111,12 @@ struct jpeg_stream {
     int num_scans;
 };
 
+/// \brief Whether JPEG stream is sequential. Alternative is progressive.
+inline bool is_sequential(uint8_t sof_marker)
+{
+    return sof_marker == MARKER_SOF0 || sof_marker == MARKER_SOF1;
+}
+
 struct reader {
     [[nodiscard]] jpeggpu_status startup();
 
@@ -118,7 +130,7 @@ struct reader {
 
     jpeggpu_status read_marker(uint8_t& marker, logger& logger);
 
-    jpeggpu_status read_sof0(logger& logger);
+    jpeggpu_status read_sof(logger& logger);
 
     jpeggpu_status read_dht(logger& logger);
 
@@ -141,6 +153,8 @@ struct reader {
         const uint8_t* image; /// Modifiable pointer to parsing head.
         const uint8_t* image_begin; /// Non-modifiable pointer to start of image.
         const uint8_t* image_end; /// Non-modifiable pointer to end of image.
+        bool found_sof;
+        uint8_t sof_marker;
     } reader_state;
 
     size_t get_file_size() const { return reader_state.image_end - reader_state.image_begin; }
@@ -153,6 +167,7 @@ struct reader {
     // pinned.
     huffman_table* h_huff_tables[max_huffman_count][HUFF_COUNT];
 
+    // FIXME calculation is probably wrong for progressive scans
     // TODO better manage this and keep allocation around
     segment* h_segments[max_scan_count];
 };

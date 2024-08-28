@@ -8,6 +8,9 @@ JPEGGPU is an experimental JPEG decoder implemented in CUDA. It works by decodin
 - Flexible API: no implicit synchronization between host and device in the decoding process, explicit device memory management allowing reuse, thread safety, C99 compatible, and OS independent.
 - Simple library design: JPEG application segments are not interpreted, i.e. no attempt is made to interpret color space. No attempt is made to support non-standard JPEGs (no EOF marker, table index out of bounds, etc.).
 
+- Baseline process
+- Extended but not 12-bit samples
+
 ## Building
 
 Build with CMake, for example:

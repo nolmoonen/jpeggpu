@@ -40,22 +40,22 @@
 
 namespace jpeggpu {
 
-#define JPEGGPU_CHECK_CUDA(call)                                                                   \
-    do {                                                                                           \
-        cudaError_t err = call;                                                                    \
-        if (err != cudaSuccess) {                                                                  \
-            logger.log(                                                                            \
-                "CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__);     \
-            return JPEGGPU_INTERNAL_ERROR;                                                         \
-        }                                                                                          \
+#define JPEGGPU_CHECK_CUDA(call)                                                               \
+    do {                                                                                       \
+        cudaError_t err = call;                                                                \
+        if (err != cudaSuccess) {                                                              \
+            logger.log(                                                                        \
+                "CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__); \
+            return JPEGGPU_INTERNAL_ERROR;                                                     \
+        }                                                                                      \
     } while (0)
 
-#define JPEGGPU_CHECK_STAT(call)                                                                   \
-    do {                                                                                           \
-        jpeggpu_status stat = call;                                                                \
-        if (stat != JPEGGPU_SUCCESS) {                                                             \
-            return JPEGGPU_INTERNAL_ERROR;                                                         \
-        }                                                                                          \
+#define JPEGGPU_CHECK_STAT(call)           \
+    do {                                   \
+        jpeggpu_status stat = call;        \
+        if (stat != JPEGGPU_SUCCESS) {     \
+            return JPEGGPU_INTERNAL_ERROR; \
+        }                                  \
     } while (0)
 
 /// \brief The number of rows or columns in a data unit, eight.
@@ -66,15 +66,15 @@ constexpr int data_unit_vector_size = 8;
 /// \brief The number of pixels in a data units, 64.
 constexpr int data_unit_size = 64;
 
-// TODO if Huffman tables are redefined between scans, this will be an issue.
-//  there should be memory for `max_huffman_count_per_scan * max_scan_count`
+// FIXME Huffman tables may be redefined between scans, which will cause an issue.
+//  There should be memory for `max_huffman_count_per_scan * max_scan_count`
 //  but only `max_huffman_count_per_scan` should be passed to `decode_scan`
-constexpr int max_huffman_count = 2;
+constexpr int max_huffman_count = 4;
 /// as defined by jpeg spec
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
-/// each scan must have at least one component, no component may appear twice
-/// TODO check with spec whether above is true
-constexpr int max_scan_count = max_comp_count;
+/// Heuristic, is there are hard limit? Like max_comp_count * 64 * 8 = 2048
+///   should probably check for no-op and duplicate scans.
+constexpr int max_scan_count = 64;
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
