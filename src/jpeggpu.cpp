@@ -31,6 +31,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <stdint.h>
 #include <type_traits>
 #include <vector>
@@ -62,11 +63,10 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    *decoder = reinterpret_cast<jpeggpu_decoder*>(malloc(sizeof(jpeggpu_decoder)));
-    if (!*decoder) {
+    *decoder = new (std::nothrow) jpeggpu_decoder();
+    if (*decoder = nullptr) {
         return JPEGGPU_OUT_OF_HOST_MEMORY;
     }
-    // TODO new without exceptions or placement new?
 
     return (*decoder)->decoder.init();
 }

@@ -21,6 +21,7 @@
 #ifndef JPEGGPU_UTIL_HPP_
 #define JPEGGPU_UTIL_HPP_
 
+#include <cassert>
 #include <type_traits>
 
 template <

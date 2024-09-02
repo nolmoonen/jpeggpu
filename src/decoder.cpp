@@ -70,7 +70,7 @@ jpeggpu_status jpeggpu::decoder::init()
         JPEGGPU_CHECK_CUDA(cudaMalloc(&(d_qtables[c]), sizeof(uint8_t) * data_unit_size));
     }
     JPEGGPU_CHECK_CUDA(
-        cudaMalloc(&d_huff_tables, sizeof(*d_huff_tables) * max_huffman_count * HUFF_COUNT));
+        cudaMalloc(&d_huff_tables, sizeof(*d_huff_tables) * max_huffman_count_per_scan * HUFF_COUNT));
 
     jpeggpu_status stat = JPEGGPU_SUCCESS;
     if ((stat = reader.startup()) != JPEGGPU_SUCCESS) {

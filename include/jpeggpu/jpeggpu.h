@@ -52,6 +52,8 @@ enum jpeggpu_status {
 /// \brief Return a description of the status code.
 const char* jpeggpu_get_status_string(enum jpeggpu_status stat);
 
+/// \brief If `JPEGGPU_SUCCESS` is returned, `jpeggpu_decoder_cleanup` must be called before the program
+///   ends, regardless of what status code intermediate functions return.
 enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder);
 
 /// \brief Set whether to do logging. It is off by default.

@@ -66,15 +66,16 @@ constexpr int data_unit_vector_size = 8;
 /// \brief The number of pixels in a data units, 64.
 constexpr int data_unit_size = 64;
 
-// FIXME Huffman tables may be redefined between scans, which will cause an issue.
-//  There should be memory for `max_huffman_count_per_scan * max_scan_count`
-//  but only `max_huffman_count_per_scan` should be passed to `decode_scan`
-constexpr int max_huffman_count = 4;
+/// \brief Maximum number of Huffman tables that can be defined per scan.
+///
+/// A Huffman table can be defined as one of four possible indices, tables
+///   may be redefined between scans.
+constexpr int max_huffman_count_per_scan = 4;
 /// as defined by jpeg spec
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
-/// Heuristic, is there are hard limit? Like max_comp_count * 64 * 8 = 2048
-///   should probably check for no-op and duplicate scans.
-constexpr int max_scan_count = 64;
+
+constexpr int max_qtable_count_per_scan = 4;
+
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
