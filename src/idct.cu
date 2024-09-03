@@ -233,24 +233,24 @@ jpeggpu_status jpeggpu::idct(
     cudaStream_t stream,
     logger& logger)
 {
-    for (int c = 0; c < info.num_components; ++c) {
-        const dim3 num_blocks(
-            ceiling_div(
-                info.components[c].data_size.x, static_cast<unsigned int>(num_data_x_block)),
-            ceiling_div(
-                info.components[c].data_size.y, static_cast<unsigned int>(num_data_y_block)));
-        const dim3 kernel_block_size(
-            data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
-        idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
-            d_image_qdct[c],
-            d_image[c],
-            pitch[c],
-            info.components[c].data_size.x,
-            info.components[c].data_size.y,
-            info.components[c].size.x,
-            info.components[c].size.y,
-            d_qtable[c]);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    }
+    // for (int c = 0; c < info.num_components; ++c) {
+    //     const dim3 num_blocks(
+    //         ceiling_div(
+    //             info.components[c].data_size.x, static_cast<unsigned int>(num_data_x_block)),
+    //         ceiling_div(
+    //             info.components[c].data_size.y, static_cast<unsigned int>(num_data_y_block)));
+    //     const dim3 kernel_block_size(
+    //         data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
+    //     idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
+    //         d_image_qdct[c],
+    //         d_image[c],
+    //         pitch[c],
+    //         info.components[c].data_size.x,
+    //         info.components[c].data_size.y,
+    //         info.components[c].size.x,
+    //         info.components[c].size.y,
+    //         d_qtable[c]);
+    //     JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    // }
     return JPEGGPU_SUCCESS;
 }

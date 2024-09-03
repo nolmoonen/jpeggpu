@@ -21,6 +21,7 @@
 #ifndef JPEGGPU_DECODER_HPP_
 #define JPEGGPU_DECODER_HPP_
 
+#include "list.hpp"
 #include "logger.hpp"
 #include "reader.hpp"
 
@@ -51,20 +52,7 @@ struct decoder {
 
     struct reader reader;
 
-    /// \brief Device memory for quantization tables.
-    ///   Allocations persists with the decoder state because it is constant in size and small.
-    ///   TODO if quantization tables are redefined between scans (uncommon but possible)
-    ///     wrong results are produced.
-    uint8_t* d_qtables[max_comp_count];
-
-    /// \brief Device memory for the Huffman tables.
-    ///
-    /// - One allocation so this makes up one contiguous block of memory,
-    ///     which is beneficial for coalescing (when loading into shared memory).
-    /// - Allocations persists with the decoder state because it is constant in size and small.
-    /// - Only holds `max_huffman_count_per_scan` memory because scans are processed in
-    ///     stream-ordered fashion.
-    huffman_table* d_huff_tables;
+    list<segment*> d_segments;
 
     /// \brief Output of decoding, quantized and cosine-transformed image data.
     ///   Allocation does not persist with the decoder state since the size depends on input image.

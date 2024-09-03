@@ -66,11 +66,7 @@ using namespace jpeggpu;
 
 jpeggpu_status jpeggpu::decoder::init()
 {
-    for (int c = 0; c < max_comp_count; ++c) {
-        JPEGGPU_CHECK_CUDA(cudaMalloc(&(d_qtables[c]), sizeof(uint8_t) * data_unit_size));
-    }
-    JPEGGPU_CHECK_CUDA(
-        cudaMalloc(&d_huff_tables, sizeof(*d_huff_tables) * max_huffman_count_per_scan * HUFF_COUNT));
+    // TODO partial cleanup on error
 
     jpeggpu_status stat = JPEGGPU_SUCCESS;
     if ((stat = reader.startup()) != JPEGGPU_SUCCESS) {
@@ -80,20 +76,15 @@ jpeggpu_status jpeggpu::decoder::init()
     allocator = stack_allocator{};
     logger    = jpeggpu::logger{};
 
+    JPEGGPU_CHECK_STAT(d_segments.startup(4));
+
     return JPEGGPU_SUCCESS;
 }
 
 void jpeggpu::decoder::cleanup()
 {
+    d_segments.cleanup();
     reader.cleanup();
-
-    cudaFree(d_huff_tables);
-    d_huff_tables = nullptr;
-
-    for (int c = 0; c < max_comp_count; ++c) {
-        cudaFree(d_qtables[c]);
-        d_qtables[c] = nullptr;
-    }
 }
 
 jpeggpu_status jpeggpu::decoder::parse_header(
@@ -138,7 +129,9 @@ jpeggpu_status reserve_transfer_data(
     const reader& reader,
     stack_allocator& allocator,
     uint8_t*& d_image_data,
-    segment* (&d_segments)[max_scan_count])
+    qtable*& d_qtables,
+    huffman_table*& d_huff_tables,
+    list<segment*>& d_segments)
 {
     if (allocator.size != 0) {
         // should be first in allocation, to ensure it's in the same place
@@ -147,7 +140,11 @@ jpeggpu_status reserve_transfer_data(
 
     d_image_data = nullptr;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_image_data, reader.get_file_size()));
-    for (int s = 0; s < max_scan_count; ++s) {
+    d_qtables = nullptr;
+    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_qtables, reader.jpeg_stream.cnt_qtab));
+    d_huff_tables = nullptr;
+    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_huff_tables, reader.jpeg_stream.cnt_huff));
+    for (int s = 0; s < d_segments.get_size(); ++s) {
         d_segments[s] = nullptr;
         JPEGGPU_CHECK_STAT(
             allocator.reserve<do_it>(&d_segments[s], reader.jpeg_stream.scans[s].num_segments));
@@ -162,9 +159,14 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
 {
     allocator.reset(d_tmp, tmp_size);
 
-    uint8_t* d_image_data               = nullptr;
-    segment* d_segments[max_scan_count] = {};
-    JPEGGPU_CHECK_STAT(reserve_transfer_data<true>(reader, allocator, d_image_data, d_segments));
+    const jpeg_stream& info = reader.jpeg_stream;
+
+    uint8_t* d_image_data        = nullptr;
+    qtable* d_qtables            = nullptr;
+    huffman_table* d_huff_tables = nullptr;
+    JPEGGPU_CHECK_STAT(d_segments.resize(info.num_scans));
+    JPEGGPU_CHECK_STAT(reserve_transfer_data<true>(
+        reader, allocator, d_image_data, d_qtables, d_huff_tables, d_segments));
 
     // JPEG stream
     JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
@@ -174,32 +176,25 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
         cudaMemcpyHostToDevice,
         stream));
     /// Huffman tables
-    for (int i = 0; i < max_huffman_count; ++i) {
-        for (int j = 0; j < HUFF_COUNT; ++j) {
-            JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-                d_huff_tables + i * HUFF_COUNT + j,
-                reader.h_huff_tables[i][j],
-                sizeof(*reader.h_huff_tables[i][j]),
-                cudaMemcpyHostToDevice,
-                stream));
-        }
-    }
+    JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+        d_huff_tables,
+        reader.h_huff_tables.ptr,
+        info.cnt_huff * sizeof(*reader.h_huff_tables.ptr),
+        cudaMemcpyHostToDevice,
+        stream));
     // quantization tables
-    const jpeg_stream& info = reader.jpeg_stream;
-    for (int c = 0; c < info.num_components; ++c) {
-        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-            d_qtables[c],
-            reader.h_qtables[info.components[c].qtable_idx],
-            sizeof(*reader.h_qtables[info.components[c].qtable_idx]),
-            cudaMemcpyHostToDevice,
-            stream));
-    }
+    JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+        d_qtables,
+        reader.h_qtables.ptr,
+        info.cnt_qtab * sizeof(*reader.h_qtables.ptr),
+        cudaMemcpyHostToDevice,
+        stream));
     // segment info
     for (int s = 0; s < info.num_scans; ++s) {
         JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_segments[s],
-            reader.h_segments[s],
-            info.scans[s].num_segments * sizeof(segment),
+            reader.h_scan_segments[s].ptr,
+            info.scans[s].num_segments * sizeof(*reader.h_scan_segments[s].ptr),
             cudaMemcpyHostToDevice,
             stream));
     }
@@ -213,107 +208,111 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
 template <bool do_it>
 jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, cudaStream_t stream)
 {
-    uint8_t* d_image_data               = nullptr;
-    segment* d_segments[max_scan_count] = {};
-    JPEGGPU_CHECK_STAT(reserve_transfer_data<do_it>(reader, allocator, d_image_data, d_segments));
+    // const jpeg_stream& info = reader.jpeg_stream;
 
-    const jpeg_stream& info = reader.jpeg_stream;
-    for (int c = 0; c < info.num_components; ++c) {
-        const size_t size = info.components[c].data_size.x * info.components[c].data_size.y;
-        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
-    }
+    // uint8_t* d_image_data        = nullptr;
+    // qtable* d_qtables            = nullptr;
+    // huffman_table* d_huff_tables = nullptr;
+    // JPEGGPU_CHECK_STAT(d_segments.resize(info.num_scans));
+    // JPEGGPU_CHECK_STAT(reserve_transfer_data<do_it>(
+    //     reader, allocator, d_image_data, d_qtables, d_huff_tables, d_segments));
 
-    size_t total_data_size = 0;
-    for (int c = 0; c < info.num_components; ++c) {
-        total_data_size += info.components[c].data_size.x * info.components[c].data_size.y;
-    }
-    int16_t* d_out;
-    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
-    if (do_it) {
-        // initialize to zero, since only non-zeros are written by Huffman decoding
-        JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
-    }
+    // for (int c = 0; c < info.num_components; ++c) {
+    //     const size_t size = info.components[c].data_size.x * info.components[c].data_size.y;
+    //     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
+    // }
 
-    // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
-    //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
+    // size_t total_data_size = 0;
+    // for (int c = 0; c < info.num_components; ++c) {
+    //     total_data_size += info.components[c].data_size.x * info.components[c].data_size.y;
+    // }
+    // int16_t* d_out;
+    // JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
+    // if (do_it) {
+    //     // initialize to zero, since only non-zeros are written by Huffman decoding
+    //     JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
+    // }
 
-    // destuff the scan and decode the Huffman stream
-    size_t offset = 0;
-    for (int c = 0; c < info.num_scans; ++c) {
-        const scan& scan = info.scans[c];
+    // // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
+    // //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
 
-        uint8_t* d_scan_destuffed = nullptr;
-        // all subsequences are "rounded up" in size, which allows for easier offset
-        //   calculations in the Huffman decoder
-        const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
-        // scan should be properly aligned by allocator to do optimized reads
-        //   (reading more bytes than one at a time) in the Huffman decoder
-        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
+    // // destuff the scan and decode the Huffman stream
+    // size_t offset = 0;
+    // for (int c = 0; c < info.num_scans; ++c) {
+    //     const scan& scan = info.scans[c];
 
-        // for each subsequence, its segment
-        int* d_segment_indices = nullptr;
-        JPEGGPU_CHECK_STAT(
-            allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
+    //     uint8_t* d_scan_destuffed = nullptr;
+    //     // all subsequences are "rounded up" in size, which allows for easier offset
+    //     //   calculations in the Huffman decoder
+    //     const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
+    //     // scan should be properly aligned by allocator to do optimized reads
+    //     //   (reading more bytes than one at a time) in the Huffman decoder
+    //     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
 
-        const uint8_t* d_scan = d_image_data + scan.begin;
-        JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
-            info,
-            d_scan,
-            d_scan_destuffed,
-            d_segments[c],
-            d_segment_indices,
-            scan,
-            allocator,
-            stream,
-            logger));
+    //     // for each subsequence, its segment
+    //     int* d_segment_indices = nullptr;
+    //     JPEGGPU_CHECK_STAT(
+    //         allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
 
-        JPEGGPU_CHECK_STAT(decode_scan<do_it>(
-            info,
-            d_scan_destuffed,
-            d_segments[c],
-            d_segment_indices,
-            d_out + offset,
-            scan,
-            d_huff_tables,
-            allocator,
-            stream,
-            logger));
+    //     const uint8_t* d_scan = d_image_data + scan.begin;
+    //     JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
+    //         info,
+    //         d_scan,
+    //         d_scan_destuffed,
+    //         d_segments[c],
+    //         d_segment_indices,
+    //         scan,
+    //         allocator,
+    //         stream,
+    //         logger));
 
-        for (int c = 0; c < scan.num_components; ++c) {
-            const component& comp = info.components[scan.component_indices[c]];
-            offset += comp.data_size.x * comp.data_size.y;
-        }
-    }
+    //     JPEGGPU_CHECK_STAT(decode_scan<do_it>(
+    //         info,
+    //         d_scan_destuffed,
+    //         d_segments[c],
+    //         d_segment_indices,
+    //         d_out + offset,
+    //         scan,
+    //         d_huff_tables,
+    //         allocator,
+    //         stream,
+    //         logger));
 
-    // TODO is "data unit" the correct terminology?
+    //     for (int c = 0; c < scan.num_components; ++c) {
+    //         const component& comp = info.components[scan.component_indices[c]];
+    //         offset += comp.data_size.x * comp.data_size.y;
+    //     }
+    // }
 
-    // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
-    //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
+    // // TODO is "data unit" the correct terminology?
 
-    for (int c = 0; c < info.num_scans; ++c) {
-        // undo DC difference encoding
-        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, info.scans[c], d_out, allocator, stream, logger));
-    }
+    // // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
+    // //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
 
-    if (do_it) {
-        size_t offset = 0;
-        for (int c = 0; c < info.num_scans; ++c) {
-            // Convert data order from data unit at a time to raster order,
-            //   and place the components from scan order to frame order.
-            const scan& scan = info.scans[c];
-            JPEGGPU_CHECK_STAT(
-                decode_transpose(info, d_out + offset, scan, d_image_qdct, stream, logger));
+    // for (int c = 0; c < info.num_scans; ++c) {
+    //     // undo DC difference encoding
+    //     JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, info.scans[c], d_out, allocator, stream, logger));
+    // }
 
-            for (int c = 0; c < scan.num_components; ++c) {
-                const component& comp = info.components[scan.component_indices[c]];
-                offset += comp.data_size.x * comp.data_size.y;
-            }
-        }
+    // if (do_it) {
+    //     size_t offset = 0;
+    //     for (int c = 0; c < info.num_scans; ++c) {
+    //         // Convert data order from data unit at a time to raster order,
+    //         //   and place the components from scan order to frame order.
+    //         const scan& scan = info.scans[c];
+    //         JPEGGPU_CHECK_STAT(
+    //             decode_transpose(info, d_out + offset, scan, d_image_qdct, stream, logger));
 
-        // invert DCT and output directly into user-provided buffer
-        JPEGGPU_CHECK_STAT(
-            idct(info, d_image_qdct, img->image, img->pitch, d_qtables, stream, logger));
-    }
+    //         for (int c = 0; c < scan.num_components; ++c) {
+    //             const component& comp = info.components[scan.component_indices[c]];
+    //             offset += comp.data_size.x * comp.data_size.y;
+    //         }
+    //     }
+
+    //     // invert DCT and output directly into user-provided buffer
+    //     JPEGGPU_CHECK_STAT(
+    //         idct(info, d_image_qdct, img->image, img->pitch, d_qtables, stream, logger));
+    // }
 
     return JPEGGPU_SUCCESS;
 }

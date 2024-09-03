@@ -50,13 +50,18 @@ namespace jpeggpu {
         }                                                                                      \
     } while (0)
 
-#define JPEGGPU_CHECK_STAT(call)           \
-    do {                                   \
-        jpeggpu_status stat = call;        \
-        if (stat != JPEGGPU_SUCCESS) {     \
-            return JPEGGPU_INTERNAL_ERROR; \
-        }                                  \
+#define JPEGGPU_CHECK_STAT(call)       \
+    do {                               \
+        jpeggpu_status stat = call;    \
+        if (stat != JPEGGPU_SUCCESS) { \
+            return stat;               \
+        }                              \
     } while (0)
+
+/// General struct design:
+/// startup: one time initialization
+/// reset: reset variables for reuse
+/// cleanup: one time cleanup
 
 /// \brief The number of rows or columns in a data unit, eight.
 ///
@@ -79,7 +84,9 @@ constexpr int max_qtable_count_per_scan = 4;
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
-using qtable = uint8_t[64];
+struct qtable {
+    uint8_t data[64];
+};
 
 // clang-format off
 /// \brief Convert zig-zag index to raster index,

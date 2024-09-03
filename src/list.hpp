@@ -53,31 +53,47 @@ struct pinned_allocator {
     static void free(T* ptr) { cudaFreeHost(ptr); }
 };
 
-/// \brief Non-initializing vector.
+/// \brief Non-initializing vector, `T` should be trivially constructible and trivially copyable.
 template <typename T, typename Allocator = default_allocator<T>>
 struct list {
     /// \brief
     ///   If `JPEGGPU_SUCCESS` is returned, `cleanup` must be called before this instance is removed.
     [[nodiscard]] jpeggpu_status startup(int n = 0)
     {
-        assert(ptr == nullptr && num == 0);
+        assert(ptr == nullptr && size == 0 && capacity == 0);
         return reserve(n);
     }
 
     void cleanup()
     {
-        assert((ptr == nullptr && num == 0) || (ptr != nullptr && num > 0));
+        assert((ptr == nullptr && capacity == 0) || (ptr != nullptr && capacity > 0));
+        assert(size <= capacity);
         if (ptr != nullptr) {
             Allocator::free(ptr);
             ptr = nullptr;
         }
-        num = 0;
+        size     = 0;
+        capacity = 0;
     }
+
+    [[nodiscard]] jpeggpu_status resize(int n)
+    {
+        assert((ptr == nullptr && capacity == 0) || (ptr != nullptr && capacity > 0));
+        const jpeggpu_status status = reserve(n);
+        if (status != JPEGGPU_SUCCESS) {
+            return status;
+        }
+        size = n;
+        return JPEGGPU_SUCCESS;
+    }
+
+    void clear() { size = 0; }
 
     [[nodiscard]] jpeggpu_status reserve(int n)
     {
-        assert((ptr == nullptr && num == 0) || (ptr != nullptr && num > 0));
-        if (num <= n) {
+        assert((ptr == nullptr && capacity == 0) || (ptr != nullptr && capacity > 0));
+        assert(size <= capacity);
+        if (n <= capacity) {
             return JPEGGPU_SUCCESS;
         }
 
@@ -86,34 +102,40 @@ struct list {
             return JPEGGPU_OUT_OF_HOST_MEMORY;
         }
 
-        if (n > 0) {
-            std::memcpy(ptr_new, ptr, num * sizeof(T));
+        if (size > 0) {
+            std::memcpy(ptr_new, ptr, size * sizeof(T));
+        }
+
+        if (capacity > 0) {
             Allocator::free(ptr);
         }
 
-        ptr = ptr_new;
+        ptr      = ptr_new;
+        capacity = n;
+
         return JPEGGPU_SUCCESS;
     }
 
     T& operator[](int n)
     {
-        assert(0 <= n && n < num);
+        assert(0 <= n && n < size);
         return ptr[n];
     }
 
     const T& operator[](int n) const
     {
-        assert(0 <= n && n < num);
+        assert(0 <= n && n < size);
         return ptr[n];
     }
 
-    int size() { return num; }
+    int get_size() const { return size; }
 
     // Using member initialization to prevent e.g. double `startup` call
     //   without needing an additional "is_initialized" variable. (Using asserts instead.)
 
-    T* ptr  = nullptr;
-    int num = 0;
+    T* ptr       = nullptr;
+    int size     = 0; /// Number of elements.
+    int capacity = 0; // Number of elements that can be held in `ptr`.
 };
 
 template <typename T>
