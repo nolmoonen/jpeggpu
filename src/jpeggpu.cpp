@@ -63,6 +63,7 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
+    // TODO does this need a try-catch when std::vector constructor fails?
     *decoder = new (std::nothrow) jpeggpu_decoder();
     if (*decoder == nullptr) {
         return JPEGGPU_OUT_OF_HOST_MEMORY;

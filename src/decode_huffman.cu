@@ -124,7 +124,24 @@ struct const_state {
 static_assert(std::is_trivially_copyable_v<const_state>);
 
 /// \brief Typedef for the maximum amount of Huffman tables for a scan.
-using huffman_tables = huffman_table[1 * HUFF_COUNT]; // FIXME
+using huffman_tables = huffman_table[4 * HUFF_COUNT];
+
+template <int block_size>
+__device__ void load_huffman_table(const huffman_table& table_global, huffman_table& table_shared)
+{
+    // assert that loading a word at a time is valid
+    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
+    constexpr int num_words = sizeof(huffman_table) / 4;
+    constexpr int num_words_per_thread =
+        ceiling_div(num_words, static_cast<unsigned int>(block_size));
+    for (int i = 0; i < num_words_per_thread; ++i) {
+        const int idx = block_size * i + threadIdx.x;
+        if (idx < num_words) {
+            reinterpret_cast<uint32_t*>(&table_shared)[idx] =
+                reinterpret_cast<const uint32_t*>(&table_global)[idx];
+        }
+    }
+}
 
 /// \brief Load Huffman tables from global memory into shared.
 ///
@@ -132,21 +149,17 @@ using huffman_tables = huffman_table[1 * HUFF_COUNT]; // FIXME
 ///   in the common case (one for luminance and one for chrominance),
 ///   this results in twice as many loads as needed
 template <int block_size>
-__device__ void load_huffman_tables(
-    const huffman_table* tables_global, huffman_tables& tables_shared)
+__device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
 {
-    // assert that loading a word at a time is valid
-    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
-    constexpr int num_words = sizeof(tables_shared) / 4;
-    constexpr int num_words_per_thread =
-        ceiling_div(num_words, static_cast<unsigned int>(block_size));
-    for (int i = 0; i < num_words_per_thread; ++i) {
-        const int idx = block_size * i + threadIdx.x;
-        if (idx < num_words) {
-            reinterpret_cast<uint32_t*>(tables_shared)[idx] =
-                reinterpret_cast<const uint32_t*>(tables_global)[idx];
-        }
-    }
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_0], tables_shared[0]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_0], tables_shared[1]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_1], tables_shared[2]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_1], tables_shared[3]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_2], tables_shared[4]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_2], tables_shared[5]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_3], tables_shared[6]);
+    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_3], tables_shared[7]);
+
     __syncthreads();
 }
 
@@ -369,9 +382,9 @@ __device__ subsequence_info decode_subsequence(
         if (!do_write) info.n += run_length + 1;
         info.z += run_length + 1;
 
-        if (info.z >= 64) {
+        if (info.z >= 64) { // FIMXE should be 64 - se or something
             // the data unit is complete
-            info.z = 0;
+            info.z = 0; // FIXME should be ss or something, other initialization points as well
             ++info.c;
 
             if (info.c >= cstate.num_data_units_in_mcu) {
@@ -402,7 +415,7 @@ __global__ void sync_intra_sequence(
     __shared__ subsequence_info s_info_shared[block_size];
 
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    load_huffman_tables<block_size>(cstate, tables);
 
     // Don't load all subsequences of the block into memory at the beginning as it
     //   hurts occupancy to have so much shared memory.
@@ -518,7 +531,7 @@ __global__ void sync_subsequences(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    load_huffman_tables<block_size>(cstate, tables);
 
     using reader_state = reader_state_thread_cache<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
@@ -613,7 +626,7 @@ __global__ void decode_write(
     const_state cstate)
 {
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    load_huffman_tables<block_size>(cstate, tables);
 
     using reader_state = reader_state_all_subsequences<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
@@ -698,162 +711,162 @@ jpeggpu_status jpeggpu::decode_scan(
     cudaStream_t stream,
     logger& logger)
 {
-    // // "N": number of subsequences, determined by JPEG stream
-    // const int num_subsequences = scan.num_subsequences;
+    // "N": number of subsequences, determined by JPEG stream
+    const int num_subsequences = scan.num_subsequences;
 
-    // // alg-1:01
-    // int num_data_units = 0;
-    // for (int c = 0; c < scan.num_components; ++c) {
-    //     const component& comp = info.components[scan.component_indices[c]];
-    //     num_data_units += (comp.data_size.x / jpeggpu::data_unit_vector_size) *
-    //                       (comp.data_size.y / jpeggpu::data_unit_vector_size);
-    // }
+    // alg-1:01
+    int num_data_units = 0;
+    for (int c = 0; c < scan.num_components; ++c) {
+        const scan_component& scan_comp = scan.scan_components[c];
+        num_data_units += (scan_comp.data_size.x / jpeggpu::data_unit_vector_size) *
+                          (scan_comp.data_size.y / jpeggpu::data_unit_vector_size);
+    }
 
-    // // alg-1:05
-    // subsequence_info* d_s_info;
-    // JPEGGPU_CHECK_STAT(
-    //     allocator.reserve<do_it>(&d_s_info, num_subsequences * sizeof(subsequence_info)));
+    // alg-1:05
+    subsequence_info* d_s_info;
+    JPEGGPU_CHECK_STAT(
+        allocator.reserve<do_it>(&d_s_info, num_subsequences * sizeof(subsequence_info)));
 
-    // // block count in MCU
-    // int c_offsets[max_comp_count] = {};
-    // int c_offset                  = 0;
-    // for (int c = 0; c < scan.num_components; ++c) {
-    //     const component& comp = info.components[scan.component_indices[c]];
-    //     c_offset += comp.ss.x * comp.ss.y;
-    //     c_offsets[c] = c_offset;
-    // }
+    // block count in MCU
+    int c_offsets[max_comp_count] = {};
+    int c_offset                  = 0;
+    for (int c = 0; c < scan.num_components; ++c) {
+        const component& comp = info.components[scan.scan_components[c].component_idx];
+        c_offset += comp.ss.x * comp.ss.y;
+        c_offsets[c] = c_offset;
+    }
 
-    // const const_state cstate = {
-    //     d_scan_destuffed,
-    //     // this is not the end of the destuffed data, but the end of the stuffed allocation.
-    //     //   the final subsequence may read garbage bits (but not bytes).
-    //     //   this can introduce additional (non-existent) symbols,
-    //     //   but a check is in place to prevent writing more symbols than needed
-    //     d_scan_destuffed + (scan.end - scan.begin),
-    //     d_segments,
-    //     d_segment_indices,
-    //     scan.num_segments,
-    //     d_huff_tables,
-    //     info.components[0].dc_idx,
-    //     info.components[0].ac_idx,
-    //     info.components[1].dc_idx,
-    //     info.components[1].ac_idx,
-    //     info.components[2].dc_idx,
-    //     info.components[2].ac_idx,
-    //     info.components[3].dc_idx,
-    //     info.components[3].ac_idx,
-    //     c_offsets[0],
-    //     c_offsets[1],
-    //     c_offsets[2],
-    //     c_offsets[3],
-    //     scan.num_data_units_in_mcu,
-    //     info.num_components,
-    //     num_data_units,
-    //     info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
+    const const_state cstate = {
+        d_scan_destuffed,
+        // this is not the end of the destuffed data, but the end of the stuffed allocation.
+        //   the final subsequence may read garbage bits (but not bytes).
+        //   this can introduce additional (non-existent) symbols,
+        //   but a check is in place to prevent writing more symbols than needed
+        d_scan_destuffed + (scan.end - scan.begin),
+        d_segments,
+        d_segment_indices,
+        scan.num_segments,
+        d_huff_tables,
+        scan.scan_components[0].dc_idx,
+        scan.scan_components[0].ac_idx,
+        scan.scan_components[1].dc_idx,
+        scan.scan_components[1].ac_idx,
+        scan.scan_components[2].dc_idx,
+        scan.scan_components[2].ac_idx,
+        scan.scan_components[3].dc_idx,
+        scan.scan_components[3].ac_idx,
+        c_offsets[0],
+        c_offsets[1],
+        c_offsets[2],
+        c_offsets[3],
+        scan.num_data_units_in_mcu,
+        info.num_components,
+        num_data_units,
+        info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
 
-    // // decode all subsequences
-    // // "b", sequence size in number of subsequences, configurable
-    // constexpr int num_subsequences_in_sequence = 256;
-    // // "B", number of sequences
-    // const int num_sequences =
-    //     ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
+    // decode all subsequences
+    // "b", sequence size in number of subsequences, configurable
+    constexpr int num_subsequences_in_sequence = 256;
+    // "B", number of sequences
+    const int num_sequences =
+        ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
 
-    // // synchronize intra sequence/inter subsequence
-    // if (do_it && num_subsequences > 1) {
-    //     logger.log(
-    //         "intra sync of %d blocks of %d subsequences\n",
-    //         num_sequences,
-    //         num_subsequences_in_sequence);
-    //     sync_intra_sequence<num_subsequences_in_sequence>
-    //         <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-    //             d_s_info, num_subsequences, cstate);
-    //     JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    // }
+    // synchronize intra sequence/inter subsequence
+    if (do_it && num_subsequences > 1) {
+        logger.log(
+            "intra sync of %d blocks of %d subsequences\n",
+            num_sequences,
+            num_subsequences_in_sequence);
+        sync_intra_sequence<num_subsequences_in_sequence>
+            <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
+                d_s_info, num_subsequences, cstate);
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    }
 
-    // // synchronize intra supersequence/inter sequence
-    // constexpr int num_sequences_in_supersequence = 512; // configurable
-    // const int num_supersequences =
-    //     ceiling_div(num_sequences, static_cast<unsigned int>(num_sequences_in_supersequence));
-    // if (do_it && num_sequences > 1) {
-    //     logger.log(
-    //         "intra sync of %d blocks of %d subsequences\n",
-    //         num_supersequences,
-    //         num_sequences_in_supersequence * num_subsequences_in_sequence);
-    //     sync_subsequences<num_subsequences_in_sequence, num_sequences_in_supersequence>
-    //         <<<num_supersequences, num_sequences_in_supersequence, 0, stream>>>(
-    //             d_s_info, num_subsequences, cstate);
-    //     JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    // }
+    // synchronize intra supersequence/inter sequence
+    constexpr int num_sequences_in_supersequence = 512; // configurable
+    const int num_supersequences =
+        ceiling_div(num_sequences, static_cast<unsigned int>(num_sequences_in_supersequence));
+    if (do_it && num_sequences > 1) {
+        logger.log(
+            "intra sync of %d blocks of %d subsequences\n",
+            num_supersequences,
+            num_sequences_in_supersequence * num_subsequences_in_sequence);
+        sync_subsequences<num_subsequences_in_sequence, num_sequences_in_supersequence>
+            <<<num_supersequences, num_sequences_in_supersequence, 0, stream>>>(
+                d_s_info, num_subsequences, cstate);
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    }
 
-    // if (num_supersequences > num_sequences_in_supersequence) {
-    //     constexpr int max_byte_size =
-    //         subsequence_size_bytes * num_subsequences_in_sequence * num_sequences_in_supersequence;
-    //     logger.log("byte stream is larger than max supported (%d bytes)\n", max_byte_size);
-    //     return JPEGGPU_NOT_SUPPORTED;
-    // }
+    if (num_supersequences > num_sequences_in_supersequence) {
+        constexpr int max_byte_size =
+            subsequence_size_bytes * num_subsequences_in_sequence * num_sequences_in_supersequence;
+        logger.log("byte stream is larger than max supported (%d bytes)\n", max_byte_size);
+        return JPEGGPU_NOT_SUPPORTED;
+    }
 
-    // // TODO consider SoA or do in-place
-    // // alg-1:07-08
-    // subsequence_info* d_reduce_out;
-    // JPEGGPU_CHECK_STAT(
-    //     allocator.reserve<do_it>(&d_reduce_out, num_subsequences * sizeof(subsequence_info)));
-    // if (do_it) {
-    //     // TODO debug to satisfy initcheck
-    //     JPEGGPU_CHECK_CUDA(
-    //         cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
-    // }
+    // TODO consider SoA or do in-place
+    // alg-1:07-08
+    subsequence_info* d_reduce_out;
+    JPEGGPU_CHECK_STAT(
+        allocator.reserve<do_it>(&d_reduce_out, num_subsequences * sizeof(subsequence_info)));
+    if (do_it) {
+        // TODO debug to satisfy initcheck
+        JPEGGPU_CHECK_CUDA(
+            cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
+    }
 
-    // const subsequence_info init_value{0, 0, 0, 0};
-    // void* d_tmp_storage      = nullptr;
-    // size_t tmp_storage_bytes = 0;
-    // JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
-    //     d_tmp_storage,
-    //     tmp_storage_bytes,
-    //     d_segment_indices, // d_keys_in
-    //     d_s_info,
-    //     d_reduce_out,
-    //     sum_subsequence_info{},
-    //     init_value,
-    //     num_subsequences,
-    //     cub::Equality{},
-    //     stream));
+    const subsequence_info init_value{0, 0, 0, 0};
+    void* d_tmp_storage      = nullptr;
+    size_t tmp_storage_bytes = 0;
+    JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
+        d_tmp_storage,
+        tmp_storage_bytes,
+        d_segment_indices, // d_keys_in
+        d_s_info,
+        d_reduce_out,
+        sum_subsequence_info{},
+        init_value,
+        num_subsequences,
+        cub::Equality{},
+        stream));
 
-    // JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes));
-    // if (do_it) {
-    //     // TODO debug to satisfy initcheck
-    //     JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
-    // }
+    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes));
+    if (do_it) {
+        // TODO debug to satisfy initcheck
+        JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_tmp_storage, 0, tmp_storage_bytes, stream));
+    }
 
-    // if (do_it) {
-    //     JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
-    //         d_tmp_storage,
-    //         tmp_storage_bytes,
-    //         d_segment_indices, // d_keys_in
-    //         d_s_info,
-    //         d_reduce_out,
-    //         sum_subsequence_info{},
-    //         init_value,
-    //         num_subsequences,
-    //         cub::Equality{},
-    //         stream));
-    // }
+    if (do_it) {
+        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
+            d_tmp_storage,
+            tmp_storage_bytes,
+            d_segment_indices, // d_keys_in
+            d_s_info,
+            d_reduce_out,
+            sum_subsequence_info{},
+            init_value,
+            num_subsequences,
+            cub::Equality{},
+            stream));
+    }
 
-    // constexpr int block_size_assign = 256;
-    // const int grid_dim =
-    //     ceiling_div(num_subsequences, static_cast<unsigned int>(block_size_assign));
-    // if (do_it) {
-    //     assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
-    //         num_subsequences, d_s_info, d_reduce_out);
-    //     JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    // }
+    constexpr int block_size_assign = 256;
+    const int grid_dim =
+        ceiling_div(num_subsequences, static_cast<unsigned int>(block_size_assign));
+    if (do_it) {
+        assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
+            num_subsequences, d_s_info, d_reduce_out);
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    }
 
-    // if (do_it) {
-    //     // alg-1:09-15
-    //     decode_write<num_subsequences_in_sequence>
-    //         <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-    //             d_out, d_s_info, num_subsequences, cstate);
-    //     JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    // }
+    if (do_it) {
+        // alg-1:09-15
+        decode_write<num_subsequences_in_sequence>
+            <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
+                d_out, d_s_info, num_subsequences, cstate);
+        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    }
 
     return JPEGGPU_SUCCESS;
 }

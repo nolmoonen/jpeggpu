@@ -21,7 +21,6 @@
 #ifndef JPEGGPU_DECODER_HPP_
 #define JPEGGPU_DECODER_HPP_
 
-#include "list.hpp"
 #include "logger.hpp"
 #include "reader.hpp"
 
@@ -30,6 +29,7 @@
 #include <cstdarg>
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
 
 namespace jpeggpu {
 
@@ -52,7 +52,7 @@ struct decoder {
 
     struct reader reader;
 
-    list<segment*> d_segments;
+    std::vector<segment*> d_segments;
 
     /// \brief Output of decoding, quantized and cosine-transformed image data.
     ///   Allocation does not persist with the decoder state since the size depends on input image.

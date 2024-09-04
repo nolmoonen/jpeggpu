@@ -142,70 +142,75 @@ jpeggpu_status jpeggpu::decode_transpose(
     cudaStream_t stream,
     logger& logger)
 {
-//     const component(&comps)[max_comp_count] = info.components;
-//     const int(&indices)[max_comp_count]     = scan.component_indices;
-//     const int num_components                = scan.num_components;
+    const component(&comps)[max_comp_count]                = info.components;
+    const scan_component(&scan_components)[max_comp_count] = scan.scan_components;
+    const int num_components                               = scan.num_components;
 
-//     const size_t total_data_size =
-//         (num_components > 0 ? comps[indices[0]].data_size.x * comps[indices[0]].data_size.y : 0) +
-//         (num_components > 1 ? comps[indices[1]].data_size.x * comps[indices[1]].data_size.y : 0) +
-//         (num_components > 2 ? comps[indices[2]].data_size.x * comps[indices[2]].data_size.y : 0) +
-//         (num_components > 3 ? comps[indices[3]].data_size.x * comps[indices[3]].data_size.y : 0);
+    const size_t total_data_size =
+        (num_components > 0 ? scan_components[0].data_size.x * scan_components[0].data_size.y : 0) +
+        (num_components > 1 ? scan_components[1].data_size.x * scan_components[1].data_size.y : 0) +
+        (num_components > 2 ? scan_components[2].data_size.x * scan_components[2].data_size.y : 0) +
+        (num_components > 3 ? scan_components[3].data_size.x * scan_components[3].data_size.y : 0);
 
-//     const dim3 transpose_block_dim(256);
-//     const dim3 transpose_grid_dim(ceiling_div(
-//         total_data_size / num_values_per_thread, static_cast<unsigned int>(transpose_block_dim.x)));
+    const dim3 transpose_block_dim(256);
+    const dim3 transpose_grid_dim(ceiling_div(
+        total_data_size / num_values_per_thread, static_cast<unsigned int>(transpose_block_dim.x)));
 
-// // Provide the num_data_units_in_mcu as a compile-time constant so the compiler can generate efficient
-// //   division and modulo instructions.
-// #define DISPATCH(NUM_DATA_UNITS_IN_MCU)                                     \
-//     transpose_interleaved<NUM_DATA_UNITS_IN_MCU>                            \
-//         <<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(           \
-//             d_out,                                                          \
-//             num_components > 0 ? d_image_qdct[indices[0]] : nullptr,        \
-//             num_components > 1 ? d_image_qdct[indices[1]] : nullptr,        \
-//             num_components > 2 ? d_image_qdct[indices[2]] : nullptr,        \
-//             num_components > 3 ? d_image_qdct[indices[3]] : nullptr,        \
-//             total_data_size,                                                \
-//             num_components > 0 ? comps[indices[0]].data_size : ivec2{0, 0}, \
-//             num_components > 1 ? comps[indices[1]].data_size : ivec2{0, 0}, \
-//             num_components > 2 ? comps[indices[2]].data_size : ivec2{0, 0}, \
-//             num_components > 3 ? comps[indices[3]].data_size : ivec2{0, 0}, \
-//             scan.num_mcus.x,                                                \
-//             num_components > 0 ? comps[indices[0]].ss : ivec2{0, 0},        \
-//             num_components > 1 ? comps[indices[1]].ss : ivec2{0, 0},        \
-//             num_components > 2 ? comps[indices[2]].ss : ivec2{0, 0},        \
-//             num_components > 3 ? comps[indices[3]].ss : ivec2{0, 0});       \
-//     JPEGGPU_CHECK_CUDA(cudaGetLastError());                                 \
-//     return JPEGGPU_SUCCESS;
+    const int comp_idx_0 = scan_components[0].component_idx;
+    const int comp_idx_1 = scan_components[1].component_idx;
+    const int comp_idx_2 = scan_components[2].component_idx;
+    const int comp_idx_3 = scan_components[3].component_idx;
 
-//     JPEGGPU_CHECK_STAT([&]() -> jpeggpu_status {
-//         // Specification states this should be in [1, 10], see SOS read function.
-//         switch (scan.num_data_units_in_mcu) {
-//         case 1:
-//             DISPATCH(1);
-//         case 2:
-//             DISPATCH(2);
-//         case 3:
-//             DISPATCH(3);
-//         case 4:
-//             DISPATCH(4);
-//         case 5:
-//             DISPATCH(5);
-//         case 6:
-//             DISPATCH(6);
-//         case 7:
-//             DISPATCH(7);
-//         case 8:
-//             DISPATCH(8);
-//         case 9:
-//             DISPATCH(9);
-//         case 10:
-//             DISPATCH(10);
-//         }
-//         return JPEGGPU_INTERNAL_ERROR;
-//     }());
-// #undef DISPATCH
+// Provide the num_data_units_in_mcu as a compile-time constant so the compiler can generate efficient
+//   division and modulo instructions.
+#define DISPATCH(NUM_DATA_UNITS_IN_MCU)                                         \
+    transpose_interleaved<NUM_DATA_UNITS_IN_MCU>                                \
+        <<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(               \
+            d_out,                                                              \
+            num_components > 0 ? d_image_qdct[comp_idx_0] : nullptr,            \
+            num_components > 1 ? d_image_qdct[comp_idx_1] : nullptr,            \
+            num_components > 2 ? d_image_qdct[comp_idx_2] : nullptr,            \
+            num_components > 3 ? d_image_qdct[comp_idx_3] : nullptr,            \
+            total_data_size,                                                    \
+            num_components > 0 ? comps[comp_idx_0].max_data_size : ivec2{0, 0}, \
+            num_components > 1 ? comps[comp_idx_1].max_data_size : ivec2{0, 0}, \
+            num_components > 2 ? comps[comp_idx_2].max_data_size : ivec2{0, 0}, \
+            num_components > 3 ? comps[comp_idx_3].max_data_size : ivec2{0, 0}, \
+            scan.num_mcus.x,                                                    \
+            num_components > 0 ? comps[comp_idx_0].ss : ivec2{0, 0},            \
+            num_components > 1 ? comps[comp_idx_1].ss : ivec2{0, 0},            \
+            num_components > 2 ? comps[comp_idx_2].ss : ivec2{0, 0},            \
+            num_components > 3 ? comps[comp_idx_3].ss : ivec2{0, 0});           \
+    JPEGGPU_CHECK_CUDA(cudaGetLastError());                                     \
+    return JPEGGPU_SUCCESS;
+
+    JPEGGPU_CHECK_STAT([&]() -> jpeggpu_status {
+        // Specification states this should be in [1, 10], see SOS read function.
+        switch (scan.num_data_units_in_mcu) {
+        case 1:
+            DISPATCH(1);
+        case 2:
+            DISPATCH(2);
+        case 3:
+            DISPATCH(3);
+        case 4:
+            DISPATCH(4);
+        case 5:
+            DISPATCH(5);
+        case 6:
+            DISPATCH(6);
+        case 7:
+            DISPATCH(7);
+        case 8:
+            DISPATCH(8);
+        case 9:
+            DISPATCH(9);
+        case 10:
+            DISPATCH(10);
+        }
+        return JPEGGPU_INTERNAL_ERROR;
+    }());
+#undef DISPATCH
 
     return JPEGGPU_SUCCESS;
 }

@@ -22,6 +22,7 @@
 #define JPEGGPU_UTIL_HPP_
 
 #include <cassert>
+#include <limits>
 #include <type_traits>
 
 template <
@@ -84,6 +85,29 @@ struct stack_allocator {
 struct ivec2 {
     int x;
     int y;
+};
+
+template <class T>
+struct pinned_allocator {
+    using value_type = T;
+
+    [[nodiscard]] T* allocate(size_t n)
+    {
+        if (n > std::numeric_limits<size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+
+        T* ptr          = nullptr;
+        cudaError_t err = cudaMallocHost(&ptr, n * sizeof(T));
+        if (err != cudaSuccess || ptr == nullptr) {
+            if (ptr != nullptr) cudaFreeHost(ptr);
+            throw std::bad_alloc();
+        }
+
+        return ptr;
+    }
+
+    void deallocate(T* ptr, [[maybe_unused]] size_t n) noexcept { cudaFreeHost(ptr); }
 };
 
 } // namespace jpeggpu

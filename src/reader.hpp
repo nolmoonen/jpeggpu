@@ -22,7 +22,6 @@
 #define JPEGGPU_READER_HPP_
 
 #include "defs.hpp"
-#include "list.hpp"
 #include "logger.hpp"
 #include "marker.hpp"
 #include "util.hpp"
@@ -30,6 +29,7 @@
 #include <jpeggpu/jpeggpu.h>
 
 #include <stdint.h>
+#include <vector>
 
 namespace jpeggpu {
 
@@ -58,7 +58,6 @@ struct huffman_table {
 ///   tables may be redefined. Furthermore, MCU size etc. depends on whether the scan
 ///   is interleaved, but with progressive components may appear in multiple scans.
 struct scan_component {
-    uint8_t qtable_idx; /// Global index of quantization table.
     uint8_t dc_idx; /// Global index of DC Huffman table.
     uint8_t ac_idx; /// Global index of AC Huffman table.
     int component_idx; /// Index in component array.
@@ -99,17 +98,18 @@ struct component {
     ivec2 ss;
     /// \brief Sum of all `data_size` of components before this one in frame header.
     // int offset;
-    
+
     // FIXME pick up here
     //   there should be some max_data_size since data_size is a property of the scan
     //   we need a data_size since it reduces the bounds checking in the decode kernel (for MCU size and data_unit_size)
     //   furthermore, allows aligned loads and stores (data_unit_size)
+    ivec2 max_data_size;
 };
 
 // TODO an opaque pointer to this struct should be the result of `jpeggpu_decoder_parse_header`
 //   and passed to `jpeggpu_decoder_get_buffer_size`, `jpeggpu_decoder_transfer`, and `jpeggpu_decoder_decode`
 struct jpeg_stream {
-    list<scan> scans;
+    std::vector<scan> scans;
 
     ivec2 size; /// Actual image size in pixels.
     int num_components; ///< Number of image components.
@@ -117,16 +117,13 @@ struct jpeg_stream {
     // max of header-defined ss for each component, to calculate MCU size. 1, 2, or 4
     ivec2 ss_max;
 
-    size_t total_data_size;
-
     component components[max_comp_count];
 
     /// \brief Restart interval for differential DC encoding, in number of MCUs.
     ///   Zero if no restart interval is defined.
     int restart_interval;
-    int num_scans; /// Number of scans.
+    int num_scans; /// Number of scans. FIXME double defined with `scans.get_size()`
     int cnt_huff; /// Number of DC and AC Huffman tables.
-    int cnt_qtab; /// Number of quantization tables.
 };
 
 /// \brief Whether JPEG stream is sequential. Alternative is progressive.
@@ -175,21 +172,20 @@ struct reader {
 
         static constexpr int idx_not_defined = -1;
         /// \brief For each DC Huffman table slot, the index of the last defined global table.
-        int curr_huff_dc[max_huffman_count_per_scan];
+        int curr_huff_dc[max_comp_count];
         /// \brief For each AC Huffman table slot, the index of the last defined global table.
-        int curr_huff_ac[max_huffman_count_per_scan];
-        /// \brief For each quantization table slot, the index of the last defined global table.
-        int curr_qtab[max_qtable_count_per_scan];
+        int curr_huff_ac[max_comp_count];
     } reader_state;
 
     size_t get_file_size() const { return reader_state.image_end - reader_state.image_begin; }
 
     /// \brief Quantization tables in pinned host memory in order of appearance in the JPEG stream.
-    pinned_list<qtable> h_qtables;
+    ///   Always `max_comp_count` elements.
+    std::vector<qtable, pinned_allocator<qtable>> h_qtables;
     /// \brief DC and AC Huffman tables in pinned host memory in order of appearance in the JPEG stream.
-    pinned_list<huffman_table> h_huff_tables;
+    std::vector<huffman_table, pinned_allocator<huffman_table>> h_huff_tables;
     /// \brief Segment info in pinned host memory. One entry per scan, multiple segment infos per scan.
-    list<pinned_list<segment>> h_scan_segments;
+    std::vector<std::vector<segment, pinned_allocator<segment>>> h_scan_segments;
 };
 
 inline int get_size(int size, int ss, int ss_max)

@@ -36,43 +36,18 @@ using namespace jpeggpu;
 
 jpeggpu_status reader::startup()
 {
-    jpeggpu_status status = JPEGGPU_SUCCESS;
-    if ((status = h_qtables.startup(max_qtable_count_per_scan)) != JPEGGPU_SUCCESS) {
-        goto fail_h_qtables;
-    }
-    if ((status = h_huff_tables.startup(2 * max_huffman_count_per_scan)) != JPEGGPU_SUCCESS) {
-        goto fail_h_huff_tables;
-    }
-    // TODO evaluate below heuristic sizes
-    if ((status = h_scan_segments.startup(1)) != JPEGGPU_SUCCESS) {
-        goto fail_h_segments;
-    }
-    if ((status = jpeg_stream.scans.startup(4)) != JPEGGPU_SUCCESS) {
-        goto fail_scans;
+    try {
+        h_qtables.resize(4);
+        h_huff_tables.reserve(2 * max_comp_count);
+        h_scan_segments.reserve(4);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
     }
 
     return JPEGGPU_SUCCESS;
-
-fail_scans:
-    h_scan_segments.cleanup();
-fail_h_segments:
-    h_huff_tables.cleanup();
-fail_h_huff_tables:
-    h_qtables.cleanup();
-fail_h_qtables:
-    return status;
 }
 
-void reader::cleanup()
-{
-    jpeg_stream.scans.cleanup();
-    for (int i = 0; i < h_scan_segments.get_size(); ++i) {
-        h_scan_segments[i].cleanup();
-    }
-    h_scan_segments.cleanup();
-    h_huff_tables.cleanup();
-    h_qtables.cleanup();
-}
+void reader::cleanup() {}
 
 uint8_t jpeggpu::reader::read_uint8() { return *(reader_state.image++); }
 
@@ -246,7 +221,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             return JPEGGPU_INVALID_JPEG;
         }
         const bool is_dc = tc == 0;
-        if (th >= max_huffman_count_per_scan) {
+        if (th > 3) {
             logger.log("\tHuffman table index must be 0, 1, 2, or 3\n");
             return JPEGGPU_NOT_SUPPORTED;
         }
@@ -260,7 +235,11 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
 
         const int idx = jpeg_stream.cnt_huff++;
         (is_dc ? reader_state.curr_huff_dc : reader_state.curr_huff_ac)[th] = idx;
-        JPEGGPU_CHECK_STAT(h_huff_tables.resize(jpeg_stream.cnt_huff));
+        try {
+            h_huff_tables.resize(jpeg_stream.cnt_huff);
+        } catch (const std::exception& e) {
+            return JPEGGPU_OUT_OF_HOST_MEMORY;
+        }
         huffman_table& table = h_huff_tables[idx];
 
         /// num_codes[i] is # of symbols with codes of i + 1 bits
@@ -306,7 +285,11 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     }
 
     const int scan_idx = jpeg_stream.num_scans++;
-    JPEGGPU_CHECK_STAT(jpeg_stream.scans.resize(jpeg_stream.num_scans));
+    try {
+        jpeg_stream.scans.resize(jpeg_stream.num_scans);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
     scan& scan = jpeg_stream.scans[scan_idx];
 
     const uint16_t length        = read_uint16();
@@ -372,16 +355,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         scan_component.dc_idx = id_dc_global;
         scan_component.ac_idx = id_ac_global;
 
-        const component& comp = jpeg_stream.components[component_idx];
-
-        // Determine global quantization table index
-        const int id_qtable        = comp.qtable_idx;
-        const int id_qtable_global = reader_state.curr_qtab[id_qtable];
-        if (id_qtable == reader_state::idx_not_defined) {
-            logger.log("\tQuantization table not defined\n");
-            return JPEGGPU_INVALID_JPEG;
-        }
-        scan_component.qtable_idx = id_qtable_global;
+        component& comp = jpeg_stream.components[component_idx];
 
         // Calculate size properties
 
@@ -412,6 +386,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             scan_component.data_size.y, static_cast<unsigned int>(scan_component.mcu_size.y));
 
         scan.num_data_units_in_mcu += comp.ss.x * comp.ss.y;
+        comp.max_data_size.x = std::max(comp.max_data_size.x, scan_component.data_size.x);
+        comp.max_data_size.y = std::max(comp.max_data_size.y, scan_component.data_size.y);
     }
 
     if (10 < scan.num_data_units_in_mcu) {
@@ -463,8 +439,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     // Now comes the encoded data: skip through and keep track of segments.
 
     assert(scan_idx + 1 == jpeg_stream.num_scans);
-    JPEGGPU_CHECK_STAT(h_scan_segments.resize(jpeg_stream.num_scans));
-    pinned_list<segment>& h_segments = h_scan_segments[scan_idx];
+    try {
+        h_scan_segments.resize(jpeg_stream.num_scans);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    std::vector<segment, pinned_allocator<segment>>& h_segments = h_scan_segments[scan_idx];
 
     // TODO catch exception or calculate size beforehand and not use vector
     std::vector<segment> segments;
@@ -508,8 +488,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     scan.begin = scan_begin;
     scan.end   = reader_state.image - reader_state.image_begin;
 
-    // JPEGGPU_CHECK_STAT(h_segments.startup(scan.num_segments)); // FIXME
-    // std::memcpy(h_segments.ptr, segments.data(), scan.num_segments * sizeof(segment));
+    try {
+        h_segments.resize(scan.num_segments);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    std::memcpy(h_segments.data(), segments.data(), scan.num_segments * sizeof(segment));
 
     return JPEGGPU_SUCCESS;
 }
@@ -543,11 +527,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             return JPEGGPU_NOT_SUPPORTED;
         }
 
-        const int idx              = jpeg_stream.cnt_qtab++;
-        reader_state.curr_qtab[id] = idx;
-        JPEGGPU_CHECK_STAT(h_qtables.resize(jpeg_stream.cnt_qtab));
-        qtable& table = h_qtables[idx];
-
+        qtable& table = h_qtables[id];
         for (int j = 0; j < 64; ++j) {
             // element in zigzag order
             const uint8_t element = read_uint8();
@@ -605,8 +585,6 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
 
 jpeggpu_status jpeggpu::reader::read(logger& logger)
 {
-    jpeg_stream.total_data_size = 0;
-
     uint8_t marker_soi{};
     JPEGGPU_CHECK_STAT(read_marker(marker_soi, logger));
     logger.log("%s\n", jpeggpu::get_marker_string(marker_soi));
@@ -663,8 +641,6 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
 
     // TODO check that all qtables are found
 
-    // TODO check that all huffman tables are found
-
     // Check that all components are found
     if (!reader_state.found_sof) return JPEGGPU_INVALID_JPEG;
     if (is_sequential(reader_state.sof_marker)) {
@@ -711,21 +687,31 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
     reader_state.image       = image;
     reader_state.image_begin = image;
     reader_state.image_end   = image_end;
-    for (int i = 0; i < max_huffman_count_per_scan; ++i) {
+    for (int i = 0; i < max_comp_count; ++i) {
         reader_state.curr_huff_dc[i] = reader_state::idx_not_defined;
         reader_state.curr_huff_ac[i] = reader_state::idx_not_defined;
     }
-    for (int i = 0; i < max_qtable_count_per_scan; ++i) {
-        reader_state.curr_qtab[i] = reader_state::idx_not_defined;
+
+    // clear jpeg stream
+    jpeg_stream.scans.clear();
+    jpeg_stream.size           = ivec2{0, 0};
+    jpeg_stream.num_components = 0;
+    jpeg_stream.ss_max         = ivec2{0, 0};
+    for (int c = 0; c < max_comp_count; ++c) {
+        jpeg_stream.components[c].id            = 0;
+        jpeg_stream.components[c].qtable_idx    = 0;
+        jpeg_stream.components[c].size          = ivec2{0, 0};
+        jpeg_stream.components[c].ss            = ivec2{0, 0};
+        jpeg_stream.components[c].max_data_size = ivec2{0, 0};
     }
-    jpeg_stream.cnt_huff = 0;
-    jpeg_stream.cnt_qtab = 0;
+    jpeg_stream.restart_interval = 0;
+    jpeg_stream.num_scans        = 0;
+    jpeg_stream.cnt_huff         = 0;
 
     // clear remaining state
-    // std::memset(&jpeg_stream, 0, sizeof(jpeg_stream)); FIXME cannot memset
-    h_qtables.clear();
+    std::memset(h_qtables.data(), 0, h_qtables.size() * sizeof(decltype(h_qtables)::value_type));
     h_huff_tables.clear();
-    for (int i = 0; i < h_scan_segments.get_size(); ++i) {
+    for (int i = 0; i < static_cast<int>(h_scan_segments.size()); ++i) {
         h_scan_segments[i].clear();
     }
     h_scan_segments.clear();

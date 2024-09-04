@@ -71,11 +71,6 @@ constexpr int data_unit_vector_size = 8;
 /// \brief The number of pixels in a data units, 64.
 constexpr int data_unit_size = 64;
 
-/// \brief Maximum number of Huffman tables that can be defined per scan.
-///
-/// A Huffman table can be defined as one of four possible indices, tables
-///   may be redefined between scans.
-constexpr int max_huffman_count_per_scan = 4;
 /// as defined by jpeg spec
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
 
