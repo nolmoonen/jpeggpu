@@ -22,4 +22,4 @@
 
 using namespace jpeggpu;
 
-bool jpeggpu::is_debug;
+bool jpeggpu::is_debug = true; // FIXME

@@ -235,37 +235,38 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
     }
 
-    size_t total_data_size = 0;
-    for (int c = 0; c < info.num_components; ++c) {
-        total_data_size += info.components[c].max_data_size.x * info.components[c].max_data_size.y;
-    }
-    int16_t* d_out;
-    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_out, total_data_size * sizeof(int16_t)));
-
-    // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
-    //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
-
-    // destuff the scan and decode the Huffman stream
-    for (int c = 0; c < info.num_scans; ++c) {
-        const scan& scan = info.scans[c];
-
-        // FIXME reuse d_out for every scan, so it must be reset to zero each time.
-        //   This is done because the assumption that the scan of the info.n field
-        //   writes contiguous isn't really true if e.g. scan0 is comp0 and comp2
-        //   and scan1 is comp1 and comp3.
-
+    std::vector<int16_t*> d_scan_out(info.num_scans);
+    for (int s = 0; s < info.num_scans; ++s) {
+        const scan& scan       = info.scans[s];
+        size_t total_data_size = 0;
+        for (int c = 0; c < scan.num_components; ++c) {
+            const scan_component& scan_comp = scan.scan_components[c];
+            total_data_size += scan_comp.data_size.x * scan_comp.data_size.y;
+        }
+        JPEGGPU_CHECK_STAT(
+            allocator.reserve<do_it>(&(d_scan_out[s]), total_data_size * sizeof(int16_t)));
         if (do_it) {
             // initialize to zero, since only non-zeros are written by Huffman decoding
             JPEGGPU_CHECK_CUDA(
-                cudaMemsetAsync(d_out, 0, total_data_size * sizeof(int16_t), stream));
+                cudaMemsetAsync(d_scan_out[s], 0, total_data_size * sizeof(int16_t), stream));
         }
+    }
 
-        uint8_t* d_scan_destuffed = nullptr;
+    // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
+    //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
+    //   Though progressive scans will complicate this somewhat as they could need to be outputting to the same
+    //   buffer? TODO make this message concrete once progressive is implemented
+
+    // destuff the scan and decode the Huffman stream
+    for (int s = 0; s < info.num_scans; ++s) {
+        const scan& scan = info.scans[s];
+
         // all subsequences are "rounded up" in size, which allows for easier offset
         //   calculations in the Huffman decoder
         const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
-        // scan should be properly aligned by allocator to do optimized reads
+        // scan should be properly aligned by allocator (so separate allocations) to do optimized reads
         //   (reading more bytes than one at a time) in the Huffman decoder
+        uint8_t* d_scan_destuffed = nullptr;
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
 
         // for each subsequence, its segment
@@ -278,7 +279,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             info,
             d_scan,
             d_scan_destuffed,
-            d_segments[c],
+            d_segments[s],
             d_segment_indices,
             scan,
             allocator,
@@ -288,14 +289,17 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
             info,
             d_scan_destuffed,
-            d_segments[c],
+            d_segments[s],
             d_segment_indices,
-            d_out,
+            d_scan_out[s],
             scan,
             d_huff_tables,
             allocator,
             stream,
             logger));
+
+        // FIXME currently progressive scans overwrite the `d_image_qdct` buffer
+        //   however, sequential scans also don't work
 
         // TODO is "data unit" the correct terminology?
 
@@ -304,12 +308,15 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 
         // Convert data order from data unit at a time to raster order,
         //   and place the components from scan order to frame order.
-        JPEGGPU_CHECK_STAT(decode_transpose(info, d_out, scan, d_image_qdct, stream, logger));
-    }
+        if (do_it) {
+            JPEGGPU_CHECK_STAT(
+                decode_transpose(info, d_scan_out[s], scan, d_image_qdct, stream, logger));
+        }
 
-    // FIXME need to rewrite this bit to do the diff decoding on d_image_qdct
-    // undo DC difference encoding
-    // JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, info.scans[c], d_out, allocator, stream, logger));
+        // FIXME only do this for scans that have DC
+        // undo DC difference encoding
+        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out[s], allocator, stream, logger));
+    }
 
     if (do_it) {
         // invert DCT and output directly into user-provided buffer

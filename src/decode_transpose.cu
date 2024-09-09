@@ -51,6 +51,11 @@ __global__ void transpose_interleaved(
     ivec2 size_1,
     ivec2 size_2,
     ivec2 size_3,
+    /// TODO
+    ivec2 max_size_0,
+    ivec2 max_size_1,
+    ivec2 max_size_2,
+    ivec2 max_size_3,
     int data_size_mcu_x, /// Number of MCUs in a row.
     ivec2 ss_0, /// Subsampling factor of first component, as defined in JPEG header.
     ivec2 ss_1,
@@ -72,6 +77,7 @@ __global__ void transpose_interleaved(
     int y_in_mcu = 0;
     ivec2 ss{0, 0};
     ivec2 size{0, 0};
+    ivec2 max_size{0, 0};
     int16_t* data_out = nullptr;
     [&]() {
         int i = 0;
@@ -79,6 +85,7 @@ __global__ void transpose_interleaved(
         ss       = ss_0;
         data_out = data_out_0;
         size     = size_0;
+        max_size = max_size_0;
         for (y_in_mcu = 0; y_in_mcu < ss_0.y; ++y_in_mcu) {
             for (x_in_mcu = 0; x_in_mcu < ss_0.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
@@ -87,6 +94,7 @@ __global__ void transpose_interleaved(
         ss       = ss_1;
         data_out = data_out_1;
         size     = size_1;
+        max_size = max_size_1;
         for (y_in_mcu = 0; y_in_mcu < ss_1.y; ++y_in_mcu) {
             for (x_in_mcu = 0; x_in_mcu < ss_1.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
@@ -95,6 +103,7 @@ __global__ void transpose_interleaved(
         ss       = ss_2;
         data_out = data_out_2;
         size     = size_2;
+        max_size = max_size_2;
         for (y_in_mcu = 0; y_in_mcu < ss_2.y; ++y_in_mcu) {
             for (x_in_mcu = 0; x_in_mcu < ss_2.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
@@ -103,6 +112,7 @@ __global__ void transpose_interleaved(
         ss       = ss_3;
         data_out = data_out_3;
         size     = size_3;
+        max_size = max_size_3;
         for (y_in_mcu = 0; y_in_mcu < ss_3.y; ++y_in_mcu) {
             for (x_in_mcu = 0; x_in_mcu < ss_3.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
@@ -129,7 +139,7 @@ __global__ void transpose_interleaved(
     using load_type = uint4;
     static_assert(sizeof(load_type) == num_values_per_thread * sizeof(uint16_t));
     const load_type val = *reinterpret_cast<const load_type*>(data_in + idx_pixel_in);
-    *reinterpret_cast<load_type*>(data_out + y * size.x + x) = val;
+    *reinterpret_cast<load_type*>(data_out + y * max_size.x + x) = val;
 }
 
 } // namespace
@@ -172,6 +182,10 @@ jpeggpu_status jpeggpu::decode_transpose(
             num_components > 2 ? d_image_qdct[comp_idx_2] : nullptr,            \
             num_components > 3 ? d_image_qdct[comp_idx_3] : nullptr,            \
             total_data_size,                                                    \
+            num_components > 0 ? scan_components[0].data_size : ivec2{0, 0},    \
+            num_components > 1 ? scan_components[1].data_size : ivec2{0, 0},    \
+            num_components > 2 ? scan_components[2].data_size : ivec2{0, 0},    \
+            num_components > 3 ? scan_components[3].data_size : ivec2{0, 0},    \
             num_components > 0 ? comps[comp_idx_0].max_data_size : ivec2{0, 0}, \
             num_components > 1 ? comps[comp_idx_1].max_data_size : ivec2{0, 0}, \
             num_components > 2 ? comps[comp_idx_2].max_data_size : ivec2{0, 0}, \

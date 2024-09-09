@@ -460,29 +460,31 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             return JPEGGPU_INVALID_JPEG;
         }
 
+        // count bytes without marker
         num_bytes_in_segment += ret - reader_state.image;
 
-        reader_state.image   = ret + 1;
+        reader_state.image   = ret + 1; // skip to after 0xff
         const uint8_t marker = read_uint8();
+
         // `image` now points to after marker
         if (marker == 0) {
-            // stuffed byte
-            ++num_bytes_in_segment; // 0xff00 is replaced by 0x00
+            // stuffed byte: 0xff00 is replaced by 0x00, so one additional byte
+            ++num_bytes_in_segment;
             continue;
         }
 
-        if (jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7) {
-            const int num_subsequences = ceiling_div(
-                num_bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes));
-            segments.push_back({scan.num_subsequences, num_subsequences});
-            scan.num_subsequences += num_subsequences;
-            num_bytes_in_segment = 0;
-            ++scan.num_segments;
-            continue;
-        }
+        const bool is_rst = jpeggpu::MARKER_RST0 <= marker && marker <= jpeggpu::MARKER_RST7;
+        // Not a restart marker, so end of scan. Rewind 0xff and marker byte
+        if (!is_rst) reader_state.image -= 2;
 
-        // rewind 0xff and marker byte
-        reader_state.image -= 2;
+        const int num_subsequences =
+            ceiling_div(num_bytes_in_segment, static_cast<unsigned int>(subsequence_size_bytes));
+        segments.push_back({scan.num_subsequences, num_subsequences});
+        scan.num_subsequences += num_subsequences;
+        num_bytes_in_segment = 0;
+        ++scan.num_segments;
+
+        if (is_rst) continue;
         break;
     } while (reader_state.image < reader_state.image_end);
     scan.begin = scan_begin;

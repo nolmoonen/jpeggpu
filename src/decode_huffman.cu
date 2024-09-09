@@ -118,6 +118,8 @@ struct const_state {
     int num_components;
     int num_data_units;
     int num_mcus_in_segment;
+    int spectral_start;
+    int spectral_end;
 };
 // check that struct can be copied to device
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
@@ -132,7 +134,7 @@ __device__ void load_huffman_table(const huffman_table& table_global, huffman_ta
     // assert that loading a word at a time is valid
     static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
     constexpr int num_words = sizeof(huffman_table) / 4;
-    constexpr int num_words_per_thread =
+    constexpr int num_words_per_thread = // TODO not efficient since num_words < block_size
         ceiling_div(num_words, static_cast<unsigned int>(block_size));
     for (int i = 0; i < num_words_per_thread; ++i) {
         const int idx = block_size * i + threadIdx.x;
@@ -335,23 +337,18 @@ __device__ subsequence_info decode_subsequence(
         int length     = 0;
         int symbol     = 0;
         int run_length = 0;
-        int dc;
-        int ac;
+        int table_idx;
         if (info.c < cstate.c0_inc_prefix) {
-            dc = cstate.dc_0;
-            ac = cstate.ac_0;
+            table_idx = 0;
         } else if (info.c < cstate.c1_inc_prefix) {
-            dc = cstate.dc_1;
-            ac = cstate.ac_1;
+            table_idx = 1;
         } else if (info.c < cstate.c2_inc_prefix) {
-            dc = cstate.dc_2;
-            ac = cstate.ac_2;
+            table_idx = 2;
         } else {
-            dc = cstate.dc_3;
-            ac = cstate.ac_3;
+            table_idx = 3;
         }
-        const huffman_table& table_dc = tables[dc * HUFF_COUNT + HUFF_DC];
-        const huffman_table& table_ac = tables[ac * HUFF_COUNT + HUFF_AC];
+        const huffman_table& table_dc = tables[table_idx * HUFF_COUNT + HUFF_DC];
+        const huffman_table& table_ac = tables[table_idx * HUFF_COUNT + HUFF_AC];
 
         // decode_next_symbol uses at most 32 bits. if fewer than 32 bits are available, append with zeroes
         uint32_t data = load_32_bits(rstate);
@@ -382,10 +379,11 @@ __device__ subsequence_info decode_subsequence(
         if (!do_write) info.n += run_length + 1;
         info.z += run_length + 1;
 
-        if (info.z >= 64) { // FIMXE should be 64 - se or something
+        if (info.z >= cstate.spectral_end + 1) {
             // the data unit is complete
-            info.z = 0; // FIXME should be ss or something, other initialization points as well
+            info.z = cstate.spectral_start;
             ++info.c;
+            info.n += 63 - cstate.spectral_end;
 
             if (info.c >= cstate.num_data_units_in_mcu) {
                 // mcu is complete
@@ -454,9 +452,9 @@ __global__ void sync_intra_sequence(
         subsequence_info info;
         // start of i-th subsequence
         info.p = subeq_idx_begin_rel * subsequence_size;
-        info.n = 0;
+        info.n = cstate.spectral_start;
         info.c = 0;
-        info.z = 0;
+        info.z = cstate.spectral_start;
 
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
@@ -484,7 +482,7 @@ __global__ void sync_intra_sequence(
             old_info.p = s_info_shared[subseq_idx - 1 - block_off].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
-            old_info.n = 0;
+            old_info.n = cstate.spectral_start;
             old_info.c = s_info_shared[subseq_idx - 1 - block_off].c;
             old_info.z = s_info_shared[subseq_idx - 1 - block_off].z;
 
@@ -587,7 +585,7 @@ __global__ void sync_subsequences(
             old_info.p = s_info[subseq_idx - 1].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
-            old_info.n = 0;
+            old_info.n = cstate.spectral_start;
             old_info.c = s_info[subseq_idx - 1].c;
             old_info.z = s_info[subseq_idx - 1].z;
 
@@ -658,7 +656,7 @@ __global__ void decode_write(
         info.p = 0;
         // n is not used in writing
         info.c = 0;
-        info.z = 0;
+        info.z = cstate.spectral_start;
 
         decode_subsequence<do_write>(
             subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
@@ -762,7 +760,9 @@ jpeggpu_status jpeggpu::decode_scan(
         scan.num_data_units_in_mcu,
         info.num_components,
         num_data_units,
-        info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
+        info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y,
+        scan.spectral_start,
+        scan.spectral_end};
 
     // decode all subsequences
     // "b", sequence size in number of subsequences, configurable
