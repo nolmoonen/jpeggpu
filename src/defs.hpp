@@ -74,8 +74,6 @@ constexpr int data_unit_size = 64;
 /// as defined by jpeg spec
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
 
-constexpr int max_qtable_count_per_scan = 4;
-
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 

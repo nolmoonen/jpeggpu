@@ -249,7 +249,7 @@ jpeggpu_status jpeggpu::idct(
             info.components[c].max_data_size.y,
             info.components[c].size.x,
             info.components[c].size.y,
-            d_qtable[c]);
+            d_qtable[info.components[c].qtable_idx]);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
     return JPEGGPU_SUCCESS;

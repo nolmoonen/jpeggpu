@@ -151,7 +151,7 @@ enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder)
     }
 
     decoder->decoder.cleanup();
-    free(decoder);
+    delete decoder;
 
     return JPEGGPU_SUCCESS;
 }

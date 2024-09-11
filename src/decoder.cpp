@@ -76,12 +76,6 @@ jpeggpu_status jpeggpu::decoder::init()
     allocator = stack_allocator{};
     logger    = jpeggpu::logger{};
 
-    try {
-        d_segments.reserve(4);
-    } catch (const std::exception& e) {
-        return JPEGGPU_OUT_OF_HOST_MEMORY;
-    }
-
     return JPEGGPU_SUCCESS;
 }
 
@@ -147,7 +141,8 @@ jpeggpu_status reserve_transfer_data(
     d_huff_tables = nullptr;
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
         &d_huff_tables, reader.jpeg_stream.cnt_huff * sizeof(*d_huff_tables)));
-    for (int s = 0; s < static_cast<int>(d_segments.size()); ++s) {
+    assert(static_cast<int>(d_segments.size()) == reader.jpeg_stream.num_scans);
+    for (int s = 0; s < reader.jpeg_stream.num_scans; ++s) {
         d_segments[s] = nullptr;
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
             &(d_segments[s]), reader.jpeg_stream.scans[s].num_segments * sizeof(*(d_segments[s]))));
@@ -167,6 +162,7 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
     uint8_t* d_image_data             = nullptr;
     qtable* d_qtables[max_comp_count] = {};
     huffman_table* d_huff_tables      = nullptr;
+    std::vector<segment*> d_segments;
     try {
         d_segments.resize(info.num_scans);
     } catch (const std::exception& e) {
@@ -183,6 +179,7 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
         cudaMemcpyHostToDevice,
         stream));
     /// Huffman tables
+    assert(info.cnt_huff == static_cast<int>(reader.h_huff_tables.size()));
     JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
         d_huff_tables,
         reader.h_huff_tables.data(),
@@ -222,6 +219,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     uint8_t* d_image_data             = nullptr;
     qtable* d_qtables[max_comp_count] = {};
     huffman_table* d_huff_tables      = nullptr;
+    std::vector<segment*> d_segments;
     try {
         d_segments.resize(info.num_scans);
     } catch (const std::exception& e) {
@@ -230,12 +228,13 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     JPEGGPU_CHECK_STAT(reserve_transfer_data<do_it>(
         reader, allocator, d_image_data, d_qtables, d_huff_tables, d_segments));
 
+    // Output of decoding, quantized and cosine-transformed image data.
+    int16_t* d_image_qdct[max_comp_count] = {};
     for (int c = 0; c < info.num_components; ++c) {
         const size_t size = info.components[c].max_data_size.x * info.components[c].max_data_size.y;
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
     }
 
-    std::vector<int16_t*> d_scan_out(info.num_scans);
     for (int s = 0; s < info.num_scans; ++s) {
         const scan& scan       = info.scans[s];
         size_t total_data_size = 0;
@@ -243,23 +242,21 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             const scan_component& scan_comp = scan.scan_components[c];
             total_data_size += scan_comp.data_size.x * scan_comp.data_size.y;
         }
+        int16_t* d_scan_out = nullptr;
         JPEGGPU_CHECK_STAT(
-            allocator.reserve<do_it>(&(d_scan_out[s]), total_data_size * sizeof(int16_t)));
+            allocator.reserve<do_it>(&d_scan_out, total_data_size * sizeof(int16_t)));
         if (do_it) {
             // initialize to zero, since only non-zeros are written by Huffman decoding
             JPEGGPU_CHECK_CUDA(
-                cudaMemsetAsync(d_scan_out[s], 0, total_data_size * sizeof(int16_t), stream));
+                cudaMemsetAsync(d_scan_out, 0, total_data_size * sizeof(int16_t), stream));
         }
-    }
 
-    // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
-    //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
-    //   Though progressive scans will complicate this somewhat as they could need to be outputting to the same
-    //   buffer? TODO make this message concrete once progressive is implemented
+        // TODO if all scans are sequentially pushed through all destuff kernel stages and all decode stages,
+        //   instead of decoding each scan sequentially, could this improve performance due to less divergence?
+        //   Though progressive scans will complicate this somewhat as they could need to be outputting to the same
+        //   buffer? TODO make this message concrete once progressive is implemented
 
-    // destuff the scan and decode the Huffman stream
-    for (int s = 0; s < info.num_scans; ++s) {
-        const scan& scan = info.scans[s];
+        // destuff the scan and decode the Huffman stream
 
         // all subsequences are "rounded up" in size, which allows for easier offset
         //   calculations in the Huffman decoder
@@ -274,7 +271,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         JPEGGPU_CHECK_STAT(
             allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
 
-        const uint8_t* d_scan = d_image_data + scan.begin;
+        const uint8_t* const d_scan = d_image_data + scan.begin;
         JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
             info,
             d_scan,
@@ -291,7 +288,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             d_scan_destuffed,
             d_segments[s],
             d_segment_indices,
-            d_scan_out[s],
+            d_scan_out,
             scan,
             d_huff_tables,
             allocator,
@@ -306,16 +303,18 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
         //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
 
+        if (scan.spectral_start == 0) {
+            // undo DC difference encoding for scans that have DC
+            JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out, allocator, stream, logger));
+        }
+
         // Convert data order from data unit at a time to raster order,
         //   and place the components from scan order to frame order.
         if (do_it) {
             JPEGGPU_CHECK_STAT(
-                decode_transpose(info, d_scan_out[s], scan, d_image_qdct, stream, logger));
+                decode_transpose(info, d_scan_out, scan, d_image_qdct, stream, logger));
         }
-
-        // FIXME only do this for scans that have DC
-        // undo DC difference encoding
-        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out[s], allocator, stream, logger));
+        // FIXME fix scans one by one
     }
 
     if (do_it) {

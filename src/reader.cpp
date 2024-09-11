@@ -215,7 +215,6 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         --remaining;
         const int tc = index >> 4;
         const int th = index & 0xf;
-        // TODO check if these are already defined. if so, throw warning
         if (tc != 0 && tc != 1) {
             logger.log("\tinvalid Huffman table index\n");
             return JPEGGPU_INVALID_JPEG;
@@ -668,14 +667,6 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
     } else {
         // TODO check that all components are fully found (through multiple scans)
     }
-
-    // FIXME?
-    // int offset = 0;
-    // for (int c = 0; c < jpeg_stream.num_components; ++c) {
-    //     component& comp = jpeg_stream.components[c];
-    //     comp.offset     = offset;
-    //     offset += comp.data_size.x & comp.data_size.y;
-    // }
 
     return JPEGGPU_SUCCESS;
 }

@@ -99,8 +99,8 @@ struct component {
     /// \brief Sum of all `data_size` of components before this one in frame header.
     // int offset;
 
-    // FIXME pick up here
-    //   there should be some max_data_size since data_size is a property of the scan
+    // TODO this message
+    // some max_data_size since data_size is a property of the scan
     //   we need a data_size since it reduces the bounds checking in the decode kernel (for MCU size and data_unit_size)
     //   furthermore, allows aligned loads and stores (data_unit_size)
     ivec2 max_data_size;
@@ -123,7 +123,7 @@ struct jpeg_stream {
     ///   Zero if no restart interval is defined.
     int restart_interval;
     int num_scans; /// Number of scans. FIXME double defined with `scans.get_size()`
-    int cnt_huff; /// Number of DC and AC Huffman tables.
+    int cnt_huff; /// Number of DC and AC Huffman tables. // FIXME double defined
 };
 
 /// \brief Whether JPEG stream is sequential. Alternative is progressive.

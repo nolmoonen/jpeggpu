@@ -126,14 +126,14 @@ struct const_state {
 static_assert(std::is_trivially_copyable_v<const_state>);
 
 /// \brief Typedef for the maximum amount of Huffman tables for a scan.
-using huffman_tables = huffman_table[4 * HUFF_COUNT];
+using huffman_tables = huffman_table[max_comp_count * HUFF_COUNT];
 
 template <int block_size>
 __device__ void load_huffman_table(const huffman_table& table_global, huffman_table& table_shared)
 {
     // assert that loading a word at a time is valid
     static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
-    constexpr int num_words = sizeof(huffman_table) / 4;
+    constexpr int num_words            = sizeof(huffman_table) / 4;
     constexpr int num_words_per_thread = // TODO not efficient since num_words < block_size
         ceiling_div(num_words, static_cast<unsigned int>(block_size));
     for (int i = 0; i < num_words_per_thread; ++i) {
@@ -153,16 +153,18 @@ __device__ void load_huffman_table(const huffman_table& table_global, huffman_ta
 template <int block_size>
 __device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
 {
+    assert(cstate.num_components > 0);
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_0], tables_shared[0]);
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_0], tables_shared[1]);
+    if (cstate.num_components <= 1) return;
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_1], tables_shared[2]);
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_1], tables_shared[3]);
+    if (cstate.num_components <= 2) return;
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_2], tables_shared[4]);
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_2], tables_shared[5]);
+    if (cstate.num_components <= 3) return;
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_3], tables_shared[6]);
     load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_3], tables_shared[7]);
-
-    __syncthreads();
 }
 
 /// \brief Returns the oldest (most significant) `num_bits` from `data`.
@@ -384,6 +386,7 @@ __device__ subsequence_info decode_subsequence(
             info.z = cstate.spectral_start;
             ++info.c;
             info.n += 63 - cstate.spectral_end;
+            position_in_output += 63 - cstate.spectral_end;
 
             if (info.c >= cstate.num_data_units_in_mcu) {
                 // mcu is complete
@@ -414,6 +417,7 @@ __global__ void sync_intra_sequence(
 
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate, tables);
+    __syncthreads();
 
     // Don't load all subsequences of the block into memory at the beginning as it
     //   hurts occupancy to have so much shared memory.
@@ -530,6 +534,7 @@ __global__ void sync_subsequences(
 {
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate, tables);
+    __syncthreads();
 
     using reader_state = reader_state_thread_cache<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
@@ -629,6 +634,8 @@ __global__ void decode_write(
     using reader_state = reader_state_all_subsequences<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
     load_all_subsequences<block_size>(cstate.scan, num_subsequences, rstate_memory);
+
+    __syncthreads();
 
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {

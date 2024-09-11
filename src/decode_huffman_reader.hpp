@@ -220,7 +220,6 @@ __device__ void load_all_subsequences(
             rstate_memory[i]   = swap_endian(val);
         }
     }
-    __syncthreads();
 }
 
 template <int block_size>

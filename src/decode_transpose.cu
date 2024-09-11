@@ -60,7 +60,8 @@ __global__ void transpose_interleaved(
     ivec2 ss_0, /// Subsampling factor of first component, as defined in JPEG header.
     ivec2 ss_1,
     ivec2 ss_2,
-    ivec2 ss_3)
+    ivec2 ss_3,
+    int al)
 {
     const size_t idx_pixel_in = (blockIdx.x * blockDim.x + threadIdx.x) * num_values_per_thread;
 
@@ -136,10 +137,13 @@ __global__ void transpose_interleaved(
     const int x = x_data_unit * data_unit_vector_size + x_in_data_unit;
     const int y = y_data_unit * data_unit_vector_size + y_in_data_unit;
 
-    using load_type = uint4;
-    static_assert(sizeof(load_type) == num_values_per_thread * sizeof(uint16_t));
-    const load_type val = *reinterpret_cast<const load_type*>(data_in + idx_pixel_in);
-    *reinterpret_cast<load_type*>(data_out + y * max_size.x + x) = val;
+    // using load_type = uint4;
+    // static_assert(sizeof(load_type) == num_values_per_thread * sizeof(uint16_t));
+    // const load_type val = *reinterpret_cast<const load_type*>(data_in + idx_pixel_in);
+    // *reinterpret_cast<load_type*>(data_out + y * max_size.x + x) = val;
+    for (int i = 0; i < num_values_per_thread; ++i) {
+        data_out[y * max_size.x + x + i] |= data_in[idx_pixel_in + i] << al;
+    }
 }
 
 } // namespace
@@ -194,7 +198,8 @@ jpeggpu_status jpeggpu::decode_transpose(
             num_components > 0 ? comps[comp_idx_0].ss : ivec2{0, 0},            \
             num_components > 1 ? comps[comp_idx_1].ss : ivec2{0, 0},            \
             num_components > 2 ? comps[comp_idx_2].ss : ivec2{0, 0},            \
-            num_components > 3 ? comps[comp_idx_3].ss : ivec2{0, 0});           \
+            num_components > 3 ? comps[comp_idx_3].ss : ivec2{0, 0},            \
+            scan.successive_approx_hi);                                         \
     JPEGGPU_CHECK_CUDA(cudaGetLastError());                                     \
     return JPEGGPU_SUCCESS;
 

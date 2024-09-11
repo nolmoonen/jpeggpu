@@ -52,12 +52,6 @@ struct decoder {
 
     struct reader reader;
 
-    std::vector<segment*> d_segments;
-
-    /// \brief Output of decoding, quantized and cosine-transformed image data.
-    ///   Allocation does not persist with the decoder state since the size depends on input image.
-    int16_t* d_image_qdct[max_comp_count];
-
     /// \brief Keeps track of allocations for the current decoded image.
     stack_allocator allocator;
 
