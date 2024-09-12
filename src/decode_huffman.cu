@@ -150,21 +150,23 @@ __device__ void load_huffman_table(const huffman_table& table_global, huffman_ta
 /// TODO this always loads the maximum possible amount of tables.
 ///   in the common case (one for luminance and one for chrominance),
 ///   this results in twice as many loads as needed
-template <int block_size>
+template <int bs>
 __device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
 {
     assert(cstate.num_components > 0);
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_0], tables_shared[0]);
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_0], tables_shared[1]);
+    const bool load_dc = cstate.spectral_start == 0;
+    const bool load_ac = cstate.spectral_end >= 1;
+    if (load_dc) load_huffman_table<bs>(cstate.huffman_tables[cstate.dc_0], tables_shared[0]);
+    if (load_ac) load_huffman_table<bs>(cstate.huffman_tables[cstate.ac_0], tables_shared[1]);
     if (cstate.num_components <= 1) return;
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_1], tables_shared[2]);
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_1], tables_shared[3]);
+    if (load_dc) load_huffman_table<bs>(cstate.huffman_tables[cstate.dc_1], tables_shared[2]);
+    if (load_ac) load_huffman_table<bs>(cstate.huffman_tables[cstate.ac_1], tables_shared[3]);
     if (cstate.num_components <= 2) return;
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_2], tables_shared[4]);
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_2], tables_shared[5]);
+    if (load_dc) load_huffman_table<bs>(cstate.huffman_tables[cstate.dc_2], tables_shared[4]);
+    if (load_ac) load_huffman_table<bs>(cstate.huffman_tables[cstate.ac_2], tables_shared[5]);
     if (cstate.num_components <= 3) return;
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.dc_3], tables_shared[6]);
-    load_huffman_table<block_size>(cstate.huffman_tables[cstate.ac_3], tables_shared[7]);
+    if (load_dc) load_huffman_table<bs>(cstate.huffman_tables[cstate.dc_3], tables_shared[6]);
+    if (load_ac) load_huffman_table<bs>(cstate.huffman_tables[cstate.ac_3], tables_shared[7]);
 }
 
 /// \brief Returns the oldest (most significant) `num_bits` from `data`.
@@ -385,8 +387,10 @@ __device__ subsequence_info decode_subsequence(
             // the data unit is complete
             info.z = cstate.spectral_start;
             ++info.c;
-            info.n += 63 - cstate.spectral_end;
-            position_in_output += 63 - cstate.spectral_end;
+            // spectral_end is inclusive
+            const int skip = 64 - (cstate.spectral_end + 1 - cstate.spectral_start);
+            info.n += skip;
+            position_in_output += skip;
 
             if (info.c >= cstate.num_data_units_in_mcu) {
                 // mcu is complete
@@ -765,7 +769,7 @@ jpeggpu_status jpeggpu::decode_scan(
         c_offsets[2],
         c_offsets[3],
         scan.num_data_units_in_mcu,
-        info.num_components,
+        scan.num_components,
         num_data_units,
         info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y,
         scan.spectral_start,

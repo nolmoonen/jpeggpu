@@ -65,7 +65,6 @@ __global__ void transpose_interleaved(
 {
     const size_t idx_pixel_in = (blockIdx.x * blockDim.x + threadIdx.x) * num_values_per_thread;
 
-    // Check is valid for both pixels.
     assert(data_size % num_values_per_thread == 0);
     if (idx_pixel_in >= data_size) return;
 
@@ -199,7 +198,7 @@ jpeggpu_status jpeggpu::decode_transpose(
             num_components > 1 ? comps[comp_idx_1].ss : ivec2{0, 0},            \
             num_components > 2 ? comps[comp_idx_2].ss : ivec2{0, 0},            \
             num_components > 3 ? comps[comp_idx_3].ss : ivec2{0, 0},            \
-            scan.successive_approx_hi);                                         \
+            scan.successive_approx_lo);                                         \
     JPEGGPU_CHECK_CUDA(cudaGetLastError());                                     \
     return JPEGGPU_SUCCESS;
 

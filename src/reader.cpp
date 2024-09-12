@@ -213,13 +213,13 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     while (remaining > 0) {
         const uint8_t index = read_uint8();
         --remaining;
-        const int tc = index >> 4;
-        const int th = index & 0xf;
-        if (tc != 0 && tc != 1) {
-            logger.log("\tinvalid Huffman table index\n");
+        const int table_class = index >> 4;
+        const int th          = index & 0xf;
+        if (table_class != 0 && table_class != 1) {
+            logger.log("\tinvalid Huffman table class\n");
             return JPEGGPU_INVALID_JPEG;
         }
-        const bool is_dc = tc == 0;
+        const bool is_dc = table_class == 0;
         if (th > 3) {
             logger.log("\tHuffman table index must be 0, 1, 2, or 3\n");
             return JPEGGPU_NOT_SUPPORTED;
@@ -305,7 +305,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     }
 
     scan.num_data_units_in_mcu = 0;
-    for (uint8_t c = 0; c < num_components; ++c) {
+    for (int c = 0; c < num_components; ++c) {
         scan_component& scan_component = scan.scan_components[c];
         if (!has_remaining(2)) {
             return JPEGGPU_INVALID_JPEG;
@@ -344,15 +344,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         }
 
         // Determine global Huffman table indices
-        const int id_dc_global = reader_state.curr_huff_dc[id_dc];
-        const int id_ac_global = reader_state.curr_huff_ac[id_ac];
-        if (id_dc_global == reader_state::idx_not_defined ||
-            id_ac_global == reader_state::idx_not_defined) {
-            logger.log("\tHuffman table not defined\n");
-            // return JPEGGPU_INVALID_JPEG; // FIXME a scan can also only define DC or AC!
-        }
-        scan_component.dc_idx = id_dc_global;
-        scan_component.ac_idx = id_ac_global;
+        scan_component.dc_idx = reader_state.curr_huff_dc[id_dc];
+        scan_component.ac_idx = reader_state.curr_huff_ac[id_ac];
 
         component& comp = jpeg_stream.components[component_idx];
 
@@ -434,6 +427,18 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         scan.spectral_end,
         scan.successive_approx_hi,
         scan.successive_approx_lo);
+
+    for (int c = 0; c < num_components; ++c) {
+        const scan_component& scan_component = scan.scan_components[c];
+        if (scan.spectral_start == 0 && scan_component.dc_idx == reader_state::idx_not_defined) {
+            logger.log("\tDC Huffman table not defined\n");
+            return JPEGGPU_INVALID_JPEG;
+        }
+        if (scan.spectral_end > 1 && scan_component.ac_idx == reader_state::idx_not_defined) {
+            logger.log("\tAC Huffman table not defined\n");
+            return JPEGGPU_INVALID_JPEG;
+        }
+    }
 
     // Now comes the encoded data: skip through and keep track of segments.
 

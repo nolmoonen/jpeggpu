@@ -233,9 +233,15 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     for (int c = 0; c < info.num_components; ++c) {
         const size_t size = info.components[c].max_data_size.x * info.components[c].max_data_size.y;
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&(d_image_qdct[c]), size * sizeof(int16_t)));
+        if (do_it) {
+            // Initialize to zero, progressive decoding need not write all bits
+            //   and this will satisfy initcheck
+            JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_image_qdct[c], 0, size * sizeof(int16_t), stream));
+        }
     }
 
     for (int s = 0; s < info.num_scans; ++s) {
+        if (s != 4) continue; // FIXME
         const scan& scan       = info.scans[s];
         size_t total_data_size = 0;
         for (int c = 0; c < scan.num_components; ++c) {
@@ -314,7 +320,6 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             JPEGGPU_CHECK_STAT(
                 decode_transpose(info, d_scan_out, scan, d_image_qdct, stream, logger));
         }
-        // FIXME fix scans one by one
     }
 
     if (do_it) {
