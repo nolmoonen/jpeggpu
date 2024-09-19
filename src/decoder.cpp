@@ -241,8 +241,13 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     }
 
     for (int s = 0; s < info.num_scans; ++s) {
-        if (s != 4) continue; // FIXME
-        const scan& scan       = info.scans[s];
+        const scan& scan = info.scans[s];
+        if (
+            scan.type != scan_type::progressive_ac_initial &&
+            scan.type != scan_type::progressive_dc_initial
+            ) {
+            continue;
+        }
         size_t total_data_size = 0;
         for (int c = 0; c < scan.num_components; ++c) {
             const scan_component& scan_comp = scan.scan_components[c];

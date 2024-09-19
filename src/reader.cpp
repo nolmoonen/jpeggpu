@@ -250,6 +250,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         }
         remaining -= 16;
 
+        // TODO reject if all same length, since no synchronization will happen
+
         if (!has_remaining(count)) {
             logger.log("\ttoo few bytes in DHT segment\n");
             return JPEGGPU_INVALID_JPEG;
@@ -399,7 +401,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     if (scan_is_sequential) {
         if (spectral_start != 0 || spectral_end != 63) return JPEGGPU_INVALID_JPEG;
     } else {
-        if (spectral_start > 63 || spectral_end < spectral_start) return JPEGGPU_INVALID_JPEG;
+        if (spectral_start > 63 || spectral_end < spectral_start) {
+            return JPEGGPU_INVALID_JPEG; // values out of bounds
+        }
+        if (spectral_start == 0 && spectral_end != 0) {
+            return JPEGGPU_INVALID_JPEG; // mixing DC and AC
+        }
     }
     scan.spectral_start = spectral_start;
     scan.spectral_end   = spectral_end;
@@ -415,11 +422,6 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         if (scan.successive_approx_hi > 13 || scan.successive_approx_lo > 13) {
             return JPEGGPU_INVALID_JPEG;
         }
-
-        // TODO is this correct? since we only support 8 bits sample precision
-        if (scan.successive_approx_hi > 9 || scan.successive_approx_lo > 9) {
-            return JPEGGPU_NOT_SUPPORTED;
-        }
     }
     logger.log(
         "\tss: %d, se: %d, ah: %d, al: %d\n",
@@ -427,6 +429,25 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         scan.spectral_end,
         scan.successive_approx_hi,
         scan.successive_approx_lo);
+
+    if (scan_is_sequential) {
+        scan.type = scan_type::sequential;
+    } else {
+        const bool is_dc = spectral_start == 0 && spectral_end == 0;
+        if (is_dc) {
+            if (scan.successive_approx_hi == 0) {
+                scan.type = scan_type::progressive_dc_initial;
+            } else {
+                scan.type = scan_type::progressive_dc_refinement;
+            }
+        } else {
+            if (scan.successive_approx_hi == 0) {
+                scan.type = scan_type::progressive_ac_initial;
+            } else {
+                scan.type = scan_type::progressive_ac_refinement;
+            }
+        }
+    }
 
     for (int c = 0; c < num_components; ++c) {
         const scan_component& scan_component = scan.scan_components[c];

@@ -225,6 +225,7 @@ __device__ void decode_next_symbol_dc(
 {
     int category_length    = 0;
     const uint8_t category = get_category(data, category_length, table);
+    assert(category_length <= 16);
 
     if (category == 0) {
         // coeff is zero
@@ -248,19 +249,45 @@ __device__ void decode_next_symbol_dc(
 
 template <bool do_write>
 __device__ void decode_next_symbol_ac(
-    int& length, int& symbol, int& run_length, uint32_t data, const huffman_table& table, int z)
+    int& length,
+    int& symbol,
+    int& run_length,
+    uint32_t data,
+    const huffman_table& table,
+    int z,
+    int spectral_end)
 {
     int category_length = 0;
     const uint8_t s     = get_category(data, category_length, table);
     const int run       = s >> 4;
     const int category  = s & 0xf;
+    assert(category_length <= 16);
 
     if (category == 0) {
         // coeff is zero
-        length = category_length;
-        symbol = 0;
-        if (run == 15) run_length = 15; // ZRL
-        else run_length = 63 - z; // EOB
+        length                   = category_length;
+        symbol                   = 0;
+        const bool is_sequential = false;
+        if (is_sequential) {
+            // TODO for non-progressive, `(run != 15) && (run != 0)` is a decoding mistake
+            if (run == 15) run_length = 15; // ZRL
+            else run_length = spectral_end - z; // End Of Block
+        } else {
+            if (run == 15) run_length = 15; // ZRL
+            else { // End of Band
+                run_length = spectral_end - z;
+                // read the next `run` bits (at most 14), contains #eob blocks
+                const int remaining = 32 - category_length;
+                assert(run <= remaining);
+                const uint32_t eob_field =
+                    (data << category_length) >> (category_length + (remaining - run));
+                length += run;
+                // -1 to exclude the current block
+                const int num_eob_blocks = eob_field + (uint32_t{1} << run) - 1;
+                run_length += num_eob_blocks * 64;
+            }
+        }
+
         return;
     }
 
@@ -293,12 +320,14 @@ __device__ void decode_next_symbol(
     uint32_t data,
     const huffman_table& table_dc,
     const huffman_table& table_ac,
-    int z)
+    int z,
+    int spectral_end)
 {
     if (z == 0) {
         decode_next_symbol_dc<do_write>(length, symbol, run_length, data, table_dc);
     } else {
-        decode_next_symbol_ac<do_write>(length, symbol, run_length, data, table_ac, z);
+        decode_next_symbol_ac<do_write>(
+            length, symbol, run_length, data, table_ac, z, spectral_end);
     }
     assert(length > 0);
 }
@@ -338,9 +367,6 @@ __device__ subsequence_info decode_subsequence(
             break;
         }
 
-        int length     = 0;
-        int symbol     = 0;
-        int run_length = 0;
         int table_idx;
         if (info.c < cstate.c0_inc_prefix) {
             table_idx = 0;
@@ -357,8 +383,12 @@ __device__ subsequence_info decode_subsequence(
         // decode_next_symbol uses at most 32 bits. if fewer than 32 bits are available, append with zeroes
         uint32_t data = load_32_bits(rstate);
 
+        int length     = 0;
+        int symbol     = 0;
+        int run_length = 0; // note: may include end of band for progressive AC
         // always returns length > 0 if there are bits in `rstate` to ensure progress
-        decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
+        decode_next_symbol<do_write>(
+            length, symbol, run_length, data, table_dc, table_ac, info.z, cstate.spectral_end);
 
         if (info.p + length > end_subseq) {
             // Reading the next symbol will be outside the subsequence, so stop here.
@@ -370,7 +400,7 @@ __device__ subsequence_info decode_subsequence(
         // commit
         discard_bits(rstate, length);
 
-        if (do_write) {
+        if (do_write) { // TODO do not write when `symbol == 0`
             // TODO could make a separate kernel for this
             position_in_output += run_length;
             const int data_unit_idx    = position_in_output / data_unit_size;
@@ -474,6 +504,8 @@ __global__ void sync_intra_sequence(
     __shared__ bool is_block_done;
     using block_reduce = cub::BlockReduce<bool, block_size>;
     __shared__ typename block_reduce::TempStorage temp_storage;
+
+    // TODO limit the number of iterations to prevent DOS
 
     bool is_synced = false;
     bool do_write  = true;

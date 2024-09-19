@@ -66,6 +66,14 @@ struct scan_component {
     ivec2 data_size; /// Image size in pixels, rounded up to the MCU.
 };
 
+enum class scan_type {
+    sequential,
+    progressive_dc_initial,
+    progressive_dc_refinement,
+    progressive_ac_initial,
+    progressive_ac_refinement,
+};
+
 struct scan {
     int num_components; /// [0, max_comp_count]
     scan_component scan_components[max_comp_count];
@@ -84,6 +92,7 @@ struct scan {
     int successive_approx_lo;
 
     ivec2 num_mcus;
+    scan_type type;
 };
 
 inline bool is_interleaved(scan& scan) { return scan.num_components > 1; }

@@ -38,6 +38,9 @@
 // JPEG Specification
 // https://www.w3.org/Graphics/JPEG/itu-t81.pdf
 
+// Everything You Need to Know About JPEG - Episode 9: Progressive JPEGs
+// https://www.youtube.com/watch?v=26f9MU9dYw8
+
 namespace jpeggpu {
 
 #define JPEGGPU_CHECK_CUDA(call)                                                               \
