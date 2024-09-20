@@ -242,10 +242,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 
     for (int s = 0; s < info.num_scans; ++s) {
         const scan& scan = info.scans[s];
-        if (
-            scan.type != scan_type::progressive_ac_initial &&
-            scan.type != scan_type::progressive_dc_initial
-            ) {
+        if (scan.type != scan_type::progressive_ac_initial &&
+            scan.type != scan_type::progressive_dc_initial) {
             continue;
         }
         size_t total_data_size = 0;
@@ -314,8 +312,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
         //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
 
-        if (scan.spectral_start == 0) {
-            // undo DC difference encoding for scans that have DC
+        if (scan.type == scan_type::sequential || scan.type == scan_type::progressive_dc_initial) {
+            // undo DC difference encoding for scans that have DC difference encoding
             JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out, allocator, stream, logger));
         }
 

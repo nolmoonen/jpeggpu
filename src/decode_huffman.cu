@@ -276,11 +276,10 @@ __device__ void decode_next_symbol_ac(
             if (run == 15) run_length = 15; // ZRL
             else { // End of Band
                 run_length = spectral_end - z;
+                data       = u32_discard_bits(data, category_length);
                 // read the next `run` bits (at most 14), contains #eob blocks
-                const int remaining = 32 - category_length;
-                assert(run <= remaining);
-                const uint32_t eob_field =
-                    (data << category_length) >> (category_length + (remaining - run));
+                assert(run <= 32 - category_length);
+                const uint32_t eob_field = u32_select_bits(data, run);
                 length += run;
                 // -1 to exclude the current block
                 const int num_eob_blocks = eob_field + (uint32_t{1} << run) - 1;
@@ -402,7 +401,7 @@ __device__ subsequence_info decode_subsequence(
 
         if (do_write) { // TODO do not write when `symbol == 0`
             // TODO could make a separate kernel for this
-            position_in_output += run_length;
+            position_in_output += run_length; // TODO why use position_in_output instead of info.n?
             const int data_unit_idx    = position_in_output / data_unit_size;
             const int idx_in_data_unit = position_in_output % data_unit_size;
             out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
@@ -414,12 +413,16 @@ __device__ subsequence_info decode_subsequence(
         info.z += run_length + 1;
 
         if (info.z >= cstate.spectral_end + 1) {
+            // do_write implies synced, and this branch is executed when band is completed and nothing more
+            assert(info.z % 64 == (cstate.spectral_end + 1) % 64 || !do_write);
+            assert(position_in_output % 64 == (cstate.spectral_end + 1) % 64 || !do_write);
+
             // the data unit is complete
             info.z = cstate.spectral_start;
             ++info.c;
             // spectral_end is inclusive
             const int skip = 64 - (cstate.spectral_end + 1 - cstate.spectral_start);
-            info.n += skip;
+            if (!do_write) info.n += skip;
             position_in_output += skip;
 
             if (info.c >= cstate.num_data_units_in_mcu) {
@@ -490,7 +493,7 @@ __global__ void sync_intra_sequence(
         subsequence_info info;
         // start of i-th subsequence
         info.p = subeq_idx_begin_rel * subsequence_size;
-        info.n = cstate.spectral_start;
+        info.n = 0;
         info.c = 0;
         info.z = cstate.spectral_start;
 
@@ -522,7 +525,7 @@ __global__ void sync_intra_sequence(
             old_info.p = s_info_shared[subseq_idx - 1 - block_off].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
-            old_info.n = cstate.spectral_start;
+            old_info.n = 0;
             old_info.c = s_info_shared[subseq_idx - 1 - block_off].c;
             old_info.z = s_info_shared[subseq_idx - 1 - block_off].z;
 
@@ -626,7 +629,7 @@ __global__ void sync_subsequences(
             old_info.p = s_info[subseq_idx - 1].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
-            old_info.n = cstate.spectral_start;
+            old_info.n = 0;
             old_info.c = s_info[subseq_idx - 1].c;
             old_info.z = s_info[subseq_idx - 1].z;
 
@@ -688,6 +691,9 @@ __global__ void decode_write(
         segment_idx * cstate.num_mcus_in_segment * cstate.num_data_units_in_mcu * data_unit_size;
     // subsequence_info.n is relative to segment
     const int position_in_output = segment_offset + s_info[subseq_idx].n;
+    assert(
+        cstate.spectral_start <= position_in_output % 64 &&
+        position_in_output % 64 <= cstate.spectral_end);
 
     // only first thread does not do overflow
     constexpr bool do_write = true;
@@ -700,11 +706,13 @@ __global__ void decode_write(
         // n is not used in writing
         info.c = 0;
         info.z = cstate.spectral_start;
+        assert(info.n == cstate.spectral_start);
 
         decode_subsequence<do_write>(
             subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
     } else {
         subsequence_info info = s_info[subseq_idx - 1];
+        assert(cstate.spectral_start <= info.z && info.z <= cstate.spectral_end);
 
         reader_state rstate = rstate_from_subseq_overflow<block_size>(
             seg_info, rstate_memory, subseq_idx_rel, info.p, info.cache);
@@ -859,7 +867,7 @@ jpeggpu_status jpeggpu::decode_scan(
             cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
     }
 
-    const subsequence_info init_value{0, 0, 0, 0};
+    const subsequence_info init_value{0, scan.spectral_start, 0, 0};
     void* d_tmp_storage      = nullptr;
     size_t tmp_storage_bytes = 0;
     JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
