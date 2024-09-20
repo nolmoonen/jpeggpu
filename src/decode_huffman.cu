@@ -745,6 +745,44 @@ __global__ void assign_sinfo_n(
     dst[lid].n = src[lid].n;
 }
 
+__global__ void dc_refine(
+    const uint8_t* scan_destuffed,
+    const segment* segments,
+    const int* segment_indices,
+    int num_subsequences,
+    int num_data_units_in_segment,
+    int num_data_units,
+    int16_t* out)
+{
+    const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (subseq_idx >= num_subsequences) {
+        return;
+    }
+
+    const int segment_idx  = segment_indices[subseq_idx];
+    const segment seg_info = segments[segment_idx];
+    assert(seg_info.subseq_offset <= subseq_idx);
+    const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
+
+    const int segment_off = segment_idx * num_data_units_in_segment;
+    const int subseq_off  = subseq_idx_rel * chunk_size * 32;
+
+    // load u32 at a time, which is always possible since chunk_size is number of u32s
+    for (int i = 0; i < chunk_size; ++i) {
+        const uint32_t coefs = swap_endian(
+            reinterpret_cast<const uint32_t*>(scan_destuffed)[chunk_size * subseq_idx + i]);
+        for (int j = 0; j < 32; ++j) {
+            const int data_unit_idx = segment_off + subseq_off + i * 32 + j;
+            if (data_unit_idx >= num_data_units) {
+                return;
+            }
+
+            const uint32_t coef     = (coefs >> (32 - j - 1)) & 0x1;
+            out[data_unit_idx * 64] = coef;
+        }
+    }
+}
+
 } // namespace
 
 template <bool do_it>
@@ -762,6 +800,30 @@ jpeggpu_status jpeggpu::decode_scan(
 {
     // "N": number of subsequences, determined by JPEG stream
     const int num_subsequences = scan.num_subsequences;
+
+    if (scan.type == scan_type::progressive_dc_refinement) {
+        if (do_it) {
+            int num_data_units = 0;
+            for (int c = 0; c < scan.num_components; ++c) {
+                num_data_units += (scan.scan_components[c].data_size.x / 8) *
+                                  (scan.scan_components[c].data_size.y / 8);
+            }
+
+            constexpr int block_size = 256;
+            const int dim_size =
+                ceiling_div(num_subsequences, static_cast<unsigned int>(block_size));
+            dc_refine<<<dim_size, block_size, 0, stream>>>(
+                d_scan_destuffed,
+                d_segments,
+                d_segment_indices,
+                num_subsequences,
+                scan.num_data_units_in_mcu * info.restart_interval,
+                num_data_units,
+                d_out);
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
+        }
+        return JPEGGPU_SUCCESS;
+    }
 
     // alg-1:01
     int num_data_units = 0;
