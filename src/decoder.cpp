@@ -21,6 +21,7 @@
 #include "decoder.hpp"
 #include "decode_dc.hpp"
 #include "decode_huffman.hpp"
+#include "decode_huffman_ac_refinement.hpp"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
@@ -240,14 +241,20 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         }
     }
 
+    // TODO split up in sequential and progressive files?
+
     for (int s = 0; s < info.num_scans; ++s) {
         const scan& scan = info.scans[s];
-        // FIXME restore sequential support in huffman decode
-        if (scan.type == scan_type::progressive_ac_refinement) {
-            continue; // FIXME
+
+        if (scan.type == scan_type::progressive_ac_initial ||
+            scan.type == scan_type::progressive_ac_refinement) {
+            continue; // TODO explain why
         }
+
         size_t total_data_size = 0;
         for (int c = 0; c < scan.num_components; ++c) {
+            // TODO for DC progressive this allocates 64 times as much memory as needed,
+            //   can be significantly optimized
             const scan_component& scan_comp = scan.scan_components[c];
             total_data_size += scan_comp.data_size.x * scan_comp.data_size.y;
         }
@@ -322,6 +329,118 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         if (do_it) {
             JPEGGPU_CHECK_STAT(
                 decode_transpose(info, d_scan_out, scan, d_image_qdct, stream, logger));
+        }
+    }
+
+    // Handle all progressive AC scans, which are never interleaved
+    if (!is_sequential(info.sof_marker)) {
+        int16_t* d_scans_out[max_comp_count];
+        for (int c = 0; c < info.num_components; ++c) {
+            const size_t comp_size = ceiling_div(info.components[c].size.x, 8u) * 8 *
+                                     ceiling_div(info.components[c].size.y, 8u) * 8;
+            JPEGGPU_CHECK_STAT(
+                allocator.reserve<do_it>(&(d_scans_out[c]), comp_size * sizeof(int16_t)));
+            if (do_it) {
+                // initialize to zero, since only non-zeros are written by Huffman decoding
+                JPEGGPU_CHECK_CUDA(
+                    cudaMemsetAsync(d_scans_out[c], 0, comp_size * sizeof(int16_t), stream));
+            }
+        }
+
+        // First do all initial scans
+        for (int s = 0; s < info.num_scans; ++s) {
+            const scan& scan = info.scans[s];
+
+            if (scan.type == scan_type::progressive_ac_initial) {
+                continue;
+            }
+
+            assert(scan.num_components == 1);
+            int16_t* d_scan_out = d_scans_out[scan.scan_components[0].component_idx];
+
+            const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
+            uint8_t* d_scan_destuffed   = nullptr;
+            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_scan_destuffed, scan_byte_size));
+
+            int* d_segment_indices = nullptr;
+            JPEGGPU_CHECK_STAT(
+                allocator.reserve<do_it>(&d_segment_indices, scan.num_subsequences * sizeof(int)));
+
+            const uint8_t* const d_scan = d_image_data + scan.begin;
+            JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
+                info,
+                d_scan,
+                d_scan_destuffed,
+                d_segments[s],
+                d_segment_indices,
+                scan,
+                allocator,
+                stream,
+                logger));
+
+            JPEGGPU_CHECK_STAT(decode_scan<do_it>(
+                info,
+                d_scan_destuffed,
+                d_segments[s],
+                d_segment_indices,
+                d_scan_out,
+                scan,
+                d_huff_tables,
+                allocator,
+                stream,
+                logger));
+        }
+
+        // Then, do the scan passes
+        for (int i = 0; i < static_cast<int>(info.ac_scan_passes.size()); ++i) {
+            const ac_scan_pass& scan_pass = info.ac_scan_passes[i];
+
+            uint8_t* d_scan_destuffed[ac_scan_pass::max_num_scans] = {};
+            int* d_segment_indices[ac_scan_pass::max_num_scans]    = {};
+
+            for (int j = 0; j < scan_pass.num_scans; ++j) {
+                const int s      = scan_pass.scan_indices[j];
+                const scan& scan = info.scans[s];
+
+                const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
+                JPEGGPU_CHECK_STAT(
+                    allocator.reserve<do_it>(&(d_scan_destuffed[s]), scan_byte_size));
+                JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
+                    &(d_segment_indices[s]), scan.num_subsequences * sizeof(int)));
+                const uint8_t* const d_scan = d_image_data + scan.begin;
+                JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
+                    info,
+                    d_scan,
+                    d_scan_destuffed[j],
+                    d_segments[s],
+                    d_segment_indices[j],
+                    scan,
+                    allocator,
+                    stream,
+                    logger));
+            }
+
+            JPEGGPU_CHECK_STAT(decode_ac_refinement<do_it>(
+                info,
+                scan_pass,
+                d_scan_destuffed,
+                d_segments,
+                d_segment_indices,
+                d_scans_out,
+                d_huff_tables,
+                allocator,
+                stream,
+                logger));
+        }
+
+        for (int c = 0; c < info.num_components; ++c) {
+            if (do_it) {
+                // FIXME make a more general version of this function
+                //   the transpose kernel expects either a single component or an
+                //   interleaved scan (probably?)
+                // JPEGGPU_CHECK_STAT(
+                //     decode_transpose(info, d_scans_out[c], scan, d_image_qdct, stream, logger));
+            }
         }
     }
 

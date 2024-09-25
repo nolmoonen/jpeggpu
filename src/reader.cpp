@@ -22,6 +22,7 @@
 #include "decoder_defs.hpp"
 #include "defs.hpp"
 #include "marker.hpp"
+#include "util.hpp"
 
 #include <jpeggpu/jpeggpu.h>
 
@@ -29,6 +30,7 @@
 #include <cassert>
 #include <cinttypes>
 #include <cstring>
+#include <limits>
 #include <stdint.h>
 #include <vector>
 
@@ -36,13 +38,9 @@ using namespace jpeggpu;
 
 jpeggpu_status reader::startup()
 {
-    try {
-        h_qtables.resize(4);
-        h_huff_tables.reserve(2 * max_comp_count);
-        h_scan_segments.reserve(4);
-    } catch (const std::exception& e) {
-        return JPEGGPU_OUT_OF_HOST_MEMORY;
-    }
+    JPEGGPU_CHECK_STAT(nothrow_resize(h_qtables, 4));
+    JPEGGPU_CHECK_STAT(nothrow_resize(h_huff_tables, 2 * max_comp_count));
+    JPEGGPU_CHECK_STAT(nothrow_resize(h_scan_segments, 4));
 
     return JPEGGPU_SUCCESS;
 }
@@ -108,9 +106,13 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
 
     const uint8_t num_img_components = read_uint8();
     jpeg_stream.num_components       = num_img_components;
+    if (jpeg_stream.num_components == 0) {
+        logger.log("\tzero components\n");
+        return JPEGGPU_INVALID_JPEG;
+    }
     if (jpeg_stream.num_components > max_comp_count) {
         logger.log("\ttoo many components %d\n", jpeg_stream.num_components);
-        return JPEGGPU_INVALID_JPEG;
+        return JPEGGPU_NOT_SUPPORTED;
     }
 
     logger.log(
@@ -234,11 +236,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
 
         const int idx = jpeg_stream.cnt_huff++;
         (is_dc ? reader_state.curr_huff_dc : reader_state.curr_huff_ac)[th] = idx;
-        try {
-            h_huff_tables.resize(jpeg_stream.cnt_huff);
-        } catch (const std::exception& e) {
-            return JPEGGPU_OUT_OF_HOST_MEMORY;
-        }
+        JPEGGPU_CHECK_STAT(nothrow_resize(h_huff_tables, jpeg_stream.cnt_huff));
         huffman_table& table = h_huff_tables[idx];
 
         /// num_codes[i] is # of symbols with codes of i + 1 bits
@@ -286,11 +284,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     }
 
     const int scan_idx = jpeg_stream.num_scans++;
-    try {
-        jpeg_stream.scans.resize(jpeg_stream.num_scans);
-    } catch (const std::exception& e) {
-        return JPEGGPU_OUT_OF_HOST_MEMORY;
-    }
+
+    JPEGGPU_CHECK_STAT(nothrow_resize(jpeg_stream.scans, jpeg_stream.num_scans));
     scan& scan = jpeg_stream.scans[scan_idx];
 
     const uint16_t length        = read_uint16();
@@ -394,7 +389,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         return JPEGGPU_INVALID_JPEG;
     }
 
-    const bool scan_is_sequential = is_sequential(reader_state.sof_marker);
+    const bool scan_is_sequential = is_sequential(jpeg_stream.sof_marker);
 
     const uint8_t spectral_start = read_uint8();
     const uint8_t spectral_end   = read_uint8();
@@ -449,6 +444,14 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         }
     }
 
+    if ((scan.type == scan_type::progressive_ac_initial ||
+         scan.type == scan_type::progressive_ac_refinement) &&
+        num_components != 1) {
+        // G.1.1.1.1
+        logger.log("\tIn progressive DCT, only DC scans may have interleaved components\n");
+        return JPEGGPU_INVALID_JPEG;
+    }
+
     for (int c = 0; c < num_components; ++c) {
         const scan_component& scan_component = scan.scan_components[c];
         if (scan.spectral_start == 0 && scan_component.dc_idx == reader_state::idx_not_defined) {
@@ -464,11 +467,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     // Now comes the encoded data: skip through and keep track of segments.
 
     assert(scan_idx + 1 == jpeg_stream.num_scans);
-    try {
-        h_scan_segments.resize(jpeg_stream.num_scans);
-    } catch (const std::exception& e) {
-        return JPEGGPU_OUT_OF_HOST_MEMORY;
-    }
+    JPEGGPU_CHECK_STAT(nothrow_resize(h_scan_segments, jpeg_stream.num_scans));
     std::vector<segment, pinned_allocator<segment>>& h_segments = h_scan_segments[scan_idx];
 
     // TODO catch exception or calculate size beforehand and not use vector
@@ -515,11 +514,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     scan.begin = scan_begin;
     scan.end   = reader_state.image - reader_state.image_begin;
 
-    try {
-        h_segments.resize(scan.num_segments);
-    } catch (const std::exception& e) {
-        return JPEGGPU_OUT_OF_HOST_MEMORY;
-    }
+    JPEGGPU_CHECK_STAT(nothrow_resize(h_segments, scan.num_segments));
     std::memcpy(h_segments.data(), segments.data(), scan.num_segments * sizeof(segment));
 
     return JPEGGPU_SUCCESS;
@@ -630,8 +625,8 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
             if (reader_state.found_sof) {
                 return JPEGGPU_INVALID_JPEG;
             }
-            reader_state.found_sof  = true;
-            reader_state.sof_marker = marker;
+            reader_state.found_sof = true;
+            jpeg_stream.sof_marker = marker;
             JPEGGPU_CHECK_STAT(read_sof(logger));
             continue;
         case jpeggpu::MARKER_SOF3:
@@ -660,7 +655,7 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
         case jpeggpu::MARKER_DRI:
             JPEGGPU_CHECK_STAT(read_dri(logger));
             continue;
-        default:
+        default: // FIXME not all segments may be skippable, does not account for unknown markers
             JPEGGPU_CHECK_STAT(skip_segment(logger));
             continue;
         }
@@ -670,7 +665,7 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
 
     // Check that all components are found
     if (!reader_state.found_sof) return JPEGGPU_INVALID_JPEG;
-    if (is_sequential(reader_state.sof_marker)) {
+    if (is_sequential(jpeg_stream.sof_marker)) {
         // Each component can only be defined once
         bool comp_found[max_comp_count] = {};
         for (int s = 0; s < jpeg_stream.num_scans; ++s) {
@@ -691,7 +686,68 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
             }
         }
     } else {
-        // TODO check that all components are fully found (through multiple scans)
+        // check that each component at least has an initial value
+        uint64_t have_initial[max_comp_count] = {};
+        for (int s = 0; s < static_cast<int>(jpeg_stream.scans.size()); ++s) {
+            const scan& scan         = jpeg_stream.scans[s];
+            const int num_coefs      = scan.spectral_end + 1 - scan.spectral_start;
+            const uint64_t scan_mask = ((uint64_t{1} << num_coefs) - 1) << scan.spectral_start;
+            for (int c = 0; c < scan.num_components; ++c) {
+                const scan_component& scan_comp = scan.scan_components[c];
+                have_initial[scan_comp.component_idx] |= scan_mask;
+            }
+        }
+        for (int c = 0; c < jpeg_stream.num_components; ++c) {
+            if (have_initial[c] != std::numeric_limits<uint64_t>::max()) {
+                // TODO is it ever specified that this must be the case?
+                logger.log("\tcomponent %d does not have a definition for each coefficient\n", c);
+                return JPEGGPU_INVALID_JPEG;
+            }
+        }
+        // group ac refinement scans into passes
+        for (int s = 0; s < static_cast<int>(jpeg_stream.scans.size()); ++s) {
+            const scan& scan = jpeg_stream.scans[s];
+            if (scan.type != scan_type::progressive_ac_initial &&
+                scan.type != scan_type::progressive_ac_refinement) {
+                continue;
+            }
+            assert(scan.num_components == 1);
+            const int comp_idx       = scan.scan_components[0].component_idx;
+            const int num_coefs      = scan.spectral_end + 1 - scan.spectral_start;
+            const uint64_t scan_mask = ((uint64_t{1} << num_coefs) - 1) << scan.spectral_start;
+            // find a scan pass it can fit in
+            bool found_pass = false;
+            for (int i = 0; i < static_cast<int>(jpeg_stream.ac_scan_passes.size()); ++i) {
+                ac_scan_pass& scan_pass       = jpeg_stream.ac_scan_passes[i];
+                const bool scan_overlaps_pass = scan_pass.mask[comp_idx] & scan_mask;
+                if (scan.type == scan_pass.type && !scan_overlaps_pass) {
+                    scan_pass.scan_indices[scan_pass.num_scans++] = s;
+                    scan_pass.mask[comp_idx] |= scan_mask;
+                    found_pass = true;
+                    break;
+                }
+            }
+            if (!found_pass) {
+                JPEGGPU_CHECK_STAT(nothrow_resize(
+                    jpeg_stream.ac_scan_passes, jpeg_stream.ac_scan_passes.size() + 1));
+                ac_scan_pass& scan_pass = jpeg_stream.ac_scan_passes.back();
+                std::memset(scan_pass.scan_indices, 0, sizeof(ac_scan_pass));
+                scan_pass.scan_indices[scan_pass.num_scans] = s;
+                scan_pass.mask[comp_idx] |= scan_mask;
+                scan_pass.type = scan.type;
+            }
+        }
+        for (int i = 0; i < static_cast<int>(jpeg_stream.ac_scan_passes.size()); ++i) {
+            {
+                const ac_scan_pass& scan_pass = jpeg_stream.ac_scan_passes[i];
+                logger.log("scan pass: ");
+                for (int c = 0; c < jpeg_stream.num_components; ++c) {
+                    logger.log("%" PRIx64, scan_pass.mask[c]);
+                    if (c + 1 < jpeg_stream.num_components) logger.log(" ");
+                    else logger.log("\n");
+                }
+            }
+        }
     }
 
     return JPEGGPU_SUCCESS;
@@ -713,6 +769,7 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
 
     // clear jpeg stream
     jpeg_stream.scans.clear();
+    jpeg_stream.ac_scan_passes.clear();
     jpeg_stream.size           = ivec2{0, 0};
     jpeg_stream.num_components = 0;
     jpeg_stream.ss_max         = ivec2{0, 0};
@@ -726,6 +783,7 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
     jpeg_stream.restart_interval = 0;
     jpeg_stream.num_scans        = 0;
     jpeg_stream.cnt_huff         = 0;
+    jpeg_stream.sof_marker       = 0;
 
     // clear remaining state
     std::memset(h_qtables.data(), 0, h_qtables.size() * sizeof(decltype(h_qtables)::value_type));

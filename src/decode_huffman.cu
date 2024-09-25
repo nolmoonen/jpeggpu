@@ -120,6 +120,7 @@ struct const_state {
     int num_mcus_in_segment;
     int spectral_start;
     int spectral_end;
+    scan_type scan_type;
 };
 // check that struct can be copied to device
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
@@ -255,7 +256,8 @@ __device__ void decode_next_symbol_ac(
     uint32_t data,
     const huffman_table& table,
     int z,
-    int spectral_end)
+    int spectral_end,
+    scan_type type)
 {
     int category_length = 0;
     const uint8_t s     = get_category(data, category_length, table);
@@ -265,10 +267,9 @@ __device__ void decode_next_symbol_ac(
 
     if (category == 0) {
         // coeff is zero
-        length                   = category_length;
-        symbol                   = 0;
-        const bool is_sequential = false;
-        if (is_sequential) {
+        length = category_length;
+        symbol = 0;
+        if (type == scan_type::sequential) { // TODO constexpr?
             // TODO for non-progressive, `(run != 15) && (run != 0)` is a decoding mistake
             if (run == 15) run_length = 15; // ZRL
             else run_length = spectral_end - z; // End Of Block
@@ -320,13 +321,14 @@ __device__ void decode_next_symbol(
     const huffman_table& table_dc,
     const huffman_table& table_ac,
     int z,
-    int spectral_end)
+    int spectral_end,
+    scan_type type)
 {
     if (z == 0) {
         decode_next_symbol_dc<do_write>(length, symbol, run_length, data, table_dc);
     } else {
         decode_next_symbol_ac<do_write>(
-            length, symbol, run_length, data, table_ac, z, spectral_end);
+            length, symbol, run_length, data, table_ac, z, spectral_end, type);
     }
     assert(length > 0);
 }
@@ -356,6 +358,7 @@ __device__ subsequence_info decode_subsequence(
     subsequence_info info,
     int position_in_output = 0)
 {
+    assert(cstate.scan_type != scan_type::progressive_ac_refinement);
     const int end_subseq = (subseq_idx_rel + 1) * subsequence_size; // first bit in next subsequence
     while (true) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
@@ -387,7 +390,15 @@ __device__ subsequence_info decode_subsequence(
         int run_length = 0; // note: may include end of band for progressive AC
         // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol<do_write>(
-            length, symbol, run_length, data, table_dc, table_ac, info.z, cstate.spectral_end);
+            length,
+            symbol,
+            run_length,
+            data,
+            table_dc,
+            table_ac,
+            info.z,
+            cstate.spectral_end,
+            cstate.scan_type);
 
         if (info.p + length > end_subseq) {
             // Reading the next symbol will be outside the subsequence, so stop here.
@@ -823,6 +834,9 @@ jpeggpu_status jpeggpu::decode_scan(
             JPEGGPU_CHECK_CUDA(cudaGetLastError());
         }
         return JPEGGPU_SUCCESS;
+    } else if (scan.type == scan_type::progressive_ac_refinement)
+    {
+        return JPEGGPU_SUCCESS;
     }
 
     // alg-1:01
@@ -875,7 +889,8 @@ jpeggpu_status jpeggpu::decode_scan(
         num_data_units,
         info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y,
         scan.spectral_start,
-        scan.spectral_end};
+        scan.spectral_end,
+        scan.type};
 
     // decode all subsequences
     // "b", sequence size in number of subsequences, configurable

@@ -115,10 +115,20 @@ struct component {
     ivec2 max_data_size;
 };
 
+struct ac_scan_pass {
+    // each scan at least must have a band of size one, only AC is handled
+    static constexpr int max_num_scans = 63 * max_comp_count;
+    int scan_indices[max_num_scans];
+    int num_scans;
+    uint64_t mask[max_comp_count]; // least significant bit is DC
+    scan_type type;
+};
+
 // TODO an opaque pointer to this struct should be the result of `jpeggpu_decoder_parse_header`
 //   and passed to `jpeggpu_decoder_get_buffer_size`, `jpeggpu_decoder_transfer`, and `jpeggpu_decoder_decode`
 struct jpeg_stream {
     std::vector<scan> scans;
+    std::vector<ac_scan_pass> ac_scan_passes;
 
     ivec2 size; /// Actual image size in pixels.
     int num_components; ///< Number of image components.
@@ -133,6 +143,7 @@ struct jpeg_stream {
     int restart_interval;
     int num_scans; /// Number of scans. FIXME double defined with `scans.get_size()`
     int cnt_huff; /// Number of DC and AC Huffman tables. // FIXME double defined
+        uint8_t sof_marker;
 };
 
 /// \brief Whether JPEG stream is sequential. Alternative is progressive.
@@ -177,7 +188,6 @@ struct reader {
         const uint8_t* image_begin; /// Non-modifiable pointer to start of image.
         const uint8_t* image_end; /// Non-modifiable pointer to end of image.
         bool found_sof;
-        uint8_t sof_marker;
 
         static constexpr int idx_not_defined = -1;
         /// \brief For each DC Huffman table slot, the index of the last defined global table.

@@ -24,6 +24,7 @@
 #include <cassert>
 #include <limits>
 #include <type_traits>
+#include <vector>
 
 template <
     typename T,
@@ -109,6 +110,18 @@ struct pinned_allocator {
 
     void deallocate(T* ptr, [[maybe_unused]] size_t n) noexcept { cudaFreeHost(ptr); }
 };
+
+template <typename T, typename Allocator>
+[[nodiscard]] jpeggpu_status nothrow_resize(
+    std::vector<T, Allocator>& c, typename std::vector<T, Allocator>::size_type n)
+{
+    try {
+        c.resize(n);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    return JPEGGPU_SUCCESS;
+}
 
 } // namespace jpeggpu
 
