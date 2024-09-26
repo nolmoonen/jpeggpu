@@ -336,8 +336,8 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     if (!is_sequential(info.sof_marker)) {
         int16_t* d_scans_out[max_comp_count];
         for (int c = 0; c < info.num_components; ++c) {
-            const size_t comp_size = ceiling_div(info.components[c].size.x, 8u) * 8 *
-                                     ceiling_div(info.components[c].size.y, 8u) * 8;
+            // FIXME is `size` the correct variable?
+            const size_t comp_size = info.components[c].size.x * info.components[c].size.y;
             JPEGGPU_CHECK_STAT(
                 allocator.reserve<do_it>(&(d_scans_out[c]), comp_size * sizeof(int16_t)));
             if (do_it) {

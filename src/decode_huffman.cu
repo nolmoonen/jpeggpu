@@ -40,6 +40,7 @@
 #include "decode_dc.hpp"
 #include "decode_destuff.hpp"
 #include "decode_huffman.hpp"
+#include "decode_huffman_common.hpp"
 #include "decode_huffman_reader.hpp"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
@@ -129,23 +130,6 @@ static_assert(std::is_trivially_copyable_v<const_state>);
 /// \brief Typedef for the maximum amount of Huffman tables for a scan.
 using huffman_tables = huffman_table[max_comp_count * HUFF_COUNT];
 
-template <int block_size>
-__device__ void load_huffman_table(const huffman_table& table_global, huffman_table& table_shared)
-{
-    // assert that loading a word at a time is valid
-    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
-    constexpr int num_words            = sizeof(huffman_table) / 4;
-    constexpr int num_words_per_thread = // TODO not efficient since num_words < block_size
-        ceiling_div(num_words, static_cast<unsigned int>(block_size));
-    for (int i = 0; i < num_words_per_thread; ++i) {
-        const int idx = block_size * i + threadIdx.x;
-        if (idx < num_words) {
-            reinterpret_cast<uint32_t*>(&table_shared)[idx] =
-                reinterpret_cast<const uint32_t*>(&table_global)[idx];
-        }
-    }
-}
-
 /// \brief Load Huffman tables from global memory into shared.
 ///
 /// TODO this always loads the maximum possible amount of tables.
@@ -168,13 +152,6 @@ __device__ void load_huffman_tables(const const_state& cstate, huffman_tables& t
     if (cstate.num_components <= 3) return;
     if (load_dc) load_huffman_table<bs>(cstate.huffman_tables[cstate.dc_3], tables_shared[6]);
     if (load_ac) load_huffman_table<bs>(cstate.huffman_tables[cstate.ac_3], tables_shared[7]);
-}
-
-/// \brief Returns the oldest (most significant) `num_bits` from `data`.
-__device__ uint32_t u32_select_bits(uint32_t data, int num_bits)
-{
-    assert(num_bits <= 32);
-    return data >> (32 - num_bits);
 }
 
 /// \brief Discards the oldest (most significant) `num_bits` from `data`.
@@ -206,18 +183,12 @@ uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table&
     // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
     length        = i + 1;
     const int idx = entry.valptr + (code - entry.mincode);
-    if (idx < 0 || 256 <= idx) {
+    if (idx < 0 || 256 <= idx) { // TODO this check can be more precise if knowing #codes
         // found a value that does not make sense. this can happen if the wrong huffman
         //   table is used. return arbitrary value
         return 0;
     }
     return table.huffval[idx];
-}
-
-__device__ int get_value(int num_bits, int code)
-{
-    // TODO leftshift negative value is UB
-    return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
 template <bool do_write>
@@ -834,8 +805,7 @@ jpeggpu_status jpeggpu::decode_scan(
             JPEGGPU_CHECK_CUDA(cudaGetLastError());
         }
         return JPEGGPU_SUCCESS;
-    } else if (scan.type == scan_type::progressive_ac_refinement)
-    {
+    } else if (scan.type == scan_type::progressive_ac_refinement) {
         return JPEGGPU_SUCCESS;
     }
 

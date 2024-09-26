@@ -32,7 +32,7 @@
 namespace jpeggpu {
 
 /// \brief Rearrange bytes after loading an unsigned 32-bits integer.
-__device__ uint32_t swap_endian(uint32_t x)
+inline __device__ uint32_t swap_endian(uint32_t x)
 {
     return __byte_perm(x, uint32_t{0}, uint32_t{0x0123});
 }
