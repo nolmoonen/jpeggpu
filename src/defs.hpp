@@ -28,6 +28,7 @@
 #include <cuda_runtime.h>
 
 #include <array>
+#include <csignal>
 #include <cstdio>
 #include <iostream>
 #include <stdint.h>
@@ -43,12 +44,27 @@
 
 namespace jpeggpu {
 
+#if defined(_MSC_VER)
+#define DEBUG_BREAK __debugbreak()
+#elif defined(__clang__)
+#define DEBUG_BREAK __builtin_debugtrap()
+#elif defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+#define DEBUG_BREAK __asm__ volatile("int $0x03")
+#elif defined(__GNUC__) && defined(__thumb__)
+#define DEBUG_BREAK __asm__ volatile(".inst 0xde01")
+#elif defined(__GNUC__) && defined(__arm__) && !defined(__thumb__)
+#define DEBUG_BREAK __asm__ volatile(".inst 0xe7f001f0")
+#else
+#define DEBUG_BREAK
+#endif
+
 #define JPEGGPU_CHECK_CUDA(call)                                                               \
     do {                                                                                       \
         cudaError_t err = call;                                                                \
         if (err != cudaSuccess) {                                                              \
             logger.log(                                                                        \
                 "CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__); \
+            DEBUG_BREAK;                                                                       \
             return JPEGGPU_INTERNAL_ERROR;                                                     \
         }                                                                                      \
     } while (0)
@@ -57,6 +73,7 @@ namespace jpeggpu {
     do {                               \
         jpeggpu_status stat = call;    \
         if (stat != JPEGGPU_SUCCESS) { \
+            DEBUG_BREAK;               \
             return stat;               \
         }                              \
     } while (0)

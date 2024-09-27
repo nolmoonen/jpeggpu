@@ -61,11 +61,13 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
     load_huffman_table<block_size>(cstate.huff_tables[t.huff_idx], table);
 
     __shared__ uint32_t storage[block_size];
-    assert(t.scan_size % 4 == 0);
-    const int num_words_in_scan = t.scan_size / 4;
+    // TODO making this explicit is better
+    // this is safe because the scan allocation is a multiple of 256
+    const int num_words_in_scan = ceiling_div(t.scan_size, 4u);
     if (threadIdx.x < num_words_in_scan) {
         storage[threadIdx.x] = reinterpret_cast<const uint32_t*>(t.scan_destuffed)[threadIdx.x];
     }
+    assert(num_words_in_scan <= block_size); // FIXME remove once iterative load happens
     __syncthreads();
 
     if (threadIdx.x != 0) return;

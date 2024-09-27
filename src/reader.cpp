@@ -732,9 +732,9 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
                     jpeg_stream.ac_scan_passes, jpeg_stream.ac_scan_passes.size() + 1));
                 ac_scan_pass& scan_pass = jpeg_stream.ac_scan_passes.back();
                 std::memset(scan_pass.scan_indices, 0, sizeof(ac_scan_pass));
-                scan_pass.scan_indices[scan_pass.num_scans] = s;
-                scan_pass.mask[comp_idx] |= scan_mask;
-                scan_pass.type = scan.type;
+                scan_pass.scan_indices[scan_pass.num_scans++] = s;
+                scan_pass.mask[comp_idx]                      = scan_mask;
+                scan_pass.type                                = scan.type;
             }
         }
         for (int i = 0; i < static_cast<int>(jpeg_stream.ac_scan_passes.size()); ++i) {

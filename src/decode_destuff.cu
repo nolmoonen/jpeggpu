@@ -187,6 +187,7 @@ jpeggpu_status jpeggpu::destuff_scan(
     if (do_it) {
         // clear memory, only needed to satisfy `compute-sanitizer --tool=initcheck` since
         //   the segments are rounded up to subsequence size, some may not get written
+
         JPEGGPU_CHECK_CUDA(cudaMemsetAsync(
             d_scan_destuffed, 0, scan.num_subsequences * subsequence_size_bytes, stream));
     }

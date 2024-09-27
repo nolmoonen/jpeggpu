@@ -351,6 +351,12 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         for (int s = 0; s < info.num_scans; ++s) {
             const scan& scan = info.scans[s];
 
+            // TODO do in separate bit
+            if (scan.type == scan_type::progressive_dc_initial ||
+                scan.type == scan_type::progressive_dc_refinement) {
+                continue;
+            }
+
             if (scan.type == scan_type::progressive_ac_initial) {
                 continue;
             }
@@ -404,9 +410,9 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 
                 const size_t scan_byte_size = scan.num_subsequences * subsequence_size_bytes;
                 JPEGGPU_CHECK_STAT(
-                    allocator.reserve<do_it>(&(d_scan_destuffed[s]), scan_byte_size));
+                    allocator.reserve<do_it>(&(d_scan_destuffed[j]), scan_byte_size));
                 JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(
-                    &(d_segment_indices[s]), scan.num_subsequences * sizeof(int)));
+                    &(d_segment_indices[j]), scan.num_subsequences * sizeof(int)));
                 const uint8_t* const d_scan = d_image_data + scan.begin;
                 JPEGGPU_CHECK_STAT(destuff_scan<do_it>(
                     info,
