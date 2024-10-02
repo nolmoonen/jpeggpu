@@ -111,20 +111,20 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
                 uint32_t data = load_32_bits(rstate);
 
                 // ------------- at most 16 bits
-                int i;
+                int k;
                 int32_t code;
                 huffman_table::entry entry;
-                for (i = 0; i < 16; ++i) {
-                    code                    = u32_select_bits(data, i + 1);
-                    const bool is_last_iter = i == 15;
-                    entry                   = table.entries[i];
+                for (k = 0; k < 16; ++k) {
+                    code                    = u32_select_bits(data, k + 1);
+                    const bool is_last_iter = k == 15;
+                    entry                   = table.entries[k];
                     if (code <= entry.maxcode || is_last_iter) {
                         break;
                     }
                 }
-                assert(1 <= i + 1 && i + 1 <= 16);
-                // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
-                const int num_bits_consumed = i + 1;
+                assert(1 <= k + 1 && k + 1 <= 16);
+                // termination condition: 1 <= k + 1 <= 16, k + 1 is number of bits
+                const int num_bits_consumed = k + 1;
                 discard_bits(rstate, num_bits_consumed);
                 data <<= num_bits_consumed;
                 // --------------- at least 16 bits remaining
@@ -151,8 +151,7 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
 
                 int coeff;
                 if (category != 0) { // if not taking this branch, run == 15 aka ZRL
-                    if (category != 1) printf("%d %d\n", i, j);
-                    assert(category == 1); // FIXME this failure. is this a requirement?
+                    assert(category == 1);
                     const int code = u32_select_bits(data, 1);
                     discard_bits(rstate, 1);
                     data <<= 1;
@@ -167,8 +166,13 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
                 // -------------------- at most 62 bits
                 int num_zeroes = run + 1;
                 for (; j < se_exclusive; ++j) {
-                    const int coef_idx = 64 * i + order_natural[j];
-                    // printf("%d\n", coef_idx);
+                    if (tmp >= 30) // FIXME this is ugly
+                    {
+                        tmp  = 0;
+                        data = load_32_bits(rstate);
+                    }
+
+                    const int coef_idx    = 64 * i + order_natural[j];
                     const bool is_nonzero = out[coef_idx];
                     if (is_nonzero) {
                         const int code = u32_select_bits(data, 1);
@@ -190,12 +194,12 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
                         if (num_zeroes == 0) break;
                     }
                 }
-                assert(tmp <= 32);
+                assert(tmp <= 31); // may need one bit for below
 
                 if (category != 0) {
+                    assert(j <= 64);
                     const int coef_idx = 64 * i + order_natural[j];
-                    // printf("%d\n", coef_idx);
-                    out[coef_idx] = coeff;
+                    out[coef_idx]      = coeff;
                 }
             }
         }
@@ -208,8 +212,13 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
 
             // skip through all remaining
             for (; j < se_exclusive; ++j) {
-                const int coef_idx = 64 * i + order_natural[j];
-                // printf("%d\n", coef_idx);
+                if (tmp >= 31) // FIXME this is ugly
+                {
+                    tmp  = 0;
+                    data = load_32_bits(rstate);
+                }
+
+                const int coef_idx    = 64 * i + order_natural[j];
                 const bool is_nonzero = out[coef_idx];
                 if (is_nonzero) {
                     const int code = u32_select_bits(data, 1);

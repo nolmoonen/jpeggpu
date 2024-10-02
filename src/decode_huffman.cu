@@ -783,6 +783,7 @@ jpeggpu_status jpeggpu::decode_scan(
     // "N": number of subsequences, determined by JPEG stream
     const int num_subsequences = scan.num_subsequences;
 
+    assert(scan.type != scan_type::progressive_ac_refinement);
     if (scan.type == scan_type::progressive_dc_refinement) {
         if (do_it) {
             int num_data_units = 0;
@@ -804,8 +805,6 @@ jpeggpu_status jpeggpu::decode_scan(
                 d_out);
             JPEGGPU_CHECK_CUDA(cudaGetLastError());
         }
-        return JPEGGPU_SUCCESS;
-    } else if (scan.type == scan_type::progressive_ac_refinement) {
         return JPEGGPU_SUCCESS;
     }
 

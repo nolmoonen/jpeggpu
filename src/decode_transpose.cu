@@ -147,6 +147,43 @@ __global__ void transpose_interleaved(
 
 } // namespace
 
+jpeggpu_status jpeggpu::decode_transpose_component(
+    const int16_t* d_out,
+    int16_t* d_image_qdct,
+    ivec2 data_size,
+    int data_size_mcu_x,
+    cudaStream_t stream,
+    logger& logger)
+{
+    const size_t total_data_size = data_size.x * data_size.y;
+    const dim3 transpose_block_dim(256);
+    const dim3 transpose_grid_dim(ceiling_div(
+        total_data_size / num_values_per_thread, static_cast<unsigned int>(transpose_block_dim.x)));
+    transpose_interleaved<1><<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(
+        d_out,
+        d_image_qdct,
+        nullptr,
+        nullptr,
+        nullptr,
+        total_data_size,
+        data_size,
+        ivec2{0, 0},
+        ivec2{0, 0},
+        ivec2{0, 0},
+        data_size,
+        ivec2{0, 0},
+        ivec2{0, 0},
+        ivec2{0, 0},
+        data_size_mcu_x,
+        ivec2{1, 1},
+        ivec2{0, 0},
+        ivec2{0, 0},
+        ivec2{0, 0},
+        0); // successive_approx_lo is done during decoding
+    JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    return JPEGGPU_SUCCESS;
+}
+
 jpeggpu_status jpeggpu::decode_transpose(
     const jpeg_stream& info,
     const int16_t* d_out,

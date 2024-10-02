@@ -514,6 +514,9 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     scan.begin = scan_begin;
     scan.end   = reader_state.image - reader_state.image_begin;
 
+    // FIXME this is not yet implemented
+    assert(scan.num_segments == 1 || scan.type != scan_type::progressive_ac_refinement);
+
     JPEGGPU_CHECK_STAT(nothrow_resize(h_segments, scan.num_segments));
     std::memcpy(h_segments.data(), segments.data(), scan.num_segments * sizeof(segment));
 

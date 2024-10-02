@@ -334,7 +334,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 
     // Handle all progressive AC scans, which are never interleaved
     if (!is_sequential(info.sof_marker)) {
-        int16_t* d_scans_out[max_comp_count];
+        int16_t* d_scans_out[max_comp_count] = {};
         for (int c = 0; c < info.num_components; ++c) {
             // FIXME is `size` the correct variable?
             const size_t comp_size = info.components[c].size.x * info.components[c].size.y;
@@ -347,17 +347,18 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             }
         }
 
-        // First do all initial scans
+        // First do all AC initial scans
         for (int s = 0; s < info.num_scans; ++s) {
             const scan& scan = info.scans[s];
 
-            // TODO do in separate bit
+            // these are done already
             if (scan.type == scan_type::progressive_dc_initial ||
                 scan.type == scan_type::progressive_dc_refinement) {
                 continue;
             }
 
-            if (scan.type == scan_type::progressive_ac_initial) {
+            // these are handled below
+            if (scan.type == scan_type::progressive_ac_refinement) {
                 continue;
             }
 
@@ -397,9 +398,14 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
                 logger));
         }
 
-        // Then, do the scan passes
+        // Then, do the scan passes for the refinement
         for (int i = 0; i < static_cast<int>(info.ac_scan_passes.size()); ++i) {
             const ac_scan_pass& scan_pass = info.ac_scan_passes[i];
+
+            // these are handled above
+            if (scan_pass.type == scan_type::progressive_ac_initial) {
+                continue;
+            }
 
             uint8_t* d_scan_destuffed[ac_scan_pass::max_num_scans] = {};
             int* d_segment_indices[ac_scan_pass::max_num_scans]    = {};
@@ -441,11 +447,13 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
 
         for (int c = 0; c < info.num_components; ++c) {
             if (do_it) {
-                // FIXME make a more general version of this function
-                //   the transpose kernel expects either a single component or an
-                //   interleaved scan (probably?)
-                // JPEGGPU_CHECK_STAT(
-                //     decode_transpose(info, d_scans_out[c], scan, d_image_qdct, stream, logger));
+                JPEGGPU_CHECK_STAT(decode_transpose_component(
+                    d_scans_out[c],
+                    d_image_qdct[c],
+                    info.components[c].size,
+                    info.components[c].size.x / data_unit_vector_size,
+                    stream,
+                    logger));
             }
         }
     }

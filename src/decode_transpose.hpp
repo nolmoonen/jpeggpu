@@ -32,6 +32,14 @@
 
 namespace jpeggpu {
 
+jpeggpu_status decode_transpose_component(
+    const int16_t* d_out,
+    int16_t* d_image_qdct,
+    ivec2 data_size,
+    int data_size_mcu_x,
+    cudaStream_t stream,
+    logger& logger);
+
 /// \brief Converts the image data from order as it appears in Huffman encoding to raster order
 ///   spread over multiple components, undoing interleaving.
 ///
