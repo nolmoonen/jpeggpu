@@ -597,14 +597,14 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         return JPEGGPU_INVALID_JPEG;
     }
 
-    const uint16_t length = read_uint16() - 2;
-    if (!has_remaining(length)) {
+    const uint16_t length = read_uint16();
+    if (length < 2 || !has_remaining(length - 2)) {
         return JPEGGPU_INVALID_JPEG;
     }
 
     logger.log("\twarning: skipping this segment\n");
 
-    reader_state.image += length;
+    reader_state.image += length - 2;
     return JPEGGPU_SUCCESS;
 }
 
@@ -704,7 +704,7 @@ jpeggpu_status jpeggpu::reader::read(logger& logger)
             if (have_initial[c] != std::numeric_limits<uint64_t>::max()) {
                 // TODO is it ever specified that this must be the case?
                 logger.log("\tcomponent %d does not have a definition for each coefficient\n", c);
-                return JPEGGPU_INVALID_JPEG;
+                // return JPEGGPU_INVALID_JPEG;
             }
         }
         // group ac refinement scans into passes

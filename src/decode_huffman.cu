@@ -122,6 +122,7 @@ struct const_state {
     int spectral_start;
     int spectral_end;
     scan_type scan_type;
+    int al;
 };
 // check that struct can be copied to device
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
@@ -386,7 +387,8 @@ __device__ subsequence_info decode_subsequence(
             position_in_output += run_length; // TODO why use position_in_output instead of info.n?
             const int data_unit_idx    = position_in_output / data_unit_size;
             const int idx_in_data_unit = position_in_output % data_unit_size;
-            out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
+            const size_t idx = data_unit_idx * data_unit_size + order_natural[idx_in_data_unit];
+            out[idx]         = symbol << cstate.al;
             ++position_in_output;
         }
 
@@ -755,6 +757,7 @@ __global__ void dc_refine(
             reinterpret_cast<const uint32_t*>(scan_destuffed)[chunk_size * subseq_idx + i]);
         for (int j = 0; j < 32; ++j) {
             const int data_unit_idx = segment_off + subseq_off + i * 32 + j;
+            // FIXME this does not properly deal with stuffing at the end of segments
             if (data_unit_idx >= num_data_units) {
                 return;
             }
@@ -859,7 +862,8 @@ jpeggpu_status jpeggpu::decode_scan(
         info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y,
         scan.spectral_start,
         scan.spectral_end,
-        scan.type};
+        scan.type,
+        scan.successive_approx_lo};
 
     // decode all subsequences
     // "b", sequence size in number of subsequences, configurable

@@ -311,9 +311,6 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             stream,
             logger));
 
-        // FIXME currently progressive scans overwrite the `d_image_qdct` buffer
-        //   however, sequential scans also don't work
-
         // TODO is "data unit" the correct terminology?
 
         // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
