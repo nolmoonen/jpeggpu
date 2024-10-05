@@ -387,6 +387,7 @@ __device__ subsequence_info decode_subsequence(
             position_in_output += run_length; // TODO why use position_in_output instead of info.n?
             const int data_unit_idx    = position_in_output / data_unit_size;
             const int idx_in_data_unit = position_in_output % data_unit_size;
+            // TODO attempt order_natural in shared memory
             const size_t idx = data_unit_idx * data_unit_size + order_natural[idx_in_data_unit];
             out[idx]         = symbol << cstate.al;
             ++position_in_output;

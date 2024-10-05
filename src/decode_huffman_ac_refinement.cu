@@ -60,8 +60,6 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
     __shared__ huffman_table table;
     load_huffman_table<block_size>(cstate.huff_tables[t.huff_idx], table);
     __syncthreads();
-    if (threadIdx.x != 0) return;
-
     ulonglong4 cache;
 
     reader_state_thread_cache<1> rstate;
@@ -70,10 +68,10 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
     rstate.cache     = &cache;
     rstate.cache_idx = 0;
 
-    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
+    if (threadIdx.x == 0 && sizeof(uint4) <= rstate.data_end - rstate.data) {
         global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
     }
-    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
+    if (threadIdx.x == 0 && sizeof(uint4) <= rstate.data_end - rstate.data) {
         global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
     }
 
@@ -99,81 +97,144 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
         break;
     }
 
+    if (threadIdx.x != 0) return;
+
+    __shared__ int order_natural_shared[64];
+    for (int w = 0; w < 64; ++w) {
+        order_natural_shared[w] = order_natural[w];
+    }
+
+    __shared__ int16_t block[64];
+
     int num_blocks_to_skip = 0;
-    for (int i = 0; i < num_data_units; ++i) {
-        const int se_exclusive = t.se + 1;
-        int j                  = t.ss;
-        const int positive     = 1 << t.al;
-        const int negative     = ((unsigned)-1) << t.al; // TODO negative shift undefined behavior?
+    for (int a = 0; a < num_data_units; ++a) {
+        // FIXME does compressing this into zero/nonzero make sense?
+        // load from global into shared
+        constexpr int num_sectors = 64 * sizeof(int16_t) / sizeof(uint4);
+        for (int w = 0; w < num_sectors; ++w) {
+            reinterpret_cast<uint4*>(block)[w] = reinterpret_cast<uint4*>(out + a * 64)[w];
+        }
 
-        if (num_blocks_to_skip == 0) {
-            for (; j < se_exclusive; ++j) {
-                uint32_t data = load_32_bits(rstate);
+        if (threadIdx.x == 0) {
+            const int se_exclusive = t.se + 1;
+            int j                  = t.ss;
+            const int positive     = 1 << t.al;
+            const int negative = ((unsigned)-1) << t.al; // TODO negative shift undefined behavior?
 
-                // ------------- at most 16 bits
-                int k;
-                int32_t code;
-                huffman_table::entry entry;
-                for (k = 0; k < 16; ++k) {
-                    code                    = u32_select_bits(data, k + 1);
-                    const bool is_last_iter = k == 15;
-                    entry                   = table.entries[k];
-                    if (code <= entry.maxcode || is_last_iter) {
+            if (num_blocks_to_skip == 0) {
+                for (; j < se_exclusive; ++j) {
+                    uint32_t data = load_32_bits(rstate);
+
+                    // ------------- at most 16 bits
+                    int k;
+                    int32_t code;
+                    huffman_table::entry entry;
+                    for (k = 0; k < 16; ++k) {
+                        code                    = u32_select_bits(data, k + 1);
+                        const bool is_last_iter = k == 15;
+                        entry                   = table.entries[k];
+                        if (code <= entry.maxcode || is_last_iter) {
+                            break;
+                        }
+                    }
+                    assert(1 <= k + 1 && k + 1 <= 16);
+                    // termination condition: 1 <= k + 1 <= 16, k + 1 is number of bits
+                    const int num_bits_consumed = k + 1;
+                    discard_bits(rstate, num_bits_consumed);
+                    data <<= num_bits_consumed;
+                    // --------------- at least 16 bits remaining
+
+                    const int idx = entry.valptr + (code - entry.mincode);
+                    assert(0 <= idx && idx < 256);
+                    const uint8_t s    = table.huffval[idx];
+                    const int run      = s >> 4;
+                    const int category = s & 0xf;
+
+                    if (category == 0 && run != 15) {
+                        // ---------------------- at most 14 bits
+                        // End of Band
+                        // read the next `run` bits (at most 14), contains #eob blocks
+                        const uint32_t eob_field = u32_select_bits(data, run);
+                        discard_bits(rstate, run);
+                        data <<= num_bits_consumed;
+
+                        const int num_eob_blocks = eob_field + (uint32_t{1} << run);
+                        num_blocks_to_skip += num_eob_blocks;
+                        // ---------------------- at least 2 bits remaining
                         break;
                     }
+
+                    int coeff;
+                    if (category != 0) { // if not taking this branch, run == 15 aka ZRL
+                        assert(category == 1);
+                        const int code = u32_select_bits(data, 1);
+                        discard_bits(rstate, 1);
+                        data <<= 1;
+
+                        coeff = code ? positive : negative;
+                    }
+
+                    data = load_32_bits(rstate);
+                    // FIXME properly implement data loading
+                    int tmp = 0;
+
+                    // -------------------- at most 62 bits
+                    int num_zeroes = run + 1;
+                    for (; j < se_exclusive; ++j) {
+                        if (tmp >= 30) // FIXME this is ugly
+                        {
+                            tmp  = 0;
+                            data = load_32_bits(rstate);
+                        }
+
+                        const int coef_idx    = order_natural_shared[j];
+                        const bool is_nonzero = block[coef_idx];
+                        if (is_nonzero) {
+                            const int code = u32_select_bits(data, 1);
+                            discard_bits(rstate, 1);
+                            data <<= 1;
+                            ++tmp;
+
+                            if (code) {
+                                if ((block[coef_idx] & positive) == 0) {
+                                    if (block[coef_idx] >= 0) {
+                                        block[coef_idx] += positive;
+                                    } else {
+                                        block[coef_idx] += negative;
+                                    }
+                                }
+                            }
+                        } else {
+                            --num_zeroes;
+                            if (num_zeroes == 0) break;
+                        }
+                    }
+                    assert(tmp <= 31); // may need one bit for below
+
+                    if (category != 0) {
+                        assert(j <= 64);
+                        const int coef_idx = order_natural_shared[j];
+                        block[coef_idx]    = coeff;
+                    }
                 }
-                assert(1 <= k + 1 && k + 1 <= 16);
-                // termination condition: 1 <= k + 1 <= 16, k + 1 is number of bits
-                const int num_bits_consumed = k + 1;
-                discard_bits(rstate, num_bits_consumed);
-                data <<= num_bits_consumed;
-                // --------------- at least 16 bits remaining
+            }
 
-                const int idx = entry.valptr + (code - entry.mincode);
-                assert(0 <= idx && idx < 256);
-                const uint8_t s    = table.huffval[idx];
-                const int run      = s >> 4;
-                const int category = s & 0xf;
-
-                if (category == 0 && run != 15) {
-                    // ---------------------- at most 14 bits
-                    // End of Band
-                    // read the next `run` bits (at most 14), contains #eob blocks
-                    const uint32_t eob_field = u32_select_bits(data, run);
-                    discard_bits(rstate, run);
-                    data <<= num_bits_consumed;
-
-                    const int num_eob_blocks = eob_field + (uint32_t{1} << run);
-                    num_blocks_to_skip += num_eob_blocks;
-                    // ---------------------- at least 2 bits remaining
-                    break;
-                }
-
-                int coeff;
-                if (category != 0) { // if not taking this branch, run == 15 aka ZRL
-                    assert(category == 1);
-                    const int code = u32_select_bits(data, 1);
-                    discard_bits(rstate, 1);
-                    data <<= 1;
-
-                    coeff = code ? positive : negative;
-                }
-
-                data = load_32_bits(rstate);
+            if (num_blocks_to_skip > 0) {
+                // ---------------------- at most 64 bits?
+                uint32_t data = load_32_bits(rstate);
                 // FIXME properly implement data loading
                 int tmp = 0;
 
-                // -------------------- at most 62 bits
-                int num_zeroes = run + 1;
+                // skip through all remaining
                 for (; j < se_exclusive; ++j) {
-                    if (tmp >= 30) // FIXME this is ugly
+                    if (tmp >= 31) // FIXME this is ugly
                     {
                         tmp  = 0;
                         data = load_32_bits(rstate);
                     }
 
-                    const int coef_idx    = 64 * i + order_natural[j];
-                    const bool is_nonzero = out[coef_idx];
+                    const int coef_idx    = order_natural_shared[j];
+                    const bool is_nonzero = block[coef_idx];
                     if (is_nonzero) {
                         const int code = u32_select_bits(data, 1);
                         discard_bits(rstate, 1);
@@ -181,64 +242,24 @@ __global__ void tmp2(tmp* tmps, const_state cstate)
                         ++tmp;
 
                         if (code) {
-                            if ((out[coef_idx] & positive) == 0) {
-                                if (out[coef_idx] >= 0) {
-                                    out[coef_idx] += positive;
+                            if ((block[coef_idx] & positive) == 0) {
+                                if (block[coef_idx] >= 0) {
+                                    block[coef_idx] += positive;
                                 } else {
-                                    out[coef_idx] += negative;
+                                    block[coef_idx] += negative;
                                 }
                             }
                         }
-                    } else {
-                        --num_zeroes;
-                        if (num_zeroes == 0) break;
                     }
                 }
-                assert(tmp <= 31); // may need one bit for below
-
-                if (category != 0) {
-                    assert(j <= 64);
-                    const int coef_idx = 64 * i + order_natural[j];
-                    out[coef_idx]      = coeff;
-                }
+                assert(tmp <= 32);
+                --num_blocks_to_skip;
             }
         }
 
-        if (num_blocks_to_skip > 0) {
-            // ---------------------- at most 64 bits?
-            uint32_t data = load_32_bits(rstate);
-            // FIXME properly implement data loading
-            int tmp = 0;
-
-            // skip through all remaining
-            for (; j < se_exclusive; ++j) {
-                if (tmp >= 31) // FIXME this is ugly
-                {
-                    tmp  = 0;
-                    data = load_32_bits(rstate);
-                }
-
-                const int coef_idx    = 64 * i + order_natural[j];
-                const bool is_nonzero = out[coef_idx];
-                if (is_nonzero) {
-                    const int code = u32_select_bits(data, 1);
-                    discard_bits(rstate, 1);
-                    data <<= 1;
-                    ++tmp;
-
-                    if (code) {
-                        if ((out[coef_idx] & positive) == 0) {
-                            if (out[coef_idx] >= 0) {
-                                out[coef_idx] += positive;
-                            } else {
-                                out[coef_idx] += negative;
-                            }
-                        }
-                    }
-                }
-            }
-            assert(tmp <= 32);
-            --num_blocks_to_skip;
+        // store from shared into global
+        for (int w = 0; w < num_sectors; ++w) {
+            reinterpret_cast<uint4*>(out + a * 64)[w] = reinterpret_cast<uint4*>(block)[w];
         }
     }
 }
@@ -307,7 +328,7 @@ jpeggpu_status jpeggpu::decode_ac_refinement(
             info.components[2].size.x * info.components[2].size.y / 64,
             info.components[3].size.x * info.components[3].size.y / 64};
 
-        constexpr int block_size = 256;
+        constexpr int block_size = 32;
         tmp2<block_size><<<scan_pass.num_scans, block_size, 0, stream>>>(d_tmps, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }

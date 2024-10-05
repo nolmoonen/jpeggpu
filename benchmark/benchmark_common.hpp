@@ -36,7 +36,7 @@
         }                                                                                          \
     } while (0)
 
-constexpr int num_iter = 200;
+constexpr int num_iter = 1;
 
 constexpr double us_in_s  = 1e6;
 constexpr double us_in_ms = 1e3;
