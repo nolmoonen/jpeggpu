@@ -495,10 +495,10 @@ void bench_nvjpeg_mt(const uint8_t* file_data, size_t file_size)
 void bench_nvjpeg(const uint8_t* file_data, size_t file_size)
 {
     bench_nvjpeg_st(file_data, file_size);
-    bench_nvjpeg_batch(file_data, file_size, 25);
-    bench_nvjpeg_batch(file_data, file_size, 50);
-    bench_nvjpeg_batch(file_data, file_size, 75);
-    bench_nvjpeg_mt(file_data, file_size);
+    // bench_nvjpeg_batch(file_data, file_size, 25);
+    // bench_nvjpeg_batch(file_data, file_size, 50);
+    // bench_nvjpeg_batch(file_data, file_size, 75);
+    // bench_nvjpeg_mt(file_data, file_size);
 }
 
 #endif // JPEGGPU_BENCHMARK_BENCHMARK_NVJPEG_HPP_

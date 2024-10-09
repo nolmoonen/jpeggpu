@@ -50,7 +50,7 @@ int main(int argc, const char* argv[])
 
         bench_jpeggpu(file_data, file_size);
 
-        if (false) {
+        if (true) {
             bench_nvjpeg(file_data, file_size);
         }
 
