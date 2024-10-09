@@ -24,6 +24,8 @@
 #include "logger.hpp"
 #include "reader.hpp"
 
+#include <cub/device/device_scan.cuh>
+
 using namespace jpeggpu;
 
 namespace {
@@ -51,6 +53,113 @@ struct tmp {
     int al;
     int scan_size; // scan.end - scan.begin
 };
+
+template <int block_size>
+__global__ void map_symbol(
+    int num_bytes, const huffman_table* huff_table, const uint8_t* scan, int* d_offset)
+{
+    __shared__ huffman_table table;
+    load_huffman_table<block_size>(*huff_table, table);
+    __syncthreads();
+
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_bytes) return;
+
+    // max huff code is 16 bits. we have an offset of at most 7, so need 24 bits
+    uint32_t data = 0;
+    for (int i = 0; i < 3; ++i) {
+        // TODO how to load optimized? cannot just do one 32b load since it's not aligned
+        //   probably load the values as a block
+        if (tid + i <= num_bytes) {
+            data |= uint32_t{scan[tid + i]} << (4 - i - 1) * 8;
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        int k;
+        int32_t code;
+        huffman_table::entry entry;
+        for (k = 0; k < 16; ++k) {
+            code                    = u32_select_bits(data, k + 1);
+            const bool is_last_iter = k == 15;
+            entry                   = table.entries[k];
+            if (code <= entry.maxcode || is_last_iter) {
+                break;
+            }
+        }
+        assert(1 <= k + 1 && k + 1 <= 16);
+        // termination condition: 1 <= k + 1 <= 16, k + 1 is number of bits
+
+        data <<= 1; // offset
+
+        const int idx = entry.valptr + (code - entry.mincode);
+        if (idx < 0 || 256 <= idx) continue; // invalid
+
+        const uint8_t s                = table.huffval[idx];
+        [[maybe_unused]] const int run = s >> 4;
+        const int category             = s & 0xf;
+        if (category != 0 && category != 1) continue; // invalid
+
+        const int bit_idx = 8 * tid + i;
+        d_offset[bit_idx] = 1; // valid
+    }
+}
+
+template <int block_size>
+__global__ void write_indices(
+    int num_bytes,
+    const huffman_table* huff_table,
+    const uint8_t* scan,
+    const int* d_offset,
+    int* d_indices)
+{
+    __shared__ huffman_table table;
+    load_huffman_table<block_size>(*huff_table, table);
+    __syncthreads();
+
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_bytes) return;
+
+    // max huff code is 16 bits. we have an offset of at most 7, so need 24 bits
+    uint32_t data = 0;
+    for (int i = 0; i < 3; ++i) {
+        // TODO how to load optimized? cannot just do one 32b load since it's not aligned
+        //   probably load the values as a block
+        if (tid + i <= num_bytes) {
+            data |= uint32_t{scan[tid + i]} << (4 - i - 1) * 8;
+        }
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        int k;
+        int32_t code;
+        huffman_table::entry entry;
+        for (k = 0; k < 16; ++k) {
+            code                    = u32_select_bits(data, k + 1);
+            const bool is_last_iter = k == 15;
+            entry                   = table.entries[k];
+            if (code <= entry.maxcode || is_last_iter) {
+                break;
+            }
+        }
+        assert(1 <= k + 1 && k + 1 <= 16);
+        // termination condition: 1 <= k + 1 <= 16, k + 1 is number of bits
+
+        data <<= 1; // offset
+
+        const int idx = entry.valptr + (code - entry.mincode);
+        if (idx < 0 || 256 <= idx) continue; // invalid
+        // if (idx < 0 || 21 <= idx) continue; // invalid
+
+        const uint8_t s                = table.huffval[idx];
+        [[maybe_unused]] const int run = s >> 4;
+        const int category             = s & 0xf;
+        if (category != 0 && category != 1) continue; // invalid
+
+        const int bit_idx  = 8 * tid + i;
+        d_indices[bit_idx] = bit_idx; // valid
+    }
+}
 
 template <int block_size>
 __global__ void tmp2(tmp* tmps, const_state cstate)
@@ -279,59 +388,143 @@ jpeggpu_status jpeggpu::decode_ac_refinement(
     cudaStream_t stream,
     logger& logger)
 {
-    // FIXME deal with segments! probably can edit the loop to discard the remaining bits
-    //   maybe destuffing code needs to be changed.
+    // TODO for every bit position, figure out if it's a valid huffman code.
 
-    tmp* d_tmps;
-    JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmps, scan_pass.num_scans * sizeof(tmp)));
+    // TODO print ratio of valid/invalid, and ratio between data units and valid positions.
 
-    if (do_it) {
-        std::vector<tmp> h_tmps;
-        JPEGGPU_CHECK_STAT(nothrow_resize(h_tmps, scan_pass.num_scans));
-        for (int i = 0; i < scan_pass.num_scans; ++i) {
-            const scan& scan = info.scans[scan_pass.scan_indices[i]];
-            assert(scan.num_components == 1);
-            const scan_component& scan_comp = scan.scan_components[0];
-            tmp& t                          = h_tmps[i];
-            t.scan_destuffed                = d_scan_destuffed[i];
-            t.segments                      = d_segments[i];
-            t.segment_indices               = d_segment_indices[i];
-            t.huff_idx                      = scan_comp.ac_idx;
-            t.comp_idx                      = scan_comp.component_idx;
-            t.ss                            = scan.spectral_start;
-            t.se                            = scan.spectral_end;
-            t.al                            = scan.successive_approx_lo;
-            // TODO what are the implications of this? see note in decode_huffman.cu
-            t.scan_size = scan.end - scan.begin;
+    // TODO for loop:
+
+    // TODO assign huff 0 to data unit 0, etc. decode the data unit.
+    //   if valid, write the symbol index
+    //   if invalid, increment symbol index and continue
+    //   eventually, every thread will have written a symbol index
+
+    // TODO check if there is no overlap between all segments
+
+    // TODO as long as there is overlap, scan such that the symbol indices are
+    //   strictly incrementing, and continue the loop
+
+    // TODO else, break loop and do a final decode, writing the actual coefficients.
+
+    // TODO for now, launch sequentially
+    for (int i = 0; i < scan_pass.num_scans; ++i) {
+        const scan& scan = info.scans[scan_pass.scan_indices[i]];
+        assert(scan.num_components == 1);
+        const scan_component& scan_comp = scan.scan_components[0];
+
+        // TODO what are the implications of this? see note in decode_huffman.cu
+        const int num_bytes = scan.end - scan.begin;
+        const int num_bits  = num_bytes * 8;
+
+        int* d_offset = nullptr;
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_offset, num_bits * sizeof(int)));
+        if (do_it) {
+            // only write ones
+            JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_offset, 0, num_bits * sizeof(int), stream));
         }
 
-        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync( // FIXME remove copy
-            d_tmps,
-            h_tmps.data(),
-            scan_pass.num_scans * sizeof(tmp),
-            cudaMemcpyHostToDevice,
-            stream));
+        constexpr int block_size = 256;
+        const int num_blocks     = ceiling_div(num_bytes, static_cast<unsigned int>(block_size));
+        const huffman_table* const d_huff_table = &(d_huff_tables[scan_comp.ac_idx]);
+        if (do_it) {
+            map_symbol<block_size><<<num_blocks, block_size, 0, stream>>>(
+                num_bytes, d_huff_table, d_scan_destuffed[i], d_offset);
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
+        }
 
-        // TODO remove assert once variable is checked
-        assert((info.components[0].size.x * info.components[0].size.y) % 64 == 0);
-        assert((info.components[1].size.x * info.components[1].size.y) % 64 == 0);
-        assert((info.components[2].size.x * info.components[2].size.y) % 64 == 0);
-        assert((info.components[3].size.x * info.components[3].size.y) % 64 == 0);
-        const const_state cstate = {
-            d_huff_tables,
-            d_out[0],
-            d_out[1],
-            d_out[2],
-            d_out[3],
-            info.components[0].size.x * info.components[0].size.y / 64,
-            info.components[1].size.x * info.components[1].size.y / 64,
-            info.components[2].size.x * info.components[2].size.y / 64,
-            info.components[3].size.x * info.components[3].size.y / 64};
+        { // scan `d_offset`
+            void* d_tmp_storage     = nullptr;
+            size_t tmp_storage_size = 0;
+            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+                d_tmp_storage, tmp_storage_size, d_offset, d_offset, num_bits, stream));
+            JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
+            if (do_it) {
+                JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+                    d_tmp_storage, tmp_storage_size, d_offset, d_offset, num_bits, stream));
+            }
+        }
 
-        constexpr int block_size = 32;
-        tmp2<block_size><<<scan_pass.num_scans, block_size, 0, stream>>>(d_tmps, cstate);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+        if (do_it && is_debug) {
+            int num_valid_huff_pos = 0; // can be off by one since exclusive sum
+            JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+                &num_valid_huff_pos,
+                &(d_offset[num_bits - 1]),
+                sizeof(int),
+                cudaMemcpyDeviceToHost,
+                stream));
+            // FIXME this approach doesn't really work becase 99.99% is a valid huffman code
+            logger.log(
+                "total: %d, valid: %d (%f%)\n",
+                num_bits,
+                num_valid_huff_pos,
+                (100.0 * num_valid_huff_pos) / num_bits);
+        }
+
+        int* d_indices = nullptr;
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_indices, num_bits * sizeof(int)));
+        if (do_it) {
+            write_indices<block_size><<<num_blocks, block_size, 0, stream>>>(
+                num_bytes, d_huff_table, d_scan_destuffed[i], d_offset, d_indices);
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
+
+            // process<block_size><<<num_blocks, block_size, 0, stream>>>(d_indices);
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
+        }
     }
+
+    // // FIXME deal with segments! probably can edit the loop to discard the remaining bits
+    // //   maybe destuffing code needs to be changed.
+
+    // tmp* d_tmps;
+    // JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmps, scan_pass.num_scans * sizeof(tmp)));
+
+    // if (do_it) {
+    //     std::vector<tmp> h_tmps;
+    //     JPEGGPU_CHECK_STAT(nothrow_resize(h_tmps, scan_pass.num_scans));
+    //     for (int i = 0; i < scan_pass.num_scans; ++i) {
+    //         const scan& scan = info.scans[scan_pass.scan_indices[i]];
+    //         assert(scan.num_components == 1);
+    //         const scan_component& scan_comp = scan.scan_components[0];
+    //         tmp& t                          = h_tmps[i];
+    //         t.scan_destuffed                = d_scan_destuffed[i];
+    //         t.segments                      = d_segments[i];
+    //         t.segment_indices               = d_segment_indices[i];
+    //         t.huff_idx                      = scan_comp.ac_idx;
+    //         t.comp_idx                      = scan_comp.component_idx;
+    //         t.ss                            = scan.spectral_start;
+    //         t.se                            = scan.spectral_end;
+    //         t.al                            = scan.successive_approx_lo;
+    //         // TODO what are the implications of this? see note in decode_huffman.cu
+    //         t.scan_size = scan.end - scan.begin;
+    //     }
+
+    //     JPEGGPU_CHECK_CUDA(cudaMemcpyAsync( // FIXME remove copy
+    //         d_tmps,
+    //         h_tmps.data(),
+    //         scan_pass.num_scans * sizeof(tmp),
+    //         cudaMemcpyHostToDevice,
+    //         stream));
+
+    //     // TODO remove assert once variable is checked
+    //     assert((info.components[0].size.x * info.components[0].size.y) % 64 == 0);
+    //     assert((info.components[1].size.x * info.components[1].size.y) % 64 == 0);
+    //     assert((info.components[2].size.x * info.components[2].size.y) % 64 == 0);
+    //     assert((info.components[3].size.x * info.components[3].size.y) % 64 == 0);
+    //     const const_state cstate = {
+    //         d_huff_tables,
+    //         d_out[0],
+    //         d_out[1],
+    //         d_out[2],
+    //         d_out[3],
+    //         info.components[0].size.x * info.components[0].size.y / 64,
+    //         info.components[1].size.x * info.components[1].size.y / 64,
+    //         info.components[2].size.x * info.components[2].size.y / 64,
+    //         info.components[3].size.x * info.components[3].size.y / 64};
+
+    //     constexpr int block_size = 32;
+    //     tmp2<block_size><<<scan_pass.num_scans, block_size, 0, stream>>>(d_tmps, cstate);
+    //     JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    // }
 
     return JPEGGPU_SUCCESS;
 }
