@@ -18,8 +18,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# TODO write own jpeg_mem_src implementation
+# require v8 for jpeg_mem_src
+find_package(JPEG 80 REQUIRED)
+
 # TODO add option to disable test
 add_executable(jpeggpu_test test.cpp)
-target_link_libraries(jpeggpu_test PRIVATE jpeggpu CUDA::nvjpeg)
-target_include_directories(jpeggpu_test PRIVATE "${PROJECT_SOURCE_DIR}/util")
-configure_file(test.sh "${CMAKE_BINARY_DIR}/test.sh" COPYONLY)
+target_link_libraries(jpeggpu_test PRIVATE jpeggpu CUDA::nvjpeg JPEG::JPEG)
+target_include_directories(jpeggpu_test PRIVATE ../src)

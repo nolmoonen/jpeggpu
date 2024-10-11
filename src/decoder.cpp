@@ -211,7 +211,7 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
 ///   perform any work. Instead, they should just walk through the entire decoding process to
 ///   calculate memory requirements.
 template <bool do_it>
-jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, cudaStream_t stream)
+jpeggpu_status jpeggpu::decoder::decode_impl(cudaStream_t stream)
 {
     uint8_t* d_image_data               = nullptr;
     segment* d_segments[max_scan_count] = {};
@@ -309,7 +309,17 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
                 offset += comp.data_size.x * comp.data_size.y;
             }
         }
+    }
 
+    return JPEGGPU_SUCCESS;
+}
+
+template <bool do_it>
+jpeggpu_status jpeggpu::decoder::decode_idct_impl(
+    [[maybe_unused]] jpeggpu_img* img, cudaStream_t stream)
+{
+    const jpeg_stream& info = reader.jpeg_stream;
+    if (do_it) {
         // invert DCT and output directly into user-provided buffer
         JPEGGPU_CHECK_STAT(
             idct(info, d_image_qdct, img->image, img->pitch, d_qtables, stream, logger));
@@ -322,8 +332,16 @@ jpeggpu_status jpeggpu::decoder::decode_get_size(size_t& tmp_size_param)
 {
     allocator.reset();
     // TODO add check if stream is "dereferenced" when do_it is false, doing so is an error
-    JPEGGPU_CHECK_STAT(decode_impl<false>(nullptr, nullptr));
+    JPEGGPU_CHECK_STAT(decode_impl<false>(nullptr));
     tmp_size_param = allocator.size;
+    return JPEGGPU_SUCCESS;
+}
+
+jpeggpu_status jpeggpu::decoder::decode_common(
+    void* d_tmp_param, size_t tmp_size_param, cudaStream_t stream)
+{
+    allocator.reset(d_tmp_param, tmp_size_param);
+    JPEGGPU_CHECK_STAT(decode_impl<true>(stream));
     return JPEGGPU_SUCCESS;
 }
 
@@ -342,7 +360,15 @@ jpeggpu_status jpeggpu::decoder::decode(
         }
     }
 
-    allocator.reset(d_tmp_param, tmp_size_param);
-    JPEGGPU_CHECK_STAT(decode_impl<true>(img, stream));
-    return JPEGGPU_SUCCESS;
+    const jpeggpu_status status = decode_common(d_tmp_param, tmp_size_param, stream);
+    if (status != JPEGGPU_SUCCESS) {
+        return status;
+    }
+    return decode_idct_impl<true>(img, stream);
+}
+
+jpeggpu_status jpeggpu::decoder::decode_no_idct(
+    void* d_tmp_param, size_t tmp_size_param, cudaStream_t stream)
+{
+    return decode_common(d_tmp_param, tmp_size_param, stream);
 }
