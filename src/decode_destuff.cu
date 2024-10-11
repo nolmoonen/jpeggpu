@@ -28,6 +28,7 @@
 
 #include <cassert>
 #include <stdint.h>
+#include <vector>
 
 using namespace jpeggpu;
 
@@ -216,22 +217,24 @@ jpeggpu_status jpeggpu::destuff_scan(
     { // scan `d_offset_segment`
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
-        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
-            d_tmp_storage,
-            tmp_storage_size,
-            d_offset_segment,
-            d_offset_segment,
-            stuffed_scan_size,
-            stream));
-        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
-        if (do_it) {
-            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
+        JPEGGPU_CHECK_CUDA(
+            cub::DeviceScan::ExclusiveSum(
                 d_tmp_storage,
                 tmp_storage_size,
                 d_offset_segment,
                 d_offset_segment,
                 stuffed_scan_size,
                 stream));
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
+        if (do_it) {
+            JPEGGPU_CHECK_CUDA(
+                cub::DeviceScan::ExclusiveSum(
+                    d_tmp_storage,
+                    tmp_storage_size,
+                    d_offset_segment,
+                    d_offset_segment,
+                    stuffed_scan_size,
+                    stream));
         }
         // TODO since stream-ordered, should be able to reclaim tmp storage
     }
@@ -254,18 +257,8 @@ jpeggpu_status jpeggpu::destuff_scan(
     { // scan `d_offset_data` by segment index
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
-        JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSumByKey(
-            d_tmp_storage,
-            tmp_storage_size,
-            d_offset_segment,
-            d_offset_data,
-            d_offset_data,
-            stuffed_scan_size,
-            cub::Equality{},
-            stream));
-        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
-        if (do_it) {
-            JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSumByKey(
+        JPEGGPU_CHECK_CUDA(
+            cub::DeviceScan::ExclusiveSumByKey(
                 d_tmp_storage,
                 tmp_storage_size,
                 d_offset_segment,
@@ -274,6 +267,18 @@ jpeggpu_status jpeggpu::destuff_scan(
                 stuffed_scan_size,
                 cub::Equality{},
                 stream));
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
+        if (do_it) {
+            JPEGGPU_CHECK_CUDA(
+                cub::DeviceScan::ExclusiveSumByKey(
+                    d_tmp_storage,
+                    tmp_storage_size,
+                    d_offset_segment,
+                    d_offset_data,
+                    d_offset_data,
+                    stuffed_scan_size,
+                    cub::Equality{},
+                    stream));
         }
         // TODO since stream-ordered, should be able to reclaim tmp storage
     }
@@ -303,22 +308,24 @@ jpeggpu_status jpeggpu::destuff_scan(
     { // scan `d_offset_subsequence`
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
-        JPEGGPU_CHECK_CUDA(cub::DeviceScan::InclusiveSum(
-            d_tmp_storage,
-            tmp_storage_size,
-            d_offset_subsequence,
-            d_offset_subsequence,
-            stuffed_scan_size,
-            stream));
-        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
-        if (do_it) {
-            JPEGGPU_CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+        JPEGGPU_CHECK_CUDA(
+            cub::DeviceScan::InclusiveSum(
                 d_tmp_storage,
                 tmp_storage_size,
                 d_offset_subsequence,
                 d_offset_subsequence,
                 stuffed_scan_size,
                 stream));
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
+        if (do_it) {
+            JPEGGPU_CHECK_CUDA(
+                cub::DeviceScan::InclusiveSum(
+                    d_tmp_storage,
+                    tmp_storage_size,
+                    d_offset_subsequence,
+                    d_offset_subsequence,
+                    stuffed_scan_size,
+                    stream));
         }
     }
 
