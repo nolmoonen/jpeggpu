@@ -32,6 +32,12 @@
 #include <iostream>
 #include <stdint.h>
 
+// TODO
+// - add support for 16-bit qtables
+// - change interface
+//   - support storing APP and COM markers
+//   - explicit passing of reader state to decoder stage
+
 // Accelerating JPEG Decompression on GPUs
 // https://arxiv.org/abs/2111.09219
 
@@ -40,22 +46,22 @@
 
 namespace jpeggpu {
 
-#define JPEGGPU_CHECK_CUDA(call)                                                                   \
-    do {                                                                                           \
-        cudaError_t err = call;                                                                    \
-        if (err != cudaSuccess) {                                                                  \
-            logger.log(                                                                            \
-                "CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__);     \
-            return JPEGGPU_INTERNAL_ERROR;                                                         \
-        }                                                                                          \
+#define JPEGGPU_CHECK_CUDA(call)                                                               \
+    do {                                                                                       \
+        cudaError_t err = call;                                                                \
+        if (err != cudaSuccess) {                                                              \
+            logger.log(                                                                        \
+                "CUDA error \"%s\" at: " __FILE__ ":%d\n", cudaGetErrorString(err), __LINE__); \
+            return JPEGGPU_INTERNAL_ERROR;                                                     \
+        }                                                                                      \
     } while (0)
 
-#define JPEGGPU_CHECK_STAT(call)                                                                   \
-    do {                                                                                           \
-        jpeggpu_status stat = call;                                                                \
-        if (stat != JPEGGPU_SUCCESS) {                                                             \
-            return JPEGGPU_INTERNAL_ERROR;                                                         \
-        }                                                                                          \
+#define JPEGGPU_CHECK_STAT(call)       \
+    do {                               \
+        jpeggpu_status stat = call;    \
+        if (stat != JPEGGPU_SUCCESS) { \
+            return stat;               \
+        }                              \
     } while (0)
 
 /// \brief The number of rows or columns in a data unit, eight.
@@ -65,20 +71,21 @@ namespace jpeggpu {
 constexpr int data_unit_vector_size = 8;
 /// \brief The number of pixels in a data units, 64.
 constexpr int data_unit_size = 64;
-
-// TODO if Huffman tables are redefined between scans, this will be an issue.
-//  there should be memory for `max_huffman_count_per_scan * max_scan_count`
-//  but only `max_huffman_count_per_scan` should be passed to `decode_scan`
-constexpr int max_huffman_count = 2;
-/// as defined by jpeg spec
+/// \brief Maximum supported component count. The specification allows up to 255,
+///   practically limit it.
 constexpr int max_comp_count = JPEGGPU_MAX_COMP;
-/// each scan must have at least one component, no component may appear twice
-/// TODO check with spec whether above is true
-constexpr int max_scan_count = max_comp_count;
+/// \brief In baseline JPEG, each scan represents one or more complete components.
+///   TODO does the spec allow redefining/overwriting components? we do not.
+constexpr int max_baseline_scan_count = max_comp_count;
+
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
-using qtable = uint8_t[64];
+constexpr int max_baseline_huff_per_scan = max_baseline_scan_count * HUFF_COUNT;
+
+struct qtable {
+    uint8_t data[64];
+};
 
 // clang-format off
 /// \brief Convert zig-zag index to raster index,

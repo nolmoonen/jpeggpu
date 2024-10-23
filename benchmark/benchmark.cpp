@@ -40,6 +40,11 @@ int main(int argc, const char* argv[])
         std::cout << file_path << "\n";
 
         std::ifstream file(file_path);
+        if (!file.is_open()) {
+            std::cerr << "cannot open \"" << file_path << "\"\n";
+            return EXIT_FAILURE;
+        }
+
         file.seekg(0, std::ios_base::end);
         const std::streampos file_size = file.tellg();
         file.seekg(0);

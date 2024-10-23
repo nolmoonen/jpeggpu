@@ -59,7 +59,6 @@ __global__ void transpose_interleaved(
 {
     const size_t idx_pixel_in = (blockIdx.x * blockDim.x + threadIdx.x) * num_values_per_thread;
 
-    // Check is valid for both pixels.
     assert(data_size % num_values_per_thread == 0);
     if (idx_pixel_in >= data_size) return;
 
@@ -142,19 +141,24 @@ jpeggpu_status jpeggpu::decode_transpose(
     cudaStream_t stream,
     logger& logger)
 {
-    const component(&comps)[max_comp_count] = info.components;
-    const int(&indices)[max_comp_count]     = scan.component_indices;
-    const int num_components                = scan.num_components;
+    const component(&comps)[max_comp_count]                = info.components;
+    const scan_component(&scan_components)[max_comp_count] = scan.scan_components;
+    const int num_scan_comp                                = scan.num_scan_components;
 
     const size_t total_data_size =
-        (num_components > 0 ? comps[indices[0]].data_size.x * comps[indices[0]].data_size.y : 0) +
-        (num_components > 1 ? comps[indices[1]].data_size.x * comps[indices[1]].data_size.y : 0) +
-        (num_components > 2 ? comps[indices[2]].data_size.x * comps[indices[2]].data_size.y : 0) +
-        (num_components > 3 ? comps[indices[3]].data_size.x * comps[indices[3]].data_size.y : 0);
+        (num_scan_comp > 0 ? scan_components[0].data_size.x * scan_components[0].data_size.y : 0) +
+        (num_scan_comp > 1 ? scan_components[1].data_size.x * scan_components[1].data_size.y : 0) +
+        (num_scan_comp > 2 ? scan_components[2].data_size.x * scan_components[2].data_size.y : 0) +
+        (num_scan_comp > 3 ? scan_components[3].data_size.x * scan_components[3].data_size.y : 0);
 
     const dim3 transpose_block_dim(256);
     const dim3 transpose_grid_dim(ceiling_div(
         total_data_size / num_values_per_thread, static_cast<unsigned int>(transpose_block_dim.x)));
+
+    const int comp_idx_0 = scan_components[0].component_idx;
+    const int comp_idx_1 = scan_components[1].component_idx;
+    const int comp_idx_2 = scan_components[2].component_idx;
+    const int comp_idx_3 = scan_components[3].component_idx;
 
 // Provide the num_data_units_in_mcu as a compile-time constant so the compiler can generate efficient
 //   division and modulo instructions.
@@ -162,20 +166,20 @@ jpeggpu_status jpeggpu::decode_transpose(
     transpose_interleaved<NUM_DATA_UNITS_IN_MCU>                            \
         <<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(           \
             d_out,                                                          \
-            num_components > 0 ? d_image_qdct[indices[0]] : nullptr,        \
-            num_components > 1 ? d_image_qdct[indices[1]] : nullptr,        \
-            num_components > 2 ? d_image_qdct[indices[2]] : nullptr,        \
-            num_components > 3 ? d_image_qdct[indices[3]] : nullptr,        \
+            num_scan_comp > 0 ? d_image_qdct[comp_idx_0] : nullptr,         \
+            num_scan_comp > 1 ? d_image_qdct[comp_idx_1] : nullptr,         \
+            num_scan_comp > 2 ? d_image_qdct[comp_idx_2] : nullptr,         \
+            num_scan_comp > 3 ? d_image_qdct[comp_idx_3] : nullptr,         \
             total_data_size,                                                \
-            num_components > 0 ? comps[indices[0]].data_size : ivec2{0, 0}, \
-            num_components > 1 ? comps[indices[1]].data_size : ivec2{0, 0}, \
-            num_components > 2 ? comps[indices[2]].data_size : ivec2{0, 0}, \
-            num_components > 3 ? comps[indices[3]].data_size : ivec2{0, 0}, \
+            num_scan_comp > 0 ? scan_components[0].data_size : ivec2{0, 0}, \
+            num_scan_comp > 1 ? scan_components[1].data_size : ivec2{0, 0}, \
+            num_scan_comp > 2 ? scan_components[2].data_size : ivec2{0, 0}, \
+            num_scan_comp > 3 ? scan_components[3].data_size : ivec2{0, 0}, \
             scan.num_mcus.x,                                                \
-            num_components > 0 ? comps[indices[0]].ss : ivec2{0, 0},        \
-            num_components > 1 ? comps[indices[1]].ss : ivec2{0, 0},        \
-            num_components > 2 ? comps[indices[2]].ss : ivec2{0, 0},        \
-            num_components > 3 ? comps[indices[3]].ss : ivec2{0, 0});       \
+            num_scan_comp > 0 ? comps[comp_idx_0].ss : ivec2{0, 0},         \
+            num_scan_comp > 1 ? comps[comp_idx_1].ss : ivec2{0, 0},         \
+            num_scan_comp > 2 ? comps[comp_idx_2].ss : ivec2{0, 0},         \
+            num_scan_comp > 3 ? comps[comp_idx_3].ss : ivec2{0, 0});        \
     JPEGGPU_CHECK_CUDA(cudaGetLastError());                                 \
     return JPEGGPU_SUCCESS;
 

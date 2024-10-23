@@ -21,7 +21,10 @@
 #ifndef JPEGGPU_UTIL_HPP_
 #define JPEGGPU_UTIL_HPP_
 
+#include <cassert>
+#include <limits>
 #include <type_traits>
+#include <vector>
 
 template <
     typename T,
@@ -84,6 +87,76 @@ struct ivec2 {
     int x;
     int y;
 };
+
+/// \brief Allocates pinned/page-locked memory using CUDA.
+template <class T>
+struct pinned_allocator {
+    using value_type = T;
+
+    [[nodiscard]] T* allocate(size_t n)
+    {
+        if (n > std::numeric_limits<size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+
+        T* ptr          = nullptr;
+        cudaError_t err = cudaMallocHost(&ptr, n * sizeof(T));
+        if (err != cudaSuccess || ptr == nullptr) {
+            if (ptr != nullptr) cudaFreeHost(ptr);
+            throw std::bad_alloc();
+        }
+
+        return ptr;
+    }
+
+    void deallocate(T* ptr, [[maybe_unused]] size_t n) noexcept { cudaFreeHost(ptr); }
+};
+
+template <typename T, typename Allocator>
+[[nodiscard]] jpeggpu_status nothrow_resize(
+    std::vector<T, Allocator>& c, typename std::vector<T, Allocator>::size_type n)
+{
+    try {
+        c.resize(n);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    return JPEGGPU_SUCCESS;
+}
+
+template <typename T, typename Allocator>
+[[nodiscard]] jpeggpu_status nothrow_reserve(
+    std::vector<T, Allocator>& c, typename std::vector<T, Allocator>::size_type n)
+{
+    try {
+        c.reserve(n);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    return JPEGGPU_SUCCESS;
+}
+
+template <typename T, typename Allocator>
+[[nodiscard]] jpeggpu_status nothrow_push_back(std::vector<T, Allocator>& c, const T& value)
+{
+    try {
+        c.push_back(value);
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    return JPEGGPU_SUCCESS;
+}
+
+template <typename T, typename Allocator>
+[[nodiscard]] jpeggpu_status nothrow_push_back(std::vector<T, Allocator>& c, T&& value)
+{
+    try {
+        c.push_back(std::forward<T>(value));
+    } catch (const std::exception& e) {
+        return JPEGGPU_OUT_OF_HOST_MEMORY;
+    }
+    return JPEGGPU_SUCCESS;
+}
 
 } // namespace jpeggpu
 

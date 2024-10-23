@@ -28,6 +28,7 @@
 
 #include <cstdarg>
 #include <stddef.h>
+#include <vector>
 #include <stdint.h>
 
 namespace jpeggpu {
@@ -50,21 +51,6 @@ struct decoder {
     jpeggpu_status decode(jpeggpu_img* img, void* d_tmp, size_t tmp_size, cudaStream_t stream);
 
     struct reader reader;
-
-    /// \brief Device memory for quantization tables.
-    ///   Allocations persists with the decoder state because it is constant in size and small.
-    uint8_t* d_qtables[max_comp_count];
-
-    /// \brief Device memory for the Huffman tables.
-    ///
-    /// One allocation so this makes up one contiguous block of memory,
-    ///  which is beneficial for coalescing (when loading into shared memory).
-    /// Allocations persists with the decoder state because it is constant in size and small.
-    huffman_table* d_huff_tables;
-
-    /// \brief Output of decoding, quantized and cosine-transformed image data.
-    ///   Allocation does not persist with the decoder state since the size depends on input image.
-    int16_t* d_image_qdct[max_comp_count];
 
     /// \brief Keeps track of allocations for the current decoded image.
     stack_allocator allocator;

@@ -102,14 +102,14 @@ struct const_state {
     const int num_segments;
     /// \brief Huffman tables.
     const huffman_table* huffman_tables;
-    int dc_0; /// DC Huffman table index for component 0.
-    int ac_0; /// AC Huffman table index for component 0.
-    int dc_1; /// DC Huffman table index for component 1.
-    int ac_1; /// AC Huffman table index for component 1.
-    int dc_2; /// DC Huffman table index for component 2.
-    int ac_2; /// AC Huffman table index for component 2.
-    int dc_3; /// DC Huffman table index for component 3.
-    int ac_3; /// AC Huffman table index for component 3.
+    int dc_0; /// Relative DC Huffman table index for component 0.
+    int ac_0; /// Relative AC Huffman table index for component 0.
+    int dc_1; /// Relative DC Huffman table index for component 1.
+    int ac_1; /// Relative AC Huffman table index for component 1.
+    int dc_2; /// Relative DC Huffman table index for component 2.
+    int ac_2; /// Relative AC Huffman table index for component 2.
+    int dc_3; /// Relative DC Huffman table index for component 3.
+    int ac_3; /// Relative AC Huffman table index for component 3.
     int c0_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 0.
     int c1_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 1.
     int c2_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 2.
@@ -124,30 +124,24 @@ struct const_state {
 static_assert(std::is_trivially_copyable_v<const_state>);
 
 /// \brief Typedef for the maximum amount of Huffman tables for a scan.
-using huffman_tables = huffman_table[max_huffman_count * HUFF_COUNT];
+using huffman_tables = huffman_table[max_baseline_huff_per_scan];
 
 /// \brief Load Huffman tables from global memory into shared.
-///
-/// TODO this always loads the maximum possible amount of tables.
-///   in the common case (one for luminance and one for chrominance),
-///   this results in twice as many loads as needed
 template <int block_size>
-__device__ void load_huffman_tables(
-    const huffman_table* tables_global, huffman_tables& tables_shared)
+__device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
 {
     // assert that loading a word at a time is valid
     static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
-    constexpr int num_words = sizeof(tables_shared) / 4;
+    constexpr int num_words = sizeof(huffman_tables) / 4;
     constexpr int num_words_per_thread =
         ceiling_div(num_words, static_cast<unsigned int>(block_size));
     for (int i = 0; i < num_words_per_thread; ++i) {
         const int idx = block_size * i + threadIdx.x;
         if (idx < num_words) {
-            reinterpret_cast<uint32_t*>(tables_shared)[idx] =
-                reinterpret_cast<const uint32_t*>(tables_global)[idx];
+            reinterpret_cast<uint32_t*>(&tables_shared)[idx] =
+                reinterpret_cast<const uint32_t*>(cstate.huffman_tables)[idx];
         }
     }
-    __syncthreads();
 }
 
 /// \brief Returns the oldest (most significant) `num_bits` from `data`.
@@ -186,6 +180,7 @@ uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table&
     // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
     length        = i + 1;
     const int idx = entry.valptr + (code - entry.mincode);
+    // TODO this check can be more precise if knowing #codes, would that help syncing?
     if (idx < 0 || 256 <= idx) {
         // found a value that does not make sense. this can happen if the wrong huffman
         //   table is used. return arbitrary value
@@ -206,6 +201,7 @@ __device__ void decode_next_symbol_dc(
 {
     int category_length    = 0;
     const uint8_t category = get_category(data, category_length, table);
+    assert(category_length <= 16);
 
     if (category == 0) {
         // coeff is zero
@@ -233,8 +229,9 @@ __device__ void decode_next_symbol_ac(
 {
     int category_length = 0;
     const uint8_t s     = get_category(data, category_length, table);
-    const int run       = s >> 4;
-    const int category  = s & 0xf;
+    assert(category_length <= 16);
+    const int run      = s >> 4;
+    const int category = s & 0xf;
 
     if (category == 0) {
         // coeff is zero
@@ -319,9 +316,6 @@ __device__ subsequence_info decode_subsequence(
             break;
         }
 
-        int length     = 0;
-        int symbol     = 0;
-        int run_length = 0;
         int dc;
         int ac;
         if (info.c < cstate.c0_inc_prefix) {
@@ -337,12 +331,15 @@ __device__ subsequence_info decode_subsequence(
             dc = cstate.dc_3;
             ac = cstate.ac_3;
         }
-        const huffman_table& table_dc = tables[dc * HUFF_COUNT + HUFF_DC];
-        const huffman_table& table_ac = tables[ac * HUFF_COUNT + HUFF_AC];
+        const huffman_table& table_dc = tables[dc];
+        const huffman_table& table_ac = tables[ac];
 
         // decode_next_symbol uses at most 32 bits. if fewer than 32 bits are available, append with zeroes
         uint32_t data = load_32_bits(rstate);
 
+        int length     = 0;
+        int symbol     = 0;
+        int run_length = 0;
         // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
 
@@ -356,11 +353,14 @@ __device__ subsequence_info decode_subsequence(
         // commit
         discard_bits(rstate, length);
 
+        // TODO do not write when `symbol == 0`?
         if (do_write) {
+            // TODO why use position_in_output instead of info.n?
             // TODO could make a separate kernel for this
             position_in_output += run_length;
             const int data_unit_idx    = position_in_output / data_unit_size;
             const int idx_in_data_unit = position_in_output % data_unit_size;
+            // TODO attempt order_natural in shared memory
             out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
             ++position_in_output;
         }
@@ -370,6 +370,10 @@ __device__ subsequence_info decode_subsequence(
         info.z += run_length + 1;
 
         if (info.z >= 64) {
+            // do_write implies synced
+            assert(info.z == 64 || !do_write);
+            assert(position_in_output % 64 == 0 || !do_write);
+
             // the data unit is complete
             info.z = 0;
             ++info.c;
@@ -402,7 +406,8 @@ __global__ void sync_intra_sequence(
     __shared__ subsequence_info s_info_shared[block_size];
 
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    load_huffman_tables<block_size>(cstate, tables);
+    __syncthreads();
 
     // Don't load all subsequences of the block into memory at the beginning as it
     //   hurts occupancy to have so much shared memory.
@@ -455,6 +460,8 @@ __global__ void sync_intra_sequence(
     __shared__ bool is_block_done;
     using block_reduce = cub::BlockReduce<bool, block_size>;
     __shared__ typename block_reduce::TempStorage temp_storage;
+
+    // TODO limit the number of iterations to prevent DOS
 
     bool is_synced = false;
     bool do_write  = true;
@@ -518,7 +525,8 @@ __global__ void sync_subsequences(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    load_huffman_tables<block_size>(cstate, tables);
+    __syncthreads();
 
     using reader_state = reader_state_thread_cache<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
@@ -613,11 +621,13 @@ __global__ void decode_write(
     const_state cstate)
 {
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
+    load_huffman_tables<block_size>(cstate, tables);
 
     using reader_state = reader_state_all_subsequences<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
     load_all_subsequences<block_size>(cstate.scan, num_subsequences, rstate_memory);
+
+    __syncthreads();
 
     const int subseq_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (subseq_idx >= num_subsequences) {
@@ -703,10 +713,10 @@ jpeggpu_status jpeggpu::decode_scan(
 
     // alg-1:01
     int num_data_units = 0;
-    for (int c = 0; c < scan.num_components; ++c) {
-        const component& comp = info.components[scan.component_indices[c]];
-        num_data_units += (comp.data_size.x / jpeggpu::data_unit_vector_size) *
-                          (comp.data_size.y / jpeggpu::data_unit_vector_size);
+    for (int a = 0; a < scan.num_scan_components; ++a) {
+        const scan_component& scan_comp = scan.scan_components[a];
+        num_data_units += (scan_comp.data_size.x / jpeggpu::data_unit_vector_size) *
+                          (scan_comp.data_size.y / jpeggpu::data_unit_vector_size);
     }
 
     // alg-1:05
@@ -717,10 +727,10 @@ jpeggpu_status jpeggpu::decode_scan(
     // block count in MCU
     int c_offsets[max_comp_count] = {};
     int c_offset                  = 0;
-    for (int c = 0; c < scan.num_components; ++c) {
-        const component& comp = info.components[scan.component_indices[c]];
+    for (int sc = 0; sc < scan.num_scan_components; ++sc) {
+        const component& comp = info.components[scan.scan_components[sc].component_idx];
         c_offset += comp.ss.x * comp.ss.y;
-        c_offsets[c] = c_offset;
+        c_offsets[sc] = c_offset;
     }
 
     const const_state cstate = {
@@ -734,20 +744,20 @@ jpeggpu_status jpeggpu::decode_scan(
         d_segment_indices,
         scan.num_segments,
         d_huff_tables,
-        info.components[0].dc_idx,
-        info.components[0].ac_idx,
-        info.components[1].dc_idx,
-        info.components[1].ac_idx,
-        info.components[2].dc_idx,
-        info.components[2].ac_idx,
-        info.components[3].dc_idx,
-        info.components[3].ac_idx,
+        scan.scan_components[0].dc_idx,
+        scan.scan_components[0].ac_idx,
+        scan.scan_components[1].dc_idx,
+        scan.scan_components[1].ac_idx,
+        scan.scan_components[2].dc_idx,
+        scan.scan_components[2].ac_idx,
+        scan.scan_components[3].dc_idx,
+        scan.scan_components[3].ac_idx,
         c_offsets[0],
         c_offsets[1],
         c_offsets[2],
         c_offsets[3],
         scan.num_data_units_in_mcu,
-        info.num_components,
+        scan.num_scan_components,
         num_data_units,
         info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
 

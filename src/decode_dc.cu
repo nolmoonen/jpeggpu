@@ -93,11 +93,11 @@ jpeggpu_status jpeggpu::decode_dc(
     cudaStream_t stream,
     logger& logger)
 {
-    int off_in_mcu  = 0; // number of data units, only used for interleaved
-    int off_in_data = 0; // number of data elements, only used for non-interleaved
+    int off_in_mcu = 0; // number of data units, only used for interleaved
 
-    for (int c = 0; c < scan.num_components; ++c) {
-        const component& comp                 = info.components[scan.component_indices[c]];
+    for (int sc = 0; sc < scan.num_scan_components; ++sc) {
+        const scan_component& scan_comp       = scan.scan_components[sc];
+        const component& comp                 = info.components[scan_comp.component_idx];
         const int data_units_in_mcu_component = comp.ss.x * comp.ss.y;
 
         auto counting_iter = thrust::make_counting_iterator(int{0});
@@ -112,7 +112,8 @@ jpeggpu_status jpeggpu::decode_dc(
         void* d_tmp_storage      = nullptr;
         size_t tmp_storage_bytes = 0;
 
-        const int num_data_units_component = comp.data_size.x * comp.data_size.y / data_unit_size;
+        const int num_data_units_component =
+            scan_comp.data_size.x * scan_comp.data_size.y / data_unit_size;
 
         if (info.restart_interval != 0) {
             // if restart interval is defined, scan by key where key is segment index
@@ -161,7 +162,6 @@ jpeggpu_status jpeggpu::decode_dc(
         }
 
         off_in_mcu += data_units_in_mcu_component;
-        off_in_data += comp.data_size.x * comp.data_size.y;
     }
 
     return JPEGGPU_SUCCESS;

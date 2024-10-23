@@ -151,7 +151,7 @@ __global__ void idct_kernel(
     int data_size_y,
     int size_x,
     int size_y,
-    uint8_t* qtable)
+    qtable* qtable)
 {
     constexpr int shared_stride = (num_data_x_block + 2);
     // macroblock data in the image order
@@ -176,7 +176,7 @@ __global__ void idct_kernel(
             const int data_idx_in_data_unit = i * data_unit_vector_size + threadIdx.x;
             int16_t* bl_ptr                 = &block[shared_y * shared_stride + shared_x];
             const int16_t val               = image_qdct[off];
-            const int8_t qval               = qtable[data_idx_in_data_unit];
+            const int8_t qval               = qtable->data[data_idx_in_data_unit];
             bl_ptr[i * shared_stride]       = val * qval;
         }
     }
@@ -229,28 +229,32 @@ jpeggpu_status jpeggpu::idct(
     int16_t* (&d_image_qdct)[max_comp_count],
     uint8_t* (&d_image)[max_comp_count],
     int (&pitch)[max_comp_count],
-    uint8_t* (&d_qtable)[max_comp_count], // TODO can be 16 bit?
+    qtable* (&d_qtable)[max_comp_count], // TODO can be 16 bit?
     cudaStream_t stream,
     logger& logger)
 {
-    for (int c = 0; c < info.num_components; ++c) {
-        const dim3 num_blocks(
-            ceiling_div(
-                info.components[c].data_size.x, static_cast<unsigned int>(num_data_x_block)),
-            ceiling_div(
-                info.components[c].data_size.y, static_cast<unsigned int>(num_data_y_block)));
-        const dim3 kernel_block_size(
-            data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
-        idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
-            d_image_qdct[c],
-            d_image[c],
-            pitch[c],
-            info.components[c].data_size.x,
-            info.components[c].data_size.y,
-            info.components[c].size.x,
-            info.components[c].size.y,
-            d_qtable[c]);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
+    for (int s = 0; s < info.num_scans; ++s) {
+        const scan& scan = info.scans[s];
+        for (int a = 0; a < scan.num_scan_components; ++a) {
+            const scan_component& scan_comp = scan.scan_components[a];
+            const component& comp           = info.components[scan_comp.component_idx];
+            const dim3 num_blocks(
+                ceiling_div(scan_comp.data_size.x, static_cast<unsigned int>(num_data_x_block)),
+                ceiling_div(scan_comp.data_size.y, static_cast<unsigned int>(num_data_y_block)));
+            const dim3 kernel_block_size(
+                data_unit_vector_size, num_data_units_x_block, num_data_units_y_block);
+            idct_kernel<<<num_blocks, kernel_block_size, 0, stream>>>(
+                d_image_qdct[scan_comp.component_idx],
+                d_image[scan_comp.component_idx],
+                pitch[scan_comp.component_idx],
+                scan_comp.data_size.x,
+                scan_comp.data_size.y,
+                comp.size.x,
+                comp.size.y,
+                d_qtable[comp.qtable_idx]);
+            JPEGGPU_CHECK_CUDA(cudaGetLastError());
+        }
     }
+
     return JPEGGPU_SUCCESS;
 }

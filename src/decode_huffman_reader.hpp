@@ -32,7 +32,7 @@
 namespace jpeggpu {
 
 /// \brief Rearrange bytes after loading an unsigned 32-bits integer.
-__device__ uint32_t swap_endian(uint32_t x)
+inline __device__ uint32_t swap_endian(uint32_t x)
 {
     return __byte_perm(x, uint32_t{0}, uint32_t{0x0123});
 }
@@ -60,6 +60,7 @@ struct reader_state_thread_cache {
 template <int block_size>
 __device__ void global_load_uint4(reader_state_thread_cache<block_size>& rstate, uint4* shared)
 {
+    // TODO why is this not loading 128 bits at a time, and then applying endian swap?
     for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
         const uint32_t val                     = reinterpret_cast<const uint32_t*>(rstate.data)[i];
         reinterpret_cast<uint32_t*>(shared)[i] = swap_endian(val);
@@ -220,7 +221,6 @@ __device__ void load_all_subsequences(
             rstate_memory[i]   = swap_endian(val);
         }
     }
-    __syncthreads();
 }
 
 template <int block_size>

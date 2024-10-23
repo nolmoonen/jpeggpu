@@ -31,6 +31,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <stdint.h>
 #include <type_traits>
 #include <vector>
@@ -52,6 +53,8 @@ const char* jpeggpu_get_status_string(enum jpeggpu_status stat)
         return "jpeg is not supported";
     case JPEGGPU_OUT_OF_HOST_MEMORY:
         return "out of host memory";
+    case JPEGGPU_INCOMPLETE_BITSTREAM:
+        return "incomplete bitstream";
     }
     return "unknown status";
 }
@@ -62,11 +65,11 @@ enum jpeggpu_status jpeggpu_decoder_startup(jpeggpu_decoder_t* decoder)
         return JPEGGPU_INVALID_ARGUMENT;
     }
 
-    *decoder = reinterpret_cast<jpeggpu_decoder*>(malloc(sizeof(jpeggpu_decoder)));
-    if (!*decoder) {
+    // TODO does this need a try-catch when std::vector constructor fails?
+    *decoder = new (std::nothrow) jpeggpu_decoder();
+    if (*decoder == nullptr) {
         return JPEGGPU_OUT_OF_HOST_MEMORY;
     }
-    // TODO new without exceptions or placement new?
 
     return (*decoder)->decoder.init();
 }
@@ -150,7 +153,7 @@ enum jpeggpu_status jpeggpu_decoder_cleanup(jpeggpu_decoder_t decoder)
     }
 
     decoder->decoder.cleanup();
-    free(decoder);
+    delete decoder;
 
     return JPEGGPU_SUCCESS;
 }
