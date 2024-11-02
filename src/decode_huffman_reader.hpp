@@ -48,23 +48,23 @@ struct reader_state_thread_cache {
     ///   The oldest bits are in the most significant positions.
     ///
     /// TODO get clarity on "sector" definition
-    ulonglong4* cache;
+    uint4* cache;
     /// \brief Index of the next bit in the cache to read.
     int cache_idx;
 
     /// \brief Typedef for one cache per thread.
-    using smem_type = ulonglong4[block_size];
+    using smem_type = uint4[2 * block_size];
 };
 
 /// \brief Load the next sector (128 bits) into shared memory cache.
 template <int block_size>
 __device__ void global_load_uint4(reader_state_thread_cache<block_size>& rstate, uint4* shared)
 {
-    // TODO why is this not loading 128 bits at a time, and then applying endian swap?
-    for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
-        const uint32_t val                     = reinterpret_cast<const uint32_t*>(rstate.data)[i];
-        reinterpret_cast<uint32_t*>(shared)[i] = swap_endian(val);
-    }
+    *shared   = *reinterpret_cast<const uint4*>(rstate.data);
+    shared->x = swap_endian(shared->x);
+    shared->y = swap_endian(shared->y);
+    shared->z = swap_endian(shared->z);
+    shared->w = swap_endian(shared->w);
     rstate.data += sizeof(uint4);
 }
 
@@ -77,23 +77,18 @@ __device__ uint32_t load_32_bits(reader_state_thread_cache<block_size>& rstate)
         // makes computation easier, means data is always multiple of the loaded size
         static_assert(subsequence_size_bytes % sizeof(uint4) == 0);
 
-        // shift over to make place for 128 bits in z and w
-        rstate.cache->x = rstate.cache->z;
-        rstate.cache->y = rstate.cache->w;
+        // shift over to make place for 128 bits in cache[1]
+        rstate.cache[0] = rstate.cache[1];
 
         // assert that the lo cache is fully used up
         assert(128 <= rstate.cache_idx);
         rstate.cache_idx -= 128;
 
         if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-            for (int i = 0; i < sizeof(uint4) / sizeof(uint32_t); ++i) {
-                const uint32_t val = reinterpret_cast<const uint32_t*>(rstate.data)[i];
-                reinterpret_cast<uint32_t*>(rstate.cache)[4 + i] = swap_endian(val);
-            }
-            rstate.data += sizeof(uint4);
+            global_load_uint4(rstate, &(rstate.cache[1]));
         } else {
             // just set it to zero, but is not required
-            std::memset(&(reinterpret_cast<uint4*>(rstate.cache)[1]), 0, sizeof(uint4));
+            std::memset(&(rstate.cache[1]), 0, sizeof(uint4));
         }
     }
     // enough bits are present to pull 32 bits
@@ -140,17 +135,17 @@ __device__ reader_state_thread_cache<block_size> rstate_from_subseq_start(
     rstate.data = scan + (segment_info.subseq_offset + subseq_idx_rel) * subsequence_size_bytes;
     rstate.data_end =
         scan + (segment_info.subseq_offset + segment_info.subseq_count) * subsequence_size_bytes;
-    rstate.cache     = &(rstate_memory[threadIdx.x]);
+    rstate.cache     = &(rstate_memory[2 * threadIdx.x]);
     rstate.cache_idx = 0;
 
     // assert aligned load is valid
     assert((rstate.data - scan) % sizeof(uint4) == 0);
     // there should be at least one sector
     assert(sizeof(uint4) <= rstate.data_end - rstate.data);
-    global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
+    global_load_uint4(rstate, &(rstate.cache[0]));
 
     if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
+        global_load_uint4(rstate, &(rstate.cache[1]));
     }
 
     return rstate;
@@ -176,7 +171,7 @@ __device__ reader_state_thread_cache<block_size> rstate_from_subseq_overflow(
     rstate.data = scan + segment_info.subseq_offset * subsequence_size_bytes + byte_offset;
     rstate.data_end =
         scan + (segment_info.subseq_offset + segment_info.subseq_count) * subsequence_size_bytes;
-    rstate.cache     = &(rstate_memory[threadIdx.x]);
+    rstate.cache     = &(rstate_memory[2 * threadIdx.x]);
     rstate.cache_idx = p - byte_offset * 8;
 
     // assert aligned load is valid
@@ -184,10 +179,10 @@ __device__ reader_state_thread_cache<block_size> rstate_from_subseq_overflow(
     // TODO why is there not always one sector?
     //   there should be at least one sector
     if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[0]));
+        global_load_uint4(rstate, &(rstate.cache[0]));
     }
     if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(reinterpret_cast<uint4*>(rstate.cache)[1]));
+        global_load_uint4(rstate, &(rstate.cache[1]));
     }
 
     return rstate;

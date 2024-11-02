@@ -2,25 +2,29 @@
     "version": 6,
     "configurePresets": [
         {
-            "name": "relwithdebinfo",
+            "name": "base",
+            "hidden": true,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build/relwithdebinfo",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_CXX_FLAGS": "-Wall -Wextra",
-                "CMAKE_CUDA_FLAGS": "--generate-line-info",
+                "CMAKE_CUDA_FLAGS": "--generate-line-info -Xptxas --warn-on-double-precision-use -Xptxas --warn-on-local-memory-usage -Xptxas --warn-on-spills",
                 "CMAKE_PREFIX_PATH": "/usr/local/cuda"
             }
         },
         {
+            "name": "relwithdebinfo",
+            "inherits": "base",
+            "binaryDir": "${sourceDir}/build/relwithdebinfo",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
             "name": "debug",
-            "generator": "Ninja",
+            "inherits": "base",
             "binaryDir": "${sourceDir}/build/debug",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
-                "CMAKE_CXX_FLAGS": "-Wall -Wextra",
-                "CMAKE_CUDA_FLAGS": "--generate-line-info",
-                "CMAKE_PREFIX_PATH": "/usr/local/cuda"
+                "CMAKE_BUILD_TYPE": "Debug"
             }
         }
     ]

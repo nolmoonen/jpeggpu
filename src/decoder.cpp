@@ -181,7 +181,8 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
     /// Huffman tables
     for (int s = 0; s < info.num_scans; ++s) {
         const scan& scan = info.scans[s];
-        for (int i = 0; i < scan.num_huff_tables; ++i) {
+        // always copy all tables to satisfy initcheck as all are read in kernel for simplicity
+        for (int i = 0; i < max_baseline_huff_per_scan; ++i) {
             JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
                 &(d_huff_tables[s][i]),
                 &(reader.h_huff_tables[scan.huff_tables[i]]),

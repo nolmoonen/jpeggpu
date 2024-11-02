@@ -353,15 +353,16 @@ __device__ subsequence_info decode_subsequence(
         // commit
         discard_bits(rstate, length);
 
-        // TODO do not write when `symbol == 0`?
         if (do_write) {
             // TODO why use position_in_output instead of info.n?
             // TODO could make a separate kernel for this
             position_in_output += run_length;
-            const int data_unit_idx    = position_in_output / data_unit_size;
-            const int idx_in_data_unit = position_in_output % data_unit_size;
-            // TODO attempt order_natural in shared memory
-            out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
+            if (symbol != 0) {
+                const int data_unit_idx    = position_in_output / data_unit_size;
+                const int idx_in_data_unit = position_in_output % data_unit_size;
+                // TODO attempt order_natural in shared memory
+                out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
+            }
             ++position_in_output;
         }
 
