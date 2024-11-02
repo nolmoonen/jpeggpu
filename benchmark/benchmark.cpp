@@ -34,10 +34,10 @@ int main(int argc, const char* argv[])
         return EXIT_FAILURE;
     }
 
-    printf("                     throughput (image/s) | avg latency (ms) | max latency (ms)\n");
+    printf("         throughput (image/s) | avg latency (ms) | max latency (ms)\n");
     for (int i = 1; i < argc; ++i) {
         std::filesystem::path file_path(argv[i]);
-        std::cout << file_path << "\n";
+        std::cout << file_path.filename().string() << "\n";
 
         std::ifstream file(file_path);
         if (!file.is_open()) {
@@ -54,14 +54,8 @@ int main(int argc, const char* argv[])
         file.close();
 
         bench_jpeggpu(file_data, file_size);
-
-        if (false) {
-            bench_nvjpeg(file_data, file_size);
-        }
+        bench_nvjpeg(file_data, file_size);
 
         CHECK_CUDA(cudaFreeHost(file_data));
     }
 }
-
-// TODO
-//   - command line option to disable output copy?

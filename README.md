@@ -42,30 +42,30 @@ decoded image at: out.png
 
 ## Benchmark
 
-`benchmark/benchmark.cpp` builds `jpeggpu_benchmark` that compares performance with nvJPEG.
+`benchmark/benchmark.cpp` builds `jpeggpu_benchmark` that compares performance with nvJPEG, decoding a single image at a time.
 
-Possible output with AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070, 12MP 4:2:0 image with restart intervals, (`chunk_size = 32`):
+Possible output with AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070, on images of [jpeg-test-images](https://github.com/nolmoonen/jpeg-test-images):
 
 ```shell
-./build/jpeggpu_benchmark in.jpg
-                     throughput (image/s) | avg latency (ms) | max latency (ms)
-jpeggpu singlethread               176.18               5.68               6.72
- nvJPEG singlethread                71.82              13.92              15.51
- nvJPEG batch 25                    22.31              44.82            1123.72
- nvJPEG batch 50                    22.69              44.07            2214.65
- nvJPEG batch 75                    22.89              43.68            3303.78
- nvJPEG  4 threads                 268.95              14.69              39.53
- nvJPEG  5 threads                 332.87              14.91              39.72
- nvJPEG  6 threads                 386.19              15.19              35.15
- nvJPEG  7 threads                 389.12              15.92              33.67
- nvJPEG  8 threads                 447.42              16.44              33.00
- nvJPEG  9 threads                 493.39              17.16              33.90
- nvJPEG 10 threads                 531.90              17.85              35.43
- nvJPEG 11 threads                 568.07              18.78              49.18
- nvJPEG 12 threads                 620.45              19.21              45.74
- nvJPEG 13 threads                 603.87              20.59              55.99
- nvJPEG 14 threads                 609.44              22.21              66.65
+         throughput (image/s) | avg latency (ms) | max latency (ms)
+006mp-cathedral.jpg
+ jpeggpu               440.92               2.27               2.50
+  nvJPEG               143.89               6.95               8.30
+012mp-bus.jpg
+ jpeggpu               164.36               6.08               7.34
+  nvJPEG                66.97              14.93              15.30
+026mp-temple.jpg
+ jpeggpu                58.64              17.05              21.00
+  nvJPEG                15.81              63.24              64.86
+028mp-tree.jpg
+ jpeggpu               133.61               7.48              10.15
+  nvJPEG                33.63              29.74              30.66
+039mp-building.jpg
+ jpeggpu               129.50               7.72              10.21
+  nvJPEG                34.33              29.13              46.60
 ```
+
+Note that nvJPEG uses a hybrid (CPU+GPU) decoding, so nvJPEG has a throughput advantage when decoding multiple images in parallel.
 
 ## Test
 
