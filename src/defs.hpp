@@ -81,7 +81,7 @@ constexpr int max_baseline_scan_count = max_comp_count;
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 
-constexpr int max_baseline_huff_per_scan = max_baseline_scan_count * HUFF_COUNT;
+constexpr int max_baseline_huff_per_scan = max_comp_count * HUFF_COUNT;
 
 struct qtable {
     uint8_t data[64];

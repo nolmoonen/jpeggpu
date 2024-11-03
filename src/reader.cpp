@@ -36,11 +36,9 @@ using namespace jpeggpu;
 
 jpeggpu_status reader::startup()
 {
-    JPEGGPU_CHECK_STAT(nothrow_resize(h_qtables, 4));
-
-    JPEGGPU_CHECK_STAT(
-        nothrow_reserve(h_huff_tables, max_baseline_huff_per_scan * max_baseline_scan_count));
+    JPEGGPU_CHECK_STAT(nothrow_resize(h_qtables, max_comp_count));
     for (int s = 0; s < max_baseline_scan_count; ++s) {
+        JPEGGPU_CHECK_STAT(nothrow_reserve(h_huff_tables[s], max_baseline_huff_per_scan));
         JPEGGPU_CHECK_STAT(nothrow_reserve(h_scan_segments[s], 1024));
     }
 
@@ -249,10 +247,10 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
 
         logger.log("\t%s Huffman table index %d\n", is_dc ? "DC" : "AC", th);
 
-        JPEGGPU_CHECK_STAT(nothrow_push_back(h_huff_tables, huffman_table{}));
-        huffman_table& table = h_huff_tables.back();
-        (is_dc ? reader_state.curr_huff_dc : reader_state.curr_huff_ac)[th] =
-            h_huff_tables.size() - 1;
+        const int scan_idx                  = jpeg_stream.num_scans;
+        const int huff_idx                  = th * HUFF_COUNT + table_class;
+        huffman_table& table                = h_huff_tables[scan_idx][huff_idx];
+        reader_state.huff_defined[huff_idx] = true;
 
         /// num_codes[i] is # of symbols with codes of i + 1 bits
         uint8_t num_codes[16];
@@ -359,30 +357,15 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             logger.log("\tHuffman table id out of bounds\n");
         }
 
-        // Determine global Huffman table indices, map the global huffman table indices
-        //   to a minimal number of relative indices.
-        auto get_huff_idx = [&scan](int global_idx) {
-            for (int i = 0; i < scan.num_huff_tables; ++i) {
-                if (scan.huff_tables[i] == global_idx) {
-                    return i;
-                }
-            };
-            const int idx                            = scan.num_huff_tables;
-            scan.huff_tables[scan.num_huff_tables++] = global_idx;
-            return idx;
-        };
-
-        const int dc_idx_global = reader_state.curr_huff_dc[id_dc];
-        if (dc_idx_global == reader_state::idx_not_defined) {
+        if (!reader_state.huff_defined[id_dc * HUFF_COUNT + HUFF_DC]) {
             return JPEGGPU_INVALID_JPEG;
         }
-        scan_component.dc_idx = get_huff_idx(dc_idx_global);
+        scan_component.dc_idx = id_dc;
 
-        const int ac_idx_global = reader_state.curr_huff_ac[id_ac];
-        if (ac_idx_global == reader_state::idx_not_defined) {
+        if (!reader_state.huff_defined[id_ac * HUFF_COUNT + HUFF_AC]) {
             return JPEGGPU_INVALID_JPEG;
         }
-        scan_component.ac_idx = get_huff_idx(ac_idx_global);
+        scan_component.ac_idx = id_ac;
 
         const component& comp = jpeg_stream.components[component_idx];
 
@@ -430,6 +413,15 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     [[maybe_unused]] const uint8_t spectral_start           = read_uint8();
     [[maybe_unused]] const uint8_t spectral_end             = read_uint8();
     [[maybe_unused]] const uint8_t successive_approximation = read_uint8();
+
+    // If this scan is not the last, copy over the tables. This is to achieve fixed memory allocations
+    const bool is_final_scan = scan_idx + 1 >= max_baseline_scan_count;
+    if (!is_final_scan) {
+        std::copy(
+            h_huff_tables[scan_idx].begin(),
+            h_huff_tables[scan_idx].end(),
+            h_huff_tables[scan_idx + 1].begin());
+    }
 
     // Now comes the encoded data: skip through and keep track of segments.
 
@@ -511,12 +503,27 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         }
 
         reader_state.qtable_defined[id] = true;
+
+        const bool comp_seen_in_scan = [](const struct jpeg_stream& jpeg_stream, int id) {
+            for (int s = 0; s < jpeg_stream.num_scans; ++s) {
+                const scan& scan = jpeg_stream.scans[s];
+                for (int sc = 0; sc < scan.num_scan_components; ++sc) {
+                    if (scan.scan_components[sc].component_idx == id) return true;
+                }
+            }
+            return false;
+        }(jpeg_stream, id);
+
         for (int j = 0; j < 64; ++j) {
             // element in zigzag order
             const uint8_t element = read_uint8();
 
-            // store in natural order
-            h_qtables[id].data[order_natural[j]] = element;
+            // store only if the component has not been seen in a scan to prevent
+            //   overwriting tables needed later, and to use only a constant amount of memory
+            if (!comp_seen_in_scan) {
+                // store in natural order
+                h_qtables[id].data[order_natural[j]] = element;
+            }
         }
         remaining -= 64;
     }
@@ -691,14 +698,15 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
     reader_state.found_sof   = false;
     for (int i = 0; i < max_comp_count; ++i) {
         reader_state.qtable_defined[i] = false;
-        reader_state.curr_huff_dc[i]   = reader_state::idx_not_defined;
-        reader_state.curr_huff_ac[i]   = reader_state::idx_not_defined;
+        reader_state.huff_defined[i]   = false;
     }
 
     // clear remaining state
-    std::memset(h_qtables.data(), 0, h_qtables.size() * sizeof(decltype(h_qtables)::value_type));
-    h_huff_tables.clear();
+    // clearing tables is not necessary but eases debugging if no previous data remains
+    std::memset(h_qtables.data(), 0, h_qtables.size() * sizeof(qtable));
     for (int s = 0; s < max_baseline_scan_count; ++s) {
+        std::memset(h_huff_tables[s].data(), 0, h_huff_tables[s].size() * sizeof(huffman_table));
+
         h_scan_segments[s].clear();
     }
 }

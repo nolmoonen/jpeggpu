@@ -156,24 +156,21 @@ struct reader {
         const uint8_t* image_begin; /// Non-modifiable pointer to start of image.
         const uint8_t* image_end; /// Non-modifiable pointer to end of image.
         bool found_sof; /// Whether SOF has been found, may only appear once for baseline JPEGs.
-
+        /// \brief Whether the quantization table for each index has been found for the next scan.
         bool qtable_defined[max_comp_count];
-
-        static constexpr int idx_not_defined = -1;
-        /// \brief For each DC Huffman table slot, the index of the last defined global table.
-        int curr_huff_dc[max_comp_count];
-        /// \brief For each AC Huffman table slot, the index of the last defined global table.
-        int curr_huff_ac[max_comp_count];
+        /// \brief For each Huffman table slot, whether it has been defined for the next scan.
+        bool huff_defined[max_comp_count * HUFF_COUNT];
     } reader_state;
 
     size_t get_file_size() const { return reader_state.image_end - reader_state.image_begin; }
 
-    // TODO the quantization table may be redefined between scans
-    /// \brief Quantization tables in pinned host memory in order of appearance in the JPEG stream.
-    ///   Always `max_comp_count` elements since only one frame is allowed.
+    /// \brief Quantization tables in pinned host memory.
+    ///   Fixed-size allocation to the maximum that can be used (not defined).
     std::vector<qtable, pinned_allocator<qtable>> h_qtables;
-    /// \brief DC and AC Huffman tables in pinned host memory in order of appearance in the JPEG stream.
-    std::vector<huffman_table, pinned_allocator<huffman_table>> h_huff_tables;
+    /// \brief DC and AC Huffman tables in pinned host memory.
+    ///   Fixed-size allocation to the maximum that can be used (not defined).
+    std::vector<huffman_table, pinned_allocator<huffman_table>>
+        h_huff_tables[max_baseline_scan_count];
     /// \brief Segment info in pinned host memory. One entry per scan, multiple segment infos per scan.
     std::vector<segment, pinned_allocator<segment>> h_scan_segments[max_baseline_scan_count];
 };

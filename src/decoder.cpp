@@ -178,26 +178,22 @@ jpeggpu_status jpeggpu::decoder::transfer(void* d_tmp, size_t tmp_size, cudaStre
         reader.get_file_size(),
         cudaMemcpyHostToDevice,
         stream));
-    /// Huffman tables
-    for (int s = 0; s < info.num_scans; ++s) {
-        const scan& scan = info.scans[s];
-        // always copy all tables to satisfy initcheck as all are read in kernel for simplicity
-        for (int i = 0; i < max_baseline_huff_per_scan; ++i) {
-            JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
-                &(d_huff_tables[s][i]),
-                &(reader.h_huff_tables[scan.huff_tables[i]]),
-                sizeof(huffman_table),
-                cudaMemcpyHostToDevice,
-                stream));
-        }
-    }
-
-    // quantization tables
+    // Quantization tables
     for (int c = 0; c < max_comp_count; ++c) {
         JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
             d_qtables[c],
             &(reader.h_qtables[c]),
             sizeof(reader.h_qtables[c]),
+            cudaMemcpyHostToDevice,
+            stream));
+    }
+    /// Huffman tables
+    for (int s = 0; s < max_baseline_scan_count; ++s) {
+        // always copy all tables to satisfy initcheck as all are read in kernel for simplicity
+        JPEGGPU_CHECK_CUDA(cudaMemcpyAsync(
+            d_huff_tables[s],
+            reader.h_huff_tables[s].data(),
+            max_baseline_huff_per_scan * sizeof(huffman_table),
             cudaMemcpyHostToDevice,
             stream));
     }

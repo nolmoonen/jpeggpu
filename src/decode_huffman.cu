@@ -102,14 +102,14 @@ struct const_state {
     const int num_segments;
     /// \brief Huffman tables.
     const huffman_table* huffman_tables;
-    int dc_0; /// Relative DC Huffman table index for component 0.
-    int ac_0; /// Relative AC Huffman table index for component 0.
-    int dc_1; /// Relative DC Huffman table index for component 1.
-    int ac_1; /// Relative AC Huffman table index for component 1.
-    int dc_2; /// Relative DC Huffman table index for component 2.
-    int ac_2; /// Relative AC Huffman table index for component 2.
-    int dc_3; /// Relative DC Huffman table index for component 3.
-    int ac_3; /// Relative AC Huffman table index for component 3.
+    int dc_0; /// DC Huffman table index for component 0.
+    int ac_0; /// AC Huffman table index for component 0.
+    int dc_1; /// DC Huffman table index for component 1.
+    int ac_1; /// AC Huffman table index for component 1.
+    int dc_2; /// DC Huffman table index for component 2.
+    int ac_2; /// AC Huffman table index for component 2.
+    int dc_3; /// DC Huffman table index for component 3.
+    int ac_3; /// AC Huffman table index for component 3.
     int c0_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 0.
     int c1_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 1.
     int c2_inc_prefix; // Inclusive prefix of number of JPEG blocks in MCU for component 2.
@@ -745,14 +745,14 @@ jpeggpu_status jpeggpu::decode_scan(
         d_segment_indices,
         scan.num_segments,
         d_huff_tables,
-        scan.scan_components[0].dc_idx,
-        scan.scan_components[0].ac_idx,
-        scan.scan_components[1].dc_idx,
-        scan.scan_components[1].ac_idx,
-        scan.scan_components[2].dc_idx,
-        scan.scan_components[2].ac_idx,
-        scan.scan_components[3].dc_idx,
-        scan.scan_components[3].ac_idx,
+        HUFF_COUNT * scan.scan_components[0].dc_idx + HUFF_DC,
+        HUFF_COUNT * scan.scan_components[0].ac_idx + HUFF_AC,
+        HUFF_COUNT * scan.scan_components[1].dc_idx + HUFF_DC,
+        HUFF_COUNT * scan.scan_components[1].ac_idx + HUFF_AC,
+        HUFF_COUNT * scan.scan_components[2].dc_idx + HUFF_DC,
+        HUFF_COUNT * scan.scan_components[2].ac_idx + HUFF_AC,
+        HUFF_COUNT * scan.scan_components[3].dc_idx + HUFF_DC,
+        HUFF_COUNT * scan.scan_components[3].ac_idx + HUFF_AC,
         c_offsets[0],
         c_offsets[1],
         c_offsets[2],
