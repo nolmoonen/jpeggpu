@@ -173,6 +173,8 @@ void decode_jpeggpu(
     jpeggpu_decoder_t decoder;
     CHECK_JPEGGPU(jpeggpu_decoder_startup(&decoder));
 
+    CHECK_JPEGGPU(jpeggpu_set_logging(decoder, true));
+
     jpeggpu_img_info img_info;
     CHECK_JPEGGPU(jpeggpu_decoder_parse_header(
         decoder, &img_info, reinterpret_cast<const uint8_t*>(file_data), file_size));

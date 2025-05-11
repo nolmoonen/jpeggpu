@@ -72,7 +72,7 @@ Note that nvJPEG uses a hybrid (CPU+GPU) decoding, so nvJPEG has a throughput ad
 `test/test.cpp` builds `jpeggpu_test` that compares output against nvJPEG. Helper script `test.sh` uses ImageMagick to convert an input image to a few different JPEG variations.
 
 ```shell
-./build/jpeggpu_example test.jpg --write_out # writing out is optional
+./build/jpeggpu_test test.jpg --write_out # writing out is optional
 component 0 MSE: 0.23201 component 1 MSE: 0.198817 component 2 MSE: 0.199355
 writing out to "test.jpg.nvjpeg.png" and "test.jpg.jpeggpu.png"
 
