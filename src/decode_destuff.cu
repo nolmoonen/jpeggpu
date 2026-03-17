@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Nol Moonen
+// Copyright (c) 2024-2026 Nol Moonen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,7 @@
 #include "decode_destuff.hpp"
 #include "decoder_defs.hpp"
 #include "marker.hpp"
+#include "util.cuh"
 
 #include <cub/device/device_scan.cuh>
 
@@ -261,7 +262,7 @@ jpeggpu_status jpeggpu::destuff_scan(
             d_offset_data,
             d_offset_data,
             stuffed_scan_size,
-            cub::Equality{},
+            dev_eq{},
             stream));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
         if (do_it) {
@@ -272,7 +273,7 @@ jpeggpu_status jpeggpu::destuff_scan(
                 d_offset_data,
                 d_offset_data,
                 stuffed_scan_size,
-                cub::Equality{},
+                dev_eq{},
                 stream));
         }
         // TODO since stream-ordered, should be able to reclaim tmp storage

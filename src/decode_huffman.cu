@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Nol Moonen
+// Copyright (c) 2024-2026 Nol Moonen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +46,7 @@
 #include "defs.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
+#include "util.cuh"
 #include "util.hpp"
 
 #include <jpeggpu/jpeggpu.h>
@@ -826,7 +827,7 @@ jpeggpu_status jpeggpu::decode_scan(
         sum_subsequence_info{},
         init_value,
         num_subsequences,
-        cub::Equality{},
+        dev_eq{},
         stream));
 
     JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_bytes));
@@ -845,7 +846,7 @@ jpeggpu_status jpeggpu::decode_scan(
             sum_subsequence_info{},
             init_value,
             num_subsequences,
-            cub::Equality{},
+            dev_eq{},
             stream));
     }
 

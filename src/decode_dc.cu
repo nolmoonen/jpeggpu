@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Nol Moonen
+// Copyright (c) 2024-2026 Nol Moonen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@
 #include "defs.hpp"
 #include "logger.hpp"
 #include "reader.hpp"
+#include "util.cuh"
 
 #include <jpeggpu/jpeggpu.h>
 
@@ -132,7 +133,7 @@ jpeggpu_status jpeggpu::decode_dc(
                     iter_interleaved,
                     iter_interleaved,
                     num_data_units_component,
-                    cub::Equality{},
+                    dev_eq{},
                     stream);
             };
 
