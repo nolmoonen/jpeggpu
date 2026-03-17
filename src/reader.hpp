@@ -50,6 +50,14 @@ struct huffman_table {
     } entries[16];
     /// Values associated with each Huffman code, in order of increasing code length
     uint8_t huffval[256];
+
+    static constexpr int lookup_len  = 11;
+    static constexpr uint8_t invalid = 0x00;
+    struct lut_entry {
+        uint8_t val;
+        uint8_t nbits;
+    };
+    lut_entry lut[1 << lookup_len];
 };
 
 /// \brief Describes a component as part of a scan, which is separate from the logical components

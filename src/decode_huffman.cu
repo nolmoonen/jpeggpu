@@ -124,27 +124,6 @@ struct const_state {
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
 static_assert(std::is_trivially_copyable_v<const_state>);
 
-/// \brief Typedef for the maximum amount of Huffman tables for a scan.
-using huffman_tables = huffman_table[max_baseline_huff_per_scan];
-
-/// \brief Load Huffman tables from global memory into shared.
-template <int block_size>
-__device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
-{
-    // assert that loading a word at a time is valid
-    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
-    constexpr int num_words = sizeof(huffman_tables) / 4;
-    constexpr int num_words_per_thread =
-        ceiling_div(num_words, static_cast<unsigned int>(block_size));
-    for (int i = 0; i < num_words_per_thread; ++i) {
-        const int idx = block_size * i + threadIdx.x;
-        if (idx < num_words) {
-            reinterpret_cast<uint32_t*>(&tables_shared)[idx] =
-                reinterpret_cast<const uint32_t*>(cstate.huffman_tables)[idx];
-        }
-    }
-}
-
 /// \brief Returns the oldest (most significant) `num_bits` from `data`.
 __device__ uint32_t u32_select_bits(uint32_t data, int num_bits)
 {
@@ -166,10 +145,18 @@ __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 /// \param[in] table
 uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
 {
+    const int id = u32_select_bits(data, huffman_table::lookup_len);
+
+    const typename huffman_table::lut_entry row = table.lut[id];
+    if (row.nbits != huffman_table::invalid) {
+        length = row.nbits;
+        return row.val;
+    }
+
     int i;
     int32_t code;
     huffman_table::entry entry;
-    for (i = 0; i < 16; ++i) {
+    for (i = huffman_table::lookup_len; i < 16; ++i) {
         code                    = u32_select_bits(data, i + 1);
         const bool is_last_iter = i == 15;
         entry                   = table.entries[i];
@@ -303,7 +290,7 @@ __device__ subsequence_info decode_subsequence(
     const const_state& cstate,
     int segment_idx,
     reader_state& rstate,
-    const huffman_tables& tables,
+    const huffman_table* tables,
     subsequence_info info,
     int position_in_output = 0)
 {
@@ -407,9 +394,7 @@ __global__ void sync_intra_sequence(
 {
     __shared__ subsequence_info s_info_shared[block_size];
 
-    __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate, tables);
-    __syncthreads();
+    const huffman_table* tables = cstate.huffman_tables;
 
     // Don't load all subsequences of the block into memory at the beginning as it
     //   hurts occupancy to have so much shared memory.
@@ -526,9 +511,7 @@ template <int size_in_subsequences, int block_size>
 __global__ void sync_subsequences(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
-    __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate, tables);
-    __syncthreads();
+    const huffman_table* tables = cstate.huffman_tables;
 
     using reader_state = reader_state_thread_cache<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
@@ -622,8 +605,7 @@ __global__ void decode_write(
     int num_subsequences,
     const_state cstate)
 {
-    __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate, tables);
+    const huffman_table* tables = cstate.huffman_tables;
 
     using reader_state = reader_state_all_subsequences<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;

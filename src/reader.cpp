@@ -188,10 +188,23 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     uint16_t huffcode[256];
     int code_idx  = 0;
     uint16_t code = 0;
-    for (int l = 0; l < 16; ++l) {
-        for (uint8_t i = 0; i < num_codes[l]; i++) {
+    memset(table.lut, huffman_table::invalid, sizeof(table.lut));
+    for (int l = 0; l < max_huffman_bit_length; ++l) {
+        for (int i = 0; i < num_codes[l]; i++) {
             assert(code_idx < 256);
-            huffcode[code_idx++] = code;
+            huffcode[code_idx] = code;
+
+            if (l + 1 <= huffman_table::lookup_len) {
+                const int num_repeats = 1 << (huffman_table::lookup_len - l - 1);
+                const typename huffman_table::lut_entry entry{
+                    .val = table.huffval[code_idx], .nbits = static_cast<uint8_t>(l + 1)};
+                for (int j = 0; j < num_repeats; ++j) {
+                    const int offset      = code << (huffman_table::lookup_len - l - 1);
+                    table.lut[offset + j] = entry;
+                }
+            }
+
+            ++code_idx;
             ++code;
         }
         code <<= 1;
