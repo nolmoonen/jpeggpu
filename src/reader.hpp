@@ -48,6 +48,15 @@ struct huffman_table {
         uint16_t mincode; /// mincode[k] is smallest code of length k+1
         uint8_t valptr; /// Huffval[] index of 1st symbol of length k+1
     } entries[16];
+
+    constexpr static int lookup_len = 8;
+
+    struct lut_entry {
+        uint8_t val;
+        uint8_t nbits;
+    };
+    lut_entry lut[1 << lookup_len];
+
     /// Values associated with each Huffman code, in order of increasing code length
     uint8_t huffval[256];
 };

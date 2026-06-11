@@ -166,10 +166,18 @@ __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 /// \param[in] table
 uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
 {
+    const int id = u32_select_bits(data, huffman_table::lookup_len);
+
+    const typename huffman_table::lut_entry row = table.lut[id];
+    if (row.nbits != 0) {
+        length = row.nbits;
+        return row.val;
+    }
+
     int i;
     int32_t code;
     huffman_table::entry entry;
-    for (i = 0; i < 16; ++i) {
+    for (i = huffman_table::lookup_len; i < 16; ++i) {
         code                    = u32_select_bits(data, i + 1);
         const bool is_last_iter = i == 15;
         entry                   = table.entries[i];

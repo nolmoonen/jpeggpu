@@ -49,20 +49,20 @@ Possible output with AMD Ryzen 5 2600 and NVIDIA GeForce RTX 2070, on images of 
 ```shell
          throughput (image/s) | avg latency (ms) | max latency (ms)
 006mp-cathedral.jpg
- jpeggpu               440.92               2.27               2.50
-  nvJPEG               143.89               6.95               8.30
+ jpeggpu               574.29               1.74               1.89
+  nvJPEG               143.58               6.96               7.93
 012mp-bus.jpg
- jpeggpu               164.36               6.08               7.34
-  nvJPEG                66.97              14.93              15.30
+ jpeggpu               226.66               4.41               4.80
+  nvJPEG                65.04              15.37              16.40
 026mp-temple.jpg
- jpeggpu                58.64              17.05              21.00
-  nvJPEG                15.81              63.24              64.86
+ jpeggpu                68.78              14.54              16.34
+  nvJPEG                15.36              65.10              70.59
 028mp-tree.jpg
- jpeggpu               133.61               7.48              10.15
-  nvJPEG                33.63              29.74              30.66
+ jpeggpu               162.75               6.14               7.77
+  nvJPEG                32.97              30.33              32.27
 039mp-building.jpg
- jpeggpu               129.50               7.72              10.21
-  nvJPEG                34.33              29.13              46.60
+ jpeggpu               159.10               6.29               8.90
+  nvJPEG                33.47              29.88              32.20
 ```
 
 Note that nvJPEG uses a hybrid (CPU+GPU) decoding, so nvJPEG has a throughput advantage when decoding multiple images in parallel.
