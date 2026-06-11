@@ -132,7 +132,7 @@ template <int block_size>
 __device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
 {
     // assert that loading a word at a time is valid
-    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
+    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry2) % 4 == 0);
     constexpr int num_words = sizeof(huffman_tables) / 4;
     constexpr int num_words_per_thread =
         ceiling_div(num_words, static_cast<unsigned int>(block_size));
@@ -164,38 +164,20 @@ __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 /// \param[in] data Holds at least 16 data bits in the most significant positions.
 /// \param[out] length Number of bits read.
 /// \param[in] table
-uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
+uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& t)
 {
-    const int id = u32_select_bits(data, huffman_table::lookup_len);
+    const typename huffman_table::entry2* table = t.lut2;
 
-    const typename huffman_table::lut_entry row = table.lut[id];
-    if (row.nbits != 0) {
-        length = row.nbits;
-        return row.val;
+    const int idx = u32_select_bits(data, 8);
+    table += idx;
+    const int second_num_bits = table->second_num_bits;
+    if (second_num_bits) {
+        table += table->value_or_ptr;
+        table += (data << huffman_table::first_level_bits) >> (32 - second_num_bits);
     }
 
-    int i;
-    int32_t code;
-    huffman_table::entry entry;
-    for (i = huffman_table::lookup_len; i < 16; ++i) {
-        code                    = u32_select_bits(data, i + 1);
-        const bool is_last_iter = i == 15;
-        entry                   = table.entries[i];
-        if (code <= entry.maxcode || is_last_iter) {
-            break;
-        }
-    }
-    assert(1 <= i + 1 && i + 1 <= 16);
-    // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
-    length        = i + 1;
-    const int idx = entry.valptr + (code - entry.mincode);
-    // TODO this check can be more precise if knowing #codes, would that help syncing?
-    if (idx < 0 || 256 <= idx) {
-        // found a value that does not make sense. this can happen if the wrong huffman
-        //   table is used. return arbitrary value
-        return 0;
-    }
-    return table.huffval[idx];
+    length = table->num_bits;
+    return table->value_or_ptr;
 }
 
 __device__ int get_value(int num_bits, int code)
@@ -773,7 +755,7 @@ jpeggpu_status jpeggpu::decode_scan(
 
     // decode all subsequences
     // "b", sequence size in number of subsequences, configurable
-    constexpr int num_subsequences_in_sequence = 256;
+    constexpr int num_subsequences_in_sequence = 128;
     // "B", number of sequences
     const int num_sequences =
         ceiling_div(num_subsequences, static_cast<unsigned int>(num_subsequences_in_sequence));
@@ -791,7 +773,7 @@ jpeggpu_status jpeggpu::decode_scan(
     }
 
     // synchronize intra supersequence/inter sequence
-    constexpr int num_sequences_in_supersequence = 512; // configurable
+    constexpr int num_sequences_in_supersequence = 256; // configurable
     const int num_supersequences =
         ceiling_div(num_sequences, static_cast<unsigned int>(num_sequences_in_supersequence));
     if (do_it && num_sequences > 1) {

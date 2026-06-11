@@ -78,6 +78,8 @@ constexpr int max_comp_count = JPEGGPU_MAX_COMP;
 ///   TODO does the spec allow redefining/overwriting components? we do not.
 constexpr int max_baseline_scan_count = max_comp_count;
 
+constexpr int max_huffman_bit_length = 16;
+
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };
 

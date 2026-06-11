@@ -43,22 +43,24 @@ struct segment {
 };
 
 struct huffman_table {
-    struct entry {
-        int32_t maxcode; /// maxcode[k] is largest code of length k+1, -1 if no codes
-        uint16_t mincode; /// mincode[k] is smallest code of length k+1
-        uint8_t valptr; /// Huffval[] index of 1st symbol of length k+1
-    } entries[16];
-
-    constexpr static int lookup_len = 8;
-
-    struct lut_entry {
-        uint8_t val;
-        uint8_t nbits;
+    struct entry2 {
+        // The number of bits in the Huffman code or the number of bits
+        // needed for the second-level LUT.
+        uint8_t num_bits;
+        // Flag whether this entry points to a second-level LUT or whether
+        // this entry holds an actual value. Can be made redundant with
+        // a change to `num_bits`, but removes instructions and is padding
+        // either way.
+        uint8_t second_num_bits;
+        uint16_t value_or_ptr;
     };
-    lut_entry lut[1 << lookup_len];
 
-    /// Values associated with each Huffman code, in order of increasing code length
-    uint8_t huffval[256];
+    constexpr static int first_level_bits = 8;
+
+    // First 256 entries represent the first-level 8-bits lookup table with actual values
+    // or pointers to entries after the first-level LUT.
+    // Remaining entries are zero or more dynamically-sized LUTs.
+    entry2 lut2[1024];
 };
 
 /// \brief Describes a component as part of a scan, which is separate from the logical components

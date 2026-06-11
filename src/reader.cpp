@@ -183,43 +183,91 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
     return JPEGGPU_SUCCESS;
 }
 
-void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_codes)[16])
+// Returns the table width of the next 2nd level table, count is the histogram
+// of bit lengths for the remaining symbols, len is the code length of the next
+// processed symbol.
+int NextTableBitSize(const int* count, int len)
 {
-    uint16_t huffcode[256];
-    int code_idx  = 0;
-    uint16_t code = 0;
-    memset(table.lut, 0, sizeof(table.lut)); // 0 means "invalid" for `nbits`
-    for (int l = 0; l < 16; ++l) {
-        for (int i = 0; i < num_codes[l]; i++) {
-            assert(code_idx < 256);
-            huffcode[code_idx] = code;
+    int left = 1 << (len - huffman_table::first_level_bits);
+    while (len < max_huffman_bit_length) {
+        left -= count[len];
+        if (left <= 0) break;
+        ++len;
+        left <<= 1;
+    }
+    return len - huffman_table::first_level_bits;
+}
 
-            if (l + 1 <= huffman_table::lookup_len) {
-                const int num_repeats = 1 << (huffman_table::lookup_len - l - 1);
-                const typename huffman_table::lut_entry entry{
-                    .val = table.huffval[code_idx], .nbits = static_cast<uint8_t>(l + 1)};
-                for (int j = 0; j < num_repeats; ++j) {
-                    const int offset      = code << (huffman_table::lookup_len - l - 1);
-                    table.lut[offset + j] = entry;
-                }
-            }
+void compute_huffman_table(
+    jpeggpu::huffman_table& t, const uint8_t (&num_codes)[16], const uint8_t (&huffvals)[256])
+{
+    huffman_table::entry2 code; // current table entry
+    huffman_table::entry2* table; // next available space in table
+    int idx; // symbol index
+    int key; // prefix code
+    int reps; // number of replicate key values in current table
+    int low; // low bits for current root entry
+    int table_bits; // key length of current table
+    int table_size; // size of current table
 
-            ++code_idx;
-            ++code;
-        }
-        code <<= 1;
+    // Make a local copy of the input bit length histogram.
+    int tmp_count[max_huffman_bit_length + 1] = {0};
+    int total_count                           = 0;
+    for (int len = 1; len <= max_huffman_bit_length; ++len) {
+        tmp_count[len] = num_codes[len - 1];
+        total_count += tmp_count[len];
     }
 
-    // generate decoding tables for bit-sequential decoding
-    code_idx = 0;
-    for (int l = 0; l < 16; ++l) {
-        if (num_codes[l]) {
-            table.entries[l].valptr  = code_idx; // huffval[] index of 1st symbol of code length l
-            table.entries[l].mincode = huffcode[code_idx]; // minimum code of length l
-            code_idx += num_codes[l];
-            table.entries[l].maxcode = huffcode[code_idx - 1]; // maximum code of length l
-        } else {
-            table.entries[l].maxcode = -1; // -1 if no codes of this length
+    for (size_t i = 0; i < std::size(t.lut2); ++i) {
+        t.lut2[i].num_bits        = 1; // Consume at least one bit to make progress in decoding.
+        t.lut2[i].second_num_bits = 0;
+        // TODO what is the best value that leads to the fastest synchronization?
+        t.lut2[i].value_or_ptr = 0;
+    }
+
+    table      = t.lut2;
+    table_bits = huffman_table::first_level_bits;
+    table_size = 1 << table_bits;
+
+    // Fill in root table.
+    key = 0;
+    idx = 0;
+    for (int len = 1; len <= huffman_table::first_level_bits; ++len) {
+        for (; tmp_count[len] > 0; --tmp_count[len]) {
+            code.num_bits        = len;
+            code.second_num_bits = 0;
+            code.value_or_ptr    = huffvals[idx++];
+            reps                 = 1 << (huffman_table::first_level_bits - len);
+            while (reps--) {
+                table[key++] = code;
+            }
+        }
+    }
+
+    // Fill in 2nd level tables and add pointers to root table.
+    table += table_size;
+    table_size = 0;
+    low        = 0;
+    for (int len = huffman_table::first_level_bits + 1; len <= max_huffman_bit_length; ++len) {
+        for (; tmp_count[len] > 0; --tmp_count[len]) {
+            // Start a new sub-table if the previous one is full.
+            if (low >= table_size) {
+                table += table_size;
+                table_bits                  = NextTableBitSize(tmp_count, len);
+                table_size                  = 1 << table_bits;
+                low                         = 0;
+                t.lut2[key].num_bits        = 0;
+                t.lut2[key].second_num_bits = table_bits;
+                t.lut2[key].value_or_ptr    = (table - t.lut2) - key;
+                ++key;
+            }
+            code.num_bits        = len;
+            code.second_num_bits = 0;
+            code.value_or_ptr    = huffvals[idx++];
+            reps                 = 1 << (table_bits - len + huffman_table::first_level_bits);
+            while (reps--) {
+                table[low++] = code;
+            }
         }
     }
 }
@@ -266,8 +314,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         reader_state.huff_defined[huff_idx] = true;
 
         /// num_codes[i] is # of symbols with codes of i + 1 bits
-        uint8_t num_codes[16];
-        int count = 0;
+        uint8_t num_codes[16] = {};
+        int count             = 0;
         for (int i = 0; i < 16; ++i) {
             num_codes[i] = read_uint8();
             count += num_codes[i];
@@ -281,18 +329,19 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             return JPEGGPU_INVALID_JPEG;
         }
 
-        if (static_cast<size_t>(count) > sizeof(table.huffval) / sizeof(table.huffval[0])) {
+        if (count > 256) {
             logger.log("\ttoo many values\n");
             return JPEGGPU_INVALID_JPEG;
         }
 
         // read huffval
+        uint8_t huffvals[256];
         for (int i = 0; i < count; ++i) {
-            table.huffval[i] = read_uint8();
+            huffvals[i] = read_uint8();
         }
         remaining -= count;
 
-        compute_huffman_table(table, num_codes);
+        compute_huffman_table(table, num_codes, huffvals);
     }
 
     return JPEGGPU_SUCCESS;
