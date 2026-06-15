@@ -394,6 +394,12 @@ struct logical_and {
     __device__ bool operator()(const bool& lhs, const bool& rhs) { return lhs && rhs; }
 };
 
+// In these kernels the shared memory is a contested resource. Keeping all other things the same, below is
+// the rough impact on throughput of moving to global memory for `sync_intra_sequence`, on the whole decode.
+// - `subsequence_info` +0.8% to +8.0% (possibly because increased occupancy)
+// - `huffman_table`    -6.6% to +1.8%
+// - `reader_state`     not measured
+
 /// \brief Synchronize all subsequences in a subsequence (relates to paper alg-3:05-23).
 ///   Thread i decodes subsequence i, decoding subsequent subsequences until the state
 ///   is equal to the state of a thread with a higher index. If the states are the same

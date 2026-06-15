@@ -33,14 +33,14 @@
 #include <stdint.h>
 #include <vector>
 
-#define CHECK_JPEGGPU(call)                                                    \
-    do {                                                                       \
-        jpeggpu_status stat = call;                                            \
-        if (stat != JPEGGPU_SUCCESS) {                                         \
-            std::cerr << "jpeggpu error \"" << jpeggpu_get_status_string(stat) \
-                      << "\" at: " __FILE__ ":" << __LINE__ << "\n";           \
-            std::exit(EXIT_FAILURE);                                           \
-        }                                                                      \
+#define CHECK_JPEGGPU(call)                                                     \
+    do {                                                                        \
+        jpeggpu_status stat_ = call;                                            \
+        if (stat_ != JPEGGPU_SUCCESS) {                                         \
+            std::cerr << "jpeggpu error \"" << jpeggpu_get_status_string(stat_) \
+                      << "\" at: " __FILE__ ":" << __LINE__ << "\n";            \
+            std::exit(EXIT_FAILURE);                                            \
+        }                                                                       \
     } while (0)
 
 void bench_jpeggpu(const uint8_t* file_data, size_t file_size)
@@ -51,7 +51,11 @@ void bench_jpeggpu(const uint8_t* file_data, size_t file_size)
     CHECK_JPEGGPU(jpeggpu_decoder_startup(&decoder));
 
     jpeggpu_img_info img_info;
-    CHECK_JPEGGPU(jpeggpu_decoder_parse_header(decoder, &img_info, file_data, file_size));
+    jpeggpu_status stat = jpeggpu_decoder_parse_header(decoder, &img_info, file_data, file_size);
+    if (stat == JPEGGPU_NOT_SUPPORTED) {
+        return;
+    }
+    CHECK_JPEGGPU(stat);
 
     jpeggpu_img d_img;
     for (int c = 0; c < img_info.num_components; ++c) {
