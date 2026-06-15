@@ -188,10 +188,23 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     uint16_t huffcode[256];
     int code_idx  = 0;
     uint16_t code = 0;
+    memset(table.lut, 0, sizeof(table.lut)); // 0 means "invalid" for `nbits`
     for (int l = 0; l < 16; ++l) {
-        for (uint8_t i = 0; i < num_codes[l]; i++) {
+        for (int i = 0; i < num_codes[l]; i++) {
             assert(code_idx < 256);
-            huffcode[code_idx++] = code;
+            huffcode[code_idx] = code;
+
+            if (l + 1 <= huffman_table::lookup_len) {
+                const int num_repeats = 1 << (huffman_table::lookup_len - l - 1);
+                const typename huffman_table::lut_entry entry{
+                    .val = table.huffval[code_idx], .nbits = static_cast<uint8_t>(l + 1)};
+                for (int j = 0; j < num_repeats; ++j) {
+                    const int offset      = code << (huffman_table::lookup_len - l - 1);
+                    table.lut[offset + j] = entry;
+                }
+            }
+
+            ++code_idx;
             ++code;
         }
         code <<= 1;
@@ -201,8 +214,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     code_idx = 0;
     for (int l = 0; l < 16; ++l) {
         if (num_codes[l]) {
-            table.entries[l].valptr  = code_idx; // huffval[] index of 1st symbol of code length l
-            table.entries[l].mincode = huffcode[code_idx]; // minimum code of length l
+            table.entries[l].valptr_sub_mincode = code_idx - huffcode[code_idx];
             code_idx += num_codes[l];
             table.entries[l].maxcode = huffcode[code_idx - 1]; // maximum code of length l
         } else {
@@ -268,7 +280,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             return JPEGGPU_INVALID_JPEG;
         }
 
-        if (static_cast<size_t>(count) > sizeof(table.huffval) / sizeof(table.huffval[0])) {
+        if (static_cast<size_t>(count) > huffman_alphabet_size) {
             logger.log("\ttoo many values\n");
             return JPEGGPU_INVALID_JPEG;
         }
@@ -278,6 +290,11 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             table.huffval[i] = read_uint8();
         }
         remaining -= count;
+        // TODO what default works best?
+        // initialize all other entries to a default
+        for (int i = count; i < huffman_alphabet_size; ++i) {
+            table.huffval[i] = 0;
+        }
 
         compute_huffman_table(table, num_codes);
     }

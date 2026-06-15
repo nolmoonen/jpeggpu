@@ -166,10 +166,18 @@ __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 /// \param[in] table
 uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
 {
+    const int id = u32_select_bits(data, huffman_table::lookup_len);
+
+    const typename huffman_table::lut_entry row = table.lut[id];
+    if (row.nbits != 0) {
+        length = row.nbits;
+        return row.val;
+    }
+
     int i;
     int32_t code;
     huffman_table::entry entry;
-    for (i = 0; i < 16; ++i) {
+    for (i = huffman_table::lookup_len; i < 16; ++i) {
         code                    = u32_select_bits(data, i + 1);
         const bool is_last_iter = i == 15;
         entry                   = table.entries[i];
@@ -180,14 +188,9 @@ uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table&
     assert(1 <= i + 1 && i + 1 <= 16);
     // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
     length        = i + 1;
-    const int idx = entry.valptr + (code - entry.mincode);
-    // TODO this check can be more precise if knowing #codes, would that help syncing?
-    if (idx < 0 || 256 <= idx) {
-        // found a value that does not make sense. this can happen if the wrong huffman
-        //   table is used. return arbitrary value
-        return 0;
-    }
-    return table.huffval[idx];
+    const int idx = entry.valptr_sub_mincode + code;
+    // Cast to [0, 256) to produce a valid index in the array in the event of invalid input.
+    return table.huffval[static_cast<uint8_t>(idx)];
 }
 
 __device__ int get_value(int num_bits, int code)
