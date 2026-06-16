@@ -414,8 +414,6 @@ template <int block_size>
 __global__ void sync_intra_sequence(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
-    __shared__ subsequence_info s_info_shared[block_size];
-
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate, tables);
     __syncthreads();
@@ -463,7 +461,7 @@ __global__ void sync_intra_sequence(
 
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
-        s_info_shared[threadIdx.x] = decode_subsequence<false>(
+        s_info[subseq_idx_begin] = decode_subsequence<false>(
             subeq_idx_begin_rel, nullptr, cstate, segment_idx, rstate, tables, info);
     }
     __syncthreads();
@@ -486,17 +484,17 @@ __global__ void sync_intra_sequence(
 
             assert(block_off <= subseq_idx - 1 && subseq_idx - 1 - block_off < block_size);
             subsequence_info old_info;
-            old_info.p = s_info_shared[subseq_idx - 1 - block_off].p;
+            old_info.p = s_info[subseq_idx - 1].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
             old_info.n = 0;
-            old_info.c = s_info_shared[subseq_idx - 1 - block_off].c;
-            old_info.z = s_info_shared[subseq_idx - 1 - block_off].z;
+            old_info.c = s_info[subseq_idx - 1].c;
+            old_info.z = s_info[subseq_idx - 1].z;
 
             info = decode_subsequence<false>(
                 subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
             assert(block_off <= subseq_idx && subseq_idx - block_off < block_size);
-            const subsequence_info& stored_info = s_info_shared[subseq_idx - block_off];
+            const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
                 //   the same "outcome" for the `subseq_idx`th subsequence as the stored result
@@ -513,13 +511,10 @@ __global__ void sync_intra_sequence(
         if (threadIdx.x == 0) is_block_done = is_block_done_local;
         if (do_write) {
             assert(block_off <= subseq_idx && subseq_idx - block_off < block_size);
-            s_info_shared[subseq_idx - block_off] = info;
+            s_info[subseq_idx] = info;
         }
         __syncthreads(); // await s_info writes and is_block_done write
         if (is_block_done) break;
-    }
-    if (subseq_idx_begin < num_subsequences) {
-        s_info[subseq_idx_begin] = s_info_shared[threadIdx.x];
     }
 }
 
