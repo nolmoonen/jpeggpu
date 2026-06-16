@@ -86,6 +86,7 @@ struct subsequence_info {
     /// \brief In the case that `p` is not a multiple of the subsequence size in bits, contains the data bits
     ///   between `p` and the boundary in the most significant positions.
     uint32_t cache;
+    int16_t dc[4];
 };
 
 /// \brief Helper struct to pass constant inputs to the kernels.
@@ -199,7 +200,6 @@ __device__ int get_value(int num_bits, int code)
     return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
-template <bool do_write>
 __device__ void decode_next_symbol_dc(
     int& length, int& symbol, int& run_length, uint32_t data, const huffman_table& table)
 {
@@ -218,12 +218,13 @@ __device__ void decode_next_symbol_dc(
     data = u32_discard_bits(data, category_length);
 
     length = category_length + category;
-    if (do_write) {
-        assert(0 < category && category <= 16);
-        const int offset = u32_select_bits(data, category);
-        const int value  = get_value(category, offset);
-        symbol           = value;
-    }
+
+    // Always obtain DC value (not only when `do_write`), to start computing DC run.
+    assert(0 < category && category <= 16);
+    const int offset = u32_select_bits(data, category);
+    const int value  = get_value(category, offset);
+    symbol           = value;
+
     run_length = 0;
 };
 
@@ -278,7 +279,7 @@ __device__ void decode_next_symbol(
     int z)
 {
     if (z == 0) {
-        decode_next_symbol_dc<do_write>(length, symbol, run_length, data, table_dc);
+        decode_next_symbol_dc(length, symbol, run_length, data, table_dc);
     } else {
         decode_next_symbol_ac<do_write>(length, symbol, run_length, data, table_ac, z);
     }
@@ -342,7 +343,7 @@ __device__ subsequence_info decode_subsequence(
         uint32_t data = load_32_bits(rstate);
 
         int length     = 0;
-        int symbol     = 0;
+        int symbol     = 0; // only set if `do_write` or `z == 0` (DC)
         int run_length = 0;
         // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
@@ -359,14 +360,26 @@ __device__ subsequence_info decode_subsequence(
 
         if (do_write) {
             // TODO why use position_in_output instead of info.n?
-            // TODO could make a separate kernel for this
             position_in_output += run_length;
+        }
+
+        const int data_unit_idx    = position_in_output / data_unit_size;
+        const int idx_in_data_unit = position_in_output % data_unit_size;
+        if (info.z == 0) { // DC
+            if (do_write) {
+                out[data_unit_idx * data_unit_size] = info.dc[info.c] += symbol;
+            } else {
+                // Track DC difference to scan later.
+                info.dc[info.c] += symbol;
+            }
+        } else if (do_write) { // AC
             if (symbol != 0) {
-                const int data_unit_idx    = position_in_output / data_unit_size;
-                const int idx_in_data_unit = position_in_output % data_unit_size;
                 // TODO attempt order_natural in shared memory
                 out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
             }
+        }
+
+        if (do_write) {
             ++position_in_output;
         }
 
@@ -433,8 +446,8 @@ __global__ void sync_intra_sequence(
     // last index dictated by block and JPEG stream
     int end = min(subseq_idx_from_next_block, num_subsequences);
 
-    // since all threads must partipate in thread sync, some threads will be assigned to
-    //  a subsequence out of bounds
+    // Since all threads must participate in thread sync, some threads will be assigned to
+    // a subsequence out of bounds. Below guard prevents OOB.
     int segment_idx; // segment index of subseq_idx_begin
     segment seg_info; // segment info of subseq_idx_begin
     reader_state rstate;
@@ -454,13 +467,20 @@ __global__ void sync_intra_sequence(
 
         subsequence_info info;
         // start of i-th subsequence
-        info.p = subeq_idx_begin_rel * subsequence_size;
-        info.n = 0;
-        info.c = 0;
-        info.z = 0;
+        info.p     = subeq_idx_begin_rel * subsequence_size;
+        info.n     = 0;
+        info.c     = 0;
+        info.z     = 0;
+        info.cache = 0;
 
-        // paper text does not mention `n` should be stored here, but if not storing `n`
-        //   the first subsequence info's `n` will not be initialized. for simplicity, store all
+        for (size_t i = 0; i < cuda::std::size(info.dc); ++i) {
+            info.dc[i] = 0;
+        }
+
+        // Decode initial subsequence and store result.
+
+        // Paper text does not mention `n` should be stored here, but if not storing `n`
+        // the first subsequence info's `n` will not be initialized. For simplicity, store all.
         s_info[subseq_idx_begin] = decode_subsequence<false>(
             subeq_idx_begin_rel, nullptr, cstate, segment_idx, rstate, tables, info);
     }
@@ -487,9 +507,15 @@ __global__ void sync_intra_sequence(
             old_info.p = s_info[subseq_idx - 1].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
-            old_info.n = 0;
-            old_info.c = s_info[subseq_idx - 1].c;
-            old_info.z = s_info[subseq_idx - 1].z;
+            old_info.n     = 0;
+            old_info.c     = s_info[subseq_idx - 1].c;
+            old_info.z     = s_info[subseq_idx - 1].z;
+            old_info.cache = s_info[subseq_idx - 1].cache;
+
+            // Initialize DC diff to zero to not keep accumulating.
+            for (size_t i = 0; i < cuda::std::size(info.dc); ++i) {
+                old_info.dc[i] = 0;
+            }
 
             info = decode_subsequence<false>(
                 subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
@@ -517,6 +543,12 @@ __global__ void sync_intra_sequence(
         if (is_block_done) break;
     }
 }
+
+// FIXME this fundamental problem with this approach is that when a subsequence is synced,
+// we know that after processing, the state (n, c, z) is correct. However, the DC values
+// that were processed in that subsequence leading up to the correct state may have been
+// faulty. Hence, to arrive at correct DC values we would need to decode every subsequence
+// one more time.
 
 /// \brief Synchronizes subsequences in multiple contiguous arrays of subsequences,
 ///   (relates to paper alg-3:25-41). Each thread handles such a contiguous array.
@@ -552,7 +584,7 @@ __global__ void sync_subsequences(
     // last index dictated by block and JPEG stream
     int end = min(subseq_idx_from_next_block, num_subsequences);
 
-    // since all threads must partipate, some threads will be assigned to
+    // since all threads must participate, some threads will be assigned to
     //  a subsequence out of bounds
     int segment_idx;
     segment seg_info;
@@ -588,9 +620,15 @@ __global__ void sync_subsequences(
             old_info.p = s_info[subseq_idx - 1].p;
             // do not load `n` here, to achieve that `s_info.n` is the number of decoded symbols
             //   only for each subsequence (and not an aggregate)
-            old_info.n = 0;
-            old_info.c = s_info[subseq_idx - 1].c;
-            old_info.z = s_info[subseq_idx - 1].z;
+            old_info.n     = 0;
+            old_info.c     = s_info[subseq_idx - 1].c;
+            old_info.z     = s_info[subseq_idx - 1].z;
+            old_info.cache = s_info[subseq_idx - 1].cache;
+
+            // Initialize DC diff to zero to not keep accumulating.
+            for (size_t i = 0; i < cuda::std::size(info.dc); ++i) {
+                old_info.dc[i] = 0;
+            }
 
             info = decode_subsequence<false>(
                 subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
@@ -660,13 +698,23 @@ __global__ void decode_write(
         subsequence_info info;
         info.p = 0;
         // n is not used in writing
-        info.c = 0;
-        info.z = 0;
+        info.c     = 0;
+        info.z     = 0;
+        info.cache = 0;
+
+        for (size_t i = 0; i < cuda::std::size(info.dc); ++i) {
+            info.dc[i] = 0;
+        }
 
         decode_subsequence<do_write>(
             subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
     } else {
         subsequence_info info = s_info[subseq_idx - 1];
+
+        // FIXME why, should we be doing an inclusive sum?
+        for (size_t i = 0; i < cuda::std::size(info.dc); ++i) {
+            info.dc[i] = s_info[subseq_idx].dc[i];
+        }
 
         reader_state rstate = rstate_from_subseq_overflow<block_size>(
             seg_info, rstate_memory, subseq_idx_rel, info.p, info.cache);
@@ -678,11 +726,14 @@ __global__ void decode_write(
 
 struct sum_subsequence_info {
     __device__ __forceinline__ subsequence_info
-    operator()(const subsequence_info& a, const subsequence_info& b) const
+    operator()(const subsequence_info& lhs, const subsequence_info& rhs) const
     {
-        // asserts in the comparison function are not great since CUB may execute the comparator on
-        // garbage data if the block or warp is not completely full
-        return {0, a.n + b.n, 0, 0};
+        subsequence_info res{};
+        res.n = lhs.n + rhs.n;
+        for (size_t i = 0; i < cuda::std::size(res.dc); ++i) {
+            res.dc[i] = lhs.dc[i] + rhs.dc[i];
+        }
+        return res;
     }
 };
 
@@ -697,6 +748,9 @@ __global__ void assign_sinfo_n(
 
     assert(src[lid].n >= 0);
     dst[lid].n = src[lid].n;
+    for (size_t i = 0; i < cuda::std::size(dst[lid].dc); ++i) {
+        dst[lid].dc[i] = src[lid].dc[i];
+    }
 }
 
 } // namespace
@@ -819,7 +873,7 @@ jpeggpu_status jpeggpu::decode_scan(
             cudaMemsetAsync(d_reduce_out, 0, num_subsequences * sizeof(subsequence_info), stream));
     }
 
-    const subsequence_info init_value{0, 0, 0, 0};
+    const subsequence_info init_value{};
     void* d_tmp_storage      = nullptr;
     size_t tmp_storage_bytes = 0;
     JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveScanByKey(
@@ -857,7 +911,7 @@ jpeggpu_status jpeggpu::decode_scan(
     constexpr int block_size_assign = 256;
     const int grid_dim =
         ceiling_div(num_subsequences, static_cast<unsigned int>(block_size_assign));
-    if (do_it) {
+    if (do_it) { // FIXME why is this kernel needed?
         assign_sinfo_n<<<grid_dim, block_size_assign, 0, stream>>>(
             num_subsequences, d_s_info, d_reduce_out);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());

@@ -305,7 +305,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
         //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
 
         // undo DC difference encoding
-        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out, allocator, stream, logger));
+        // JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out, allocator, stream, logger));
 
         if (do_it) {
             // Convert data order from data unit at a time to raster order,
