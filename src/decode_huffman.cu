@@ -739,8 +739,8 @@ jpeggpu_status jpeggpu::decode_scan(
     int c_offsets[max_comp_count] = {};
     int c_offset                  = 0;
     for (int sc = 0; sc < scan.num_scan_components; ++sc) {
-        const component& comp = info.components[scan.scan_components[sc].component_idx];
-        c_offset += comp.ss.x * comp.ss.y;
+        const scan_component& scan_comp = scan.scan_components[sc];
+        c_offset += scan_comp.ss.x * scan_comp.ss.y;
         c_offsets[sc] = c_offset;
     }
 
@@ -770,7 +770,7 @@ jpeggpu_status jpeggpu::decode_scan(
         scan.num_data_units_in_mcu,
         scan.num_scan_components,
         num_data_units,
-        info.restart_interval != 0 ? info.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
+        scan.restart_interval != 0 ? scan.restart_interval : scan.num_mcus.x * scan.num_mcus.y};
 
     // decode all subsequences
     // "b", sequence size in number of subsequences, configurable

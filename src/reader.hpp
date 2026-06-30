@@ -76,6 +76,9 @@ struct scan_component {
     ivec2 mcu_size; /// Number of pixels in one MCU.
     /// \brief Image size in pixels that are present in the scan, so rounded up to the MCU.
     ivec2 data_size;
+    /// \brief Normalized subsampling factor: the maximum in the scan divided
+    ///   by the factor for this component.
+    ivec2 ss;
 };
 
 struct scan {
@@ -96,6 +99,10 @@ struct scan {
     int num_huff_tables;
     /// \brief The global indices of the Huffman tables used in the scan.
     int huff_tables[max_baseline_huff_per_scan];
+
+    /// \brief Restart interval for differential DC encoding, in number of MCUs.
+    ///   Zero if no restart interval is defined.
+    int restart_interval;
 };
 
 inline bool is_interleaved(const scan& scan) { return scan.num_scan_components > 1; }
@@ -124,10 +131,6 @@ struct jpeg_stream {
 
     int num_components; ///< Number of image components.
     component components[max_comp_count];
-
-    /// \brief Restart interval for differential DC encoding, in number of MCUs.
-    ///   Zero if no restart interval is defined.
-    int restart_interval;
 };
 
 struct reader {
@@ -148,11 +151,11 @@ struct reader {
 
     jpeggpu_status read_dht(logger& logger);
 
-    jpeggpu_status read_sos(logger& logger);
+    jpeggpu_status read_sos(logger& logger, int restart_interval);
 
     jpeggpu_status read_dqt(logger& logger);
 
-    jpeggpu_status read_dri(logger& logger);
+    jpeggpu_status read_dri(logger& logger, int& restart_interval);
 
     jpeggpu_status skip_segment(logger& logger);
 

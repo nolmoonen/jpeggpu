@@ -98,8 +98,7 @@ jpeggpu_status jpeggpu::decode_dc(
 
     for (int sc = 0; sc < scan.num_scan_components; ++sc) {
         const scan_component& scan_comp       = scan.scan_components[sc];
-        const component& comp                 = info.components[scan_comp.component_idx];
-        const int data_units_in_mcu_component = comp.ss.x * comp.ss.y;
+        const int data_units_in_mcu_component = scan_comp.ss.x * scan_comp.ss.y;
 
         auto counting_iter = thrust::make_counting_iterator(int{0});
 
@@ -116,14 +115,13 @@ jpeggpu_status jpeggpu::decode_dc(
         const int num_data_units_component =
             scan_comp.data_size.x * scan_comp.data_size.y / data_unit_size;
 
-        if (info.restart_interval != 0) {
+        if (scan.restart_interval != 0) {
             // if restart interval is defined, scan by key where key is segment index
 
-            auto counting_iter_key     = thrust::make_counting_iterator(int{0});
-            const int restart_interval = info.restart_interval;
-            auto iter_key              = thrust::make_transform_iterator(
+            auto counting_iter_key = thrust::make_counting_iterator(int{0});
+            auto iter_key          = thrust::make_transform_iterator(
                 counting_iter_key,
-                interleaved_functor(restart_interval, data_units_in_mcu_component));
+                interleaved_functor(scan.restart_interval, data_units_in_mcu_component));
 
             const auto dispatch = [&]() -> cudaError_t {
                 return cub::DeviceScan::InclusiveSumByKey(

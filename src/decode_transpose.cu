@@ -141,7 +141,6 @@ jpeggpu_status jpeggpu::decode_transpose(
     cudaStream_t stream,
     logger& logger)
 {
-    const component(&comps)[max_comp_count]                = info.components;
     const scan_component(&scan_components)[max_comp_count] = scan.scan_components;
     const int num_scan_comp                                = scan.num_scan_components;
 
@@ -176,10 +175,10 @@ jpeggpu_status jpeggpu::decode_transpose(
             num_scan_comp > 2 ? scan_components[2].data_size : ivec2{0, 0}, \
             num_scan_comp > 3 ? scan_components[3].data_size : ivec2{0, 0}, \
             scan.num_mcus.x,                                                \
-            num_scan_comp > 0 ? comps[comp_idx_0].ss : ivec2{0, 0},         \
-            num_scan_comp > 1 ? comps[comp_idx_1].ss : ivec2{0, 0},         \
-            num_scan_comp > 2 ? comps[comp_idx_2].ss : ivec2{0, 0},         \
-            num_scan_comp > 3 ? comps[comp_idx_3].ss : ivec2{0, 0});        \
+            num_scan_comp > 0 ? scan_components[0].ss : ivec2{0, 0},        \
+            num_scan_comp > 1 ? scan_components[1].ss : ivec2{0, 0},        \
+            num_scan_comp > 2 ? scan_components[2].ss : ivec2{0, 0},        \
+            num_scan_comp > 3 ? scan_components[3].ss : ivec2{0, 0});       \
     JPEGGPU_CHECK_CUDA(cudaGetLastError());                                 \
     return JPEGGPU_SUCCESS;
 
