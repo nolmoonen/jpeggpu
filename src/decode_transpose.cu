@@ -52,10 +52,10 @@ __global__ void transpose_interleaved(
     ivec2 size_2,
     ivec2 size_3,
     int data_size_mcu_x, /// Number of MCUs in a row.
-    ivec2 ss_0, /// Subsampling factor of first component, as defined in JPEG header.
-    ivec2 ss_1,
-    ivec2 ss_2,
-    ivec2 ss_3)
+    ivec2 num_blocks_in_mcu_0,
+    ivec2 num_blocks_in_mcu_1,
+    ivec2 num_blocks_in_mcu_2,
+    ivec2 num_blocks_in_mcu_3)
 {
     const size_t idx_pixel_in = (blockIdx.x * blockDim.x + threadIdx.x) * num_values_per_thread;
 
@@ -69,41 +69,41 @@ __global__ void transpose_interleaved(
 
     int x_in_mcu = 0;
     int y_in_mcu = 0;
-    ivec2 ss{0, 0};
+    ivec2 num_blocks_in_mcu{0, 0};
     ivec2 size{0, 0};
     int16_t* data_out = nullptr;
     [&]() {
         int i = 0;
 
-        ss       = ss_0;
-        data_out = data_out_0;
-        size     = size_0;
-        for (y_in_mcu = 0; y_in_mcu < ss_0.y; ++y_in_mcu) {
-            for (x_in_mcu = 0; x_in_mcu < ss_0.x; ++x_in_mcu) {
+        num_blocks_in_mcu = num_blocks_in_mcu_0;
+        data_out          = data_out_0;
+        size              = size_0;
+        for (y_in_mcu = 0; y_in_mcu < num_blocks_in_mcu_0.y; ++y_in_mcu) {
+            for (x_in_mcu = 0; x_in_mcu < num_blocks_in_mcu_0.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
             }
         }
-        ss       = ss_1;
-        data_out = data_out_1;
-        size     = size_1;
-        for (y_in_mcu = 0; y_in_mcu < ss_1.y; ++y_in_mcu) {
-            for (x_in_mcu = 0; x_in_mcu < ss_1.x; ++x_in_mcu) {
+        num_blocks_in_mcu = num_blocks_in_mcu_1;
+        data_out          = data_out_1;
+        size              = size_1;
+        for (y_in_mcu = 0; y_in_mcu < num_blocks_in_mcu_1.y; ++y_in_mcu) {
+            for (x_in_mcu = 0; x_in_mcu < num_blocks_in_mcu_1.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
             }
         }
-        ss       = ss_2;
-        data_out = data_out_2;
-        size     = size_2;
-        for (y_in_mcu = 0; y_in_mcu < ss_2.y; ++y_in_mcu) {
-            for (x_in_mcu = 0; x_in_mcu < ss_2.x; ++x_in_mcu) {
+        num_blocks_in_mcu = num_blocks_in_mcu_2;
+        data_out          = data_out_2;
+        size              = size_2;
+        for (y_in_mcu = 0; y_in_mcu < num_blocks_in_mcu_2.y; ++y_in_mcu) {
+            for (x_in_mcu = 0; x_in_mcu < num_blocks_in_mcu_2.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
             }
         }
-        ss       = ss_3;
-        data_out = data_out_3;
-        size     = size_3;
-        for (y_in_mcu = 0; y_in_mcu < ss_3.y; ++y_in_mcu) {
-            for (x_in_mcu = 0; x_in_mcu < ss_3.x; ++x_in_mcu) {
+        num_blocks_in_mcu = num_blocks_in_mcu_3;
+        data_out          = data_out_3;
+        size              = size_3;
+        for (y_in_mcu = 0; y_in_mcu < num_blocks_in_mcu_3.y; ++y_in_mcu) {
+            for (x_in_mcu = 0; x_in_mcu < num_blocks_in_mcu_3.x; ++x_in_mcu) {
                 if (idx_in_mcu == i++) return;
             }
         }
@@ -116,8 +116,8 @@ __global__ void transpose_interleaved(
     const int x_mcu = idx_mcu % data_size_mcu_x;
     const int y_mcu = idx_mcu / data_size_mcu_x;
 
-    const int x_data_unit = x_mcu * ss.x + x_in_mcu;
-    const int y_data_unit = y_mcu * ss.y + y_in_mcu;
+    const int x_data_unit = x_mcu * num_blocks_in_mcu.x + x_in_mcu;
+    const int y_data_unit = y_mcu * num_blocks_in_mcu.y + y_in_mcu;
 
     const int x_in_data_unit = idx_in_data_unit % data_unit_vector_size;
     const int y_in_data_unit = idx_in_data_unit / data_unit_vector_size;
@@ -141,7 +141,6 @@ jpeggpu_status jpeggpu::decode_transpose(
     cudaStream_t stream,
     logger& logger)
 {
-    const component(&comps)[max_comp_count]                = info.components;
     const scan_component(&scan_components)[max_comp_count] = scan.scan_components;
     const int num_scan_comp                                = scan.num_scan_components;
 
@@ -162,25 +161,25 @@ jpeggpu_status jpeggpu::decode_transpose(
 
 // Provide the num_data_units_in_mcu as a compile-time constant so the compiler can generate efficient
 //   division and modulo instructions.
-#define DISPATCH(NUM_DATA_UNITS_IN_MCU)                                     \
-    transpose_interleaved<NUM_DATA_UNITS_IN_MCU>                            \
-        <<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(           \
-            d_out,                                                          \
-            num_scan_comp > 0 ? d_image_qdct[comp_idx_0] : nullptr,         \
-            num_scan_comp > 1 ? d_image_qdct[comp_idx_1] : nullptr,         \
-            num_scan_comp > 2 ? d_image_qdct[comp_idx_2] : nullptr,         \
-            num_scan_comp > 3 ? d_image_qdct[comp_idx_3] : nullptr,         \
-            total_data_size,                                                \
-            num_scan_comp > 0 ? scan_components[0].data_size : ivec2{0, 0}, \
-            num_scan_comp > 1 ? scan_components[1].data_size : ivec2{0, 0}, \
-            num_scan_comp > 2 ? scan_components[2].data_size : ivec2{0, 0}, \
-            num_scan_comp > 3 ? scan_components[3].data_size : ivec2{0, 0}, \
-            scan.num_mcus.x,                                                \
-            num_scan_comp > 0 ? comps[comp_idx_0].ss : ivec2{0, 0},         \
-            num_scan_comp > 1 ? comps[comp_idx_1].ss : ivec2{0, 0},         \
-            num_scan_comp > 2 ? comps[comp_idx_2].ss : ivec2{0, 0},         \
-            num_scan_comp > 3 ? comps[comp_idx_3].ss : ivec2{0, 0});        \
-    JPEGGPU_CHECK_CUDA(cudaGetLastError());                                 \
+#define DISPATCH(NUM_DATA_UNITS_IN_MCU)                                              \
+    transpose_interleaved<NUM_DATA_UNITS_IN_MCU>                                     \
+        <<<transpose_grid_dim, transpose_block_dim, 0, stream>>>(                    \
+            d_out,                                                                   \
+            num_scan_comp > 0 ? d_image_qdct[comp_idx_0] : nullptr,                  \
+            num_scan_comp > 1 ? d_image_qdct[comp_idx_1] : nullptr,                  \
+            num_scan_comp > 2 ? d_image_qdct[comp_idx_2] : nullptr,                  \
+            num_scan_comp > 3 ? d_image_qdct[comp_idx_3] : nullptr,                  \
+            total_data_size,                                                         \
+            num_scan_comp > 0 ? scan_components[0].data_size : ivec2{0, 0},          \
+            num_scan_comp > 1 ? scan_components[1].data_size : ivec2{0, 0},          \
+            num_scan_comp > 2 ? scan_components[2].data_size : ivec2{0, 0},          \
+            num_scan_comp > 3 ? scan_components[3].data_size : ivec2{0, 0},          \
+            scan.num_mcus.x,                                                         \
+            num_scan_comp > 0 ? scan_components[0].num_blocks_in_mcu : ivec2{0, 0},  \
+            num_scan_comp > 1 ? scan_components[1].num_blocks_in_mcu : ivec2{0, 0},  \
+            num_scan_comp > 2 ? scan_components[2].num_blocks_in_mcu : ivec2{0, 0},  \
+            num_scan_comp > 3 ? scan_components[3].num_blocks_in_mcu : ivec2{0, 0}); \
+    JPEGGPU_CHECK_CUDA(cudaGetLastError());                                          \
     return JPEGGPU_SUCCESS;
 
     JPEGGPU_CHECK_STAT([&]() -> jpeggpu_status {
