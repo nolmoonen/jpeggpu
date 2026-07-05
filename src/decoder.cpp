@@ -14,6 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "decoder.hpp"
+#include "decode_block.hpp"
 #include "decode_dc.hpp"
 #include "decode_huffman.hpp"
 #include "decode_transpose.hpp"
@@ -222,39 +223,28 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
     JPEGGPU_CHECK_STAT(reserve_transfer_data<do_it>(
         reader, allocator, d_image_data, d_qtables, d_huff_tables, d_segments));
 
-    // Output of decoding, quantized and cosine-transformed image data.
-    int16_t* d_image_qdct[max_comp_count] = {};
-
     // TODO if one kernel launch is used for all stages, instead of per scan, it could reduce launch overhead
     //   and help saturate the GPU better. though this only helps for non-interleaved JPEGs, which are uncommon
 
     for (int s = 0; s < info.num_scans; ++s) {
         const scan& scan = info.scans[s];
 
-        size_t total_data_size = 0;
+        int num_blocks = 0;
         for (int sc = 0; sc < scan.num_scan_components; ++sc) {
             const scan_component& scan_comp = scan.scan_components[sc];
-            const size_t data_size          = scan_comp.data_size.x * scan_comp.data_size.y;
-            const int comp_idx              = scan_comp.component_idx;
-            // This allocation is valid since we check that components are not defined twice, in different scans.
-            JPEGGPU_CHECK_STAT( // TODO make elements version
-                allocator.reserve<do_it>(&(d_image_qdct[comp_idx]), data_size * sizeof(int16_t)));
-            if (do_it) {
-                // Initialize to zero, progressive decoding need not write all bits
-                //   and this will satisfy initcheck
-                JPEGGPU_CHECK_CUDA(cudaMemsetAsync(
-                    d_image_qdct[comp_idx], 0, data_size * sizeof(int16_t), stream));
-            }
-            total_data_size += data_size;
+            const component& comp           = info.components[scan_comp.component_idx];
+            num_blocks += comp.num_blocks.y * comp.num_blocks.x;
         }
 
-        int16_t* d_scan_out = nullptr;
-        JPEGGPU_CHECK_STAT(
-            allocator.reserve<do_it>(&d_scan_out, total_data_size * sizeof(int16_t)));
+        int* d_block_bit_offsets = nullptr;
+        JPEGGPU_CHECK_STAT( // TODO make elements version
+            allocator.reserve<do_it>(&d_block_bit_offsets, num_blocks * sizeof(int)));
+
+        int16_t* d_dcs = nullptr;
+        JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_dcs, num_blocks * sizeof(int16_t)));
         if (do_it) {
-            // initialize to zero, since only non-zeros are written by Huffman decoding
-            JPEGGPU_CHECK_CUDA(
-                cudaMemsetAsync(d_scan_out, 0, total_data_size * sizeof(int16_t), stream));
+            // Initialize to zero, only non-zero is written
+            JPEGGPU_CHECK_CUDA(cudaMemsetAsync(d_dcs, 0, num_blocks * sizeof(int16_t), stream));
         }
 
         uint8_t* d_scan_destuffed = nullptr;
@@ -282,38 +272,36 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             stream,
             logger));
 
+        // TODO maybe "sync_scan"
         JPEGGPU_CHECK_STAT(decode_scan<do_it>(
             info,
             d_scan_destuffed,
             d_segments[s],
             d_segment_indices,
-            d_scan_out,
+            d_dcs,
+            d_block_bit_offsets,
             scan,
             d_huff_tables[s],
             allocator,
             stream,
             logger));
 
-        // TODO is "data unit" the correct terminology?
-
-        // after decoding, the data is as how it appears in the encoded stream: one data unit at a time
-        //   (i.e. 64 bytes), the data units possibly interleaved in the MCUs
-
         // undo DC difference encoding
-        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_scan_out, allocator, stream, logger));
+        JPEGGPU_CHECK_STAT(decode_dc<do_it>(info, scan, d_dcs, allocator, stream, logger));
 
-        if (do_it) {
-            // Convert data order from data unit at a time to raster order,
-            //   and place the components from scan order to frame order.
-            JPEGGPU_CHECK_STAT(
-                decode_transpose(info, d_scan_out, scan, d_image_qdct, stream, logger));
-        }
-    }
-
-    if (do_it) {
-        // invert DCT and output directly into user-provided buffer
-        JPEGGPU_CHECK_STAT(
-            idct(info, d_image_qdct, img->image, img->pitch, d_qtables, stream, logger));
+        JPEGGPU_CHECK_STAT(decode_block<do_it>(
+            info,
+            d_scan_destuffed,
+            d_dcs,
+            d_block_bit_offsets,
+            scan,
+            d_huff_tables[s],
+            img->image,
+            img->pitch,
+            d_qtables,
+            allocator,
+            stream,
+            logger));
     }
 
     return JPEGGPU_SUCCESS;

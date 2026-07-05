@@ -69,7 +69,7 @@ struct interleaved_transform_functor {
         const int idx_in_mcu = off_in_mcu + i % data_units_in_mcu_component;
 
         const int data_unit_idx = mcu_idx * data_units_in_mcu + idx_in_mcu;
-        const int data_idx      = data_unit_idx * data_unit_size;
+        const int data_idx      = data_unit_idx;
         return data_idx;
     }
 
@@ -84,7 +84,7 @@ template <bool do_it>
 jpeggpu_status jpeggpu::decode_dc(
     const jpeg_stream& info,
     const scan& scan,
-    int16_t* d_out,
+    int16_t* d_dcs,
     stack_allocator& allocator,
     cudaStream_t stream,
     logger& logger)
@@ -103,7 +103,7 @@ jpeggpu_status jpeggpu::decode_dc(
             counting_iter,
             interleaved_transform_functor(
                 data_units_in_mcu_component, off_in_mcu, scan.num_data_units_in_mcu));
-        auto iter_interleaved = thrust::make_permutation_iterator(d_out, interleaved_index_iter);
+        auto iter_interleaved = thrust::make_permutation_iterator(d_dcs, interleaved_index_iter);
 
         void* d_tmp_storage      = nullptr;
         size_t tmp_storage_bytes = 0;

@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Nol Moonen
+// Copyright (c) 2024-2026 Nol Moonen
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,8 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#ifndef JPEGGPU_DECODE_HUFFMAN_READER_HPP_
-#define JPEGGPU_DECODE_HUFFMAN_READER_HPP_
+#ifndef JPEGGPU_DECODE_HUFFMAN_READER_CUH_
+#define JPEGGPU_DECODE_HUFFMAN_READER_CUH_
 
 #include "decoder_defs.hpp"
 
@@ -291,4 +291,4 @@ __device__ reader_state_all_subsequences<block_size> rstate_from_subseq_overflow
 
 } // namespace jpeggpu
 
-#endif // JPEGGPU_DECODE_HUFFMAN_READER_HPP_
+#endif // JPEGGPU_DECODE_HUFFMAN_READER_CUH_

@@ -33,6 +33,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_library(jpeggpu STATIC
     "${SOURCE_DIR}/jpeggpu.cpp"
+    "${SOURCE_DIR}/decode_block.cu"
     "${SOURCE_DIR}/decode_dc.cu"
     "${SOURCE_DIR}/decode_destuff.cu"
     "${SOURCE_DIR}/decode_huffman.cu"

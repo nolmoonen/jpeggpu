@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Nol Moonen
+// Copyright (c) 2024-2026 Nol Moonen
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -36,10 +36,6 @@ namespace jpeggpu {
 ///   Should be aligned with cudaMalloc alignment.
 /// \param[in] d_segments Device memory, segment info.
 /// \param[in] d_segment_indices Device memory, for every subsequence its segment index.
-/// \param[out] d_out Pointer to device memory where quantized-cosine-transformed pixel data should be stored.
-///   If the scan is interleaved, it should be big enough to hold all components. If the scan is not interleaved,
-///   this function should be called multiple times for each scan. The data is stored as how it appears in the stream:
-///   one data unit at a time, components possibly interleaved.
 /// \param[in] scan Scan info.
 /// \param[in] d_huff_tables Device memory, Huffman tables, in the order following their IDs in the JPEG header.
 /// \param[inout] allocator
@@ -51,7 +47,8 @@ jpeggpu_status decode_scan(
     const uint8_t* d_scan_destuffed,
     const segment* d_segments,
     const int* d_segment_indices,
-    int16_t* d_out,
+    int16_t* d_dcs,
+    int* d_block_bit_offsets,
     const struct jpeggpu::scan& scan,
     huffman_table* d_huff_tables,
     stack_allocator& allocator,

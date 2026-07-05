@@ -32,13 +32,15 @@
 // - Have some "halo" for each intra-sequence thread block of threads that only
 //   decode subsequences for the purpose of synchronization.
 
+#include "decode_block.hpp"
 #include "decode_dc.hpp"
 #include "decode_destuff.hpp"
 #include "decode_huffman.hpp"
-#include "decode_huffman_reader.hpp"
+#include "decode_huffman_reader.cuh"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
+#include "huffman.cuh"
 #include "marker.hpp"
 #include "reader.hpp"
 #include "util.cuh"
@@ -140,52 +142,11 @@ __device__ void load_huffman_tables(const const_state& cstate, huffman_tables& t
     }
 }
 
-/// \brief Returns the oldest (most significant) `num_bits` from `data`.
-__device__ uint32_t u32_select_bits(uint32_t data, int num_bits)
-{
-    assert(num_bits <= 32);
-    return data >> (32 - num_bits);
-}
-
 /// \brief Discards the oldest (most significant) `num_bits` from `data`.
 __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 {
     assert(num_bits <= 32);
     return data << num_bits;
-}
-
-/// \brief Get the Huffman category from stream. Reads at most 16 bits.
-///
-/// \param[in] data Holds at least 16 data bits in the most significant positions.
-/// \param[out] length Number of bits read.
-/// \param[in] table
-uint8_t __device__ get_category(uint32_t data, int& length, const huffman_table& table)
-{
-    const int id = u32_select_bits(data, huffman_table::lookup_len);
-
-    const typename huffman_table::lut_entry row = table.lut[id];
-    if (row.nbits != 0) {
-        length = row.nbits;
-        return row.val;
-    }
-
-    int i;
-    int32_t code;
-    huffman_table::entry entry;
-    for (i = huffman_table::lookup_len; i < 16; ++i) {
-        code                    = u32_select_bits(data, i + 1);
-        const bool is_last_iter = i == 15;
-        entry                   = table.entries[i];
-        if (code <= entry.maxcode || is_last_iter) {
-            break;
-        }
-    }
-    assert(1 <= i + 1 && i + 1 <= 16);
-    // termination condition: 1 <= i + 1 <= 16, i + 1 is number of bits
-    length        = i + 1;
-    const int idx = entry.valptr_sub_mincode + code;
-    // Cast to [0, 256) to produce a valid index in the array in the event of invalid input.
-    return table.huffval[static_cast<uint8_t>(idx)];
 }
 
 __device__ int get_value(int num_bits, int code)
@@ -286,7 +247,8 @@ __device__ void decode_next_symbol(
 /// \tparam do_write Whether to write the coefficients to the output buffer.
 ///
 /// \param[in] subseq_idx_rel Subsequence index relative to segment.
-/// \param[out] out Output memory for coefficients, may be `nullptr` if `do_write` is false.
+/// \param[out] dcs Is `nullptr` when `do_write` is false.
+/// \param[out] block_bit_offsets Is `nullptr` when `do_write` is false.
 /// \param[in] cstate
 /// \param[in] segment_idx The segment index for this subsequence.
 /// \param[inout] rstate
@@ -297,7 +259,8 @@ __device__ void decode_next_symbol(
 template <bool do_write, typename reader_state>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx_rel,
-    int16_t* __restrict__ out,
+    int16_t* dcs,
+    int* block_bit_offsets,
     const const_state& cstate,
     int segment_idx,
     reader_state& rstate,
@@ -350,19 +313,21 @@ __device__ subsequence_info decode_subsequence(
         }
 
         // commit
+
+        if (do_write && info.z == 0) {
+            assert(position_in_output % data_unit_size == 0);
+            const int data_unit_idx          = position_in_output / data_unit_size;
+            block_bit_offsets[data_unit_idx] = info.p;
+            if (symbol != 0) {
+                dcs[data_unit_idx] = symbol;
+            }
+        }
+
         discard_bits(rstate, length);
 
         if (do_write) {
             // TODO why use position_in_output instead of info.n?
-            // TODO could make a separate kernel for this
-            position_in_output += run_length;
-            if (symbol != 0) {
-                const int data_unit_idx    = position_in_output / data_unit_size;
-                const int idx_in_data_unit = position_in_output % data_unit_size;
-                // TODO attempt order_natural in shared memory
-                out[data_unit_idx * data_unit_size + order_natural[idx_in_data_unit]] = symbol;
-            }
-            ++position_in_output;
+            position_in_output += run_length + 1;
         }
 
         info.p += length;
@@ -459,7 +424,7 @@ __global__ void sync_intra_sequence(
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
         s_info_shared[threadIdx.x] = decode_subsequence<false>(
-            subeq_idx_begin_rel, nullptr, cstate, segment_idx, rstate, tables, info);
+            subeq_idx_begin_rel, nullptr, nullptr, cstate, segment_idx, rstate, tables, info);
     }
     __syncthreads();
 
@@ -489,7 +454,7 @@ __global__ void sync_intra_sequence(
             old_info.z = s_info_shared[subseq_idx - 1 - block_off].z;
 
             info = decode_subsequence<false>(
-                subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
+                subseq_idx_rel, nullptr, nullptr, cstate, segment_idx, rstate, tables, old_info);
             assert(block_off <= subseq_idx && subseq_idx - block_off < block_size);
             const subsequence_info& stored_info = s_info_shared[subseq_idx - block_off];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
@@ -593,7 +558,7 @@ __global__ void sync_subsequences(
             old_info.z = s_info[subseq_idx - 1].z;
 
             info = decode_subsequence<false>(
-                subseq_idx_rel, nullptr, cstate, segment_idx, rstate, tables, old_info);
+                subseq_idx_rel, nullptr, nullptr, cstate, segment_idx, rstate, tables, old_info);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -621,7 +586,8 @@ __global__ void sync_subsequences(
 /// \tparam block_size The constant "b". TODO is that required?
 template <int block_size>
 __global__ void decode_write(
-    int16_t* __restrict__ out,
+    int16_t* dcs,
+    int* block_bit_offsets,
     const subsequence_info* __restrict__ s_info,
     int num_subsequences,
     const_state cstate)
@@ -664,7 +630,15 @@ __global__ void decode_write(
         info.z = 0;
 
         decode_subsequence<do_write>(
-            subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
+            subseq_idx_rel,
+            dcs,
+            block_bit_offsets,
+            cstate,
+            segment_idx,
+            rstate,
+            tables,
+            info,
+            position_in_output);
     } else {
         subsequence_info info = s_info[subseq_idx - 1];
 
@@ -672,7 +646,15 @@ __global__ void decode_write(
             seg_info, rstate_memory, subseq_idx_rel, info.p, info.cache);
 
         decode_subsequence<do_write>(
-            subseq_idx_rel, out, cstate, segment_idx, rstate, tables, info, position_in_output);
+            subseq_idx_rel,
+            dcs,
+            block_bit_offsets,
+            cstate,
+            segment_idx,
+            rstate,
+            tables,
+            info,
+            position_in_output);
     }
 }
 
@@ -707,7 +689,8 @@ jpeggpu_status jpeggpu::decode_scan(
     const uint8_t* d_scan_destuffed,
     const segment* d_segments,
     const int* d_segment_indices,
-    int16_t* d_out,
+    int16_t* d_dcs,
+    int* d_block_bit_offsets,
     const struct scan& scan,
     huffman_table* d_huff_tables,
     stack_allocator& allocator,
@@ -867,7 +850,7 @@ jpeggpu_status jpeggpu::decode_scan(
         // alg-1:09-15
         decode_write<num_subsequences_in_sequence>
             <<<num_sequences, num_subsequences_in_sequence, 0, stream>>>(
-                d_out, d_s_info, num_subsequences, cstate);
+                d_dcs, d_block_bit_offsets, d_s_info, num_subsequences, cstate);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 
@@ -880,6 +863,7 @@ template jpeggpu_status jpeggpu::decode_scan<false>(
     const segment*,
     const int*,
     int16_t*,
+    int*,
     const struct scan&,
     huffman_table*,
     stack_allocator&,
@@ -892,6 +876,7 @@ template jpeggpu_status jpeggpu::decode_scan<true>(
     const segment*,
     const int*,
     int16_t*,
+    int*,
     const struct scan&,
     huffman_table*,
     stack_allocator&,
