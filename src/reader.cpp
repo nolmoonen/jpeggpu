@@ -127,7 +127,13 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
         jpeg_stream.size.y,
         jpeg_stream.num_components);
 
-    jpeg_stream.ss_max = {0, 0};
+    bool all_x_four             = true;
+    bool all_x_three            = true;
+    bool all_x_divisible_by_two = true;
+    bool all_y_four             = true;
+    bool all_y_three            = true;
+    bool all_y_divisible_by_two = true;
+
     for (int c = 0; c < num_components; ++c) {
         component& comp                = jpeg_stream.components[c];
         const uint8_t component_id     = read_uint8();
@@ -144,17 +150,15 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
             return JPEGGPU_INVALID_JPEG;
         }
 
-        if (num_components == 1) {
-            // Specification allows the subsampling factor to not be 1 when there is only
-            //   one component. However, in this case it is effectively ignored and we set
-            //   it to 1x1.
+        comp.ss.x = ss_x_c;
+        comp.ss.y = ss_y_c;
 
-            comp.ss.x = 1;
-            comp.ss.y = 1;
-        } else {
-            comp.ss.x = ss_x_c;
-            comp.ss.y = ss_y_c;
-        }
+        all_x_four &= ss_x_c == 4;
+        all_x_three &= ss_x_c == 3;
+        all_x_divisible_by_two &= ss_x_c % 2 == 0;
+        all_y_four &= ss_y_c == 4;
+        all_y_three &= ss_y_c == 3;
+        all_y_divisible_by_two &= ss_y_c % 2 == 0;
 
         const uint8_t qi = read_uint8();
         if (qi > 3) {
@@ -168,16 +172,59 @@ bool jpeggpu::reader::has_remaining() { return has_remaining(1); }
             comp.ss.x,
             comp.ss.y,
             comp.qtable_idx);
+    }
+
+    // Ensure the subsampling factors are normalized ratios.
+    // E.g. it is legal to have a 1-component frame with subsampling factor 4x4.
+    jpeg_stream.ss_max = {0, 0};
+    for (int c = 0; c < num_components; ++c) {
+        component& comp = jpeg_stream.components[c];
+
+        if (all_x_four || all_x_three) {
+            comp.ss.x = 1;
+        } else if (all_x_divisible_by_two) {
+            comp.ss.x /= 2;
+        }
+
+        if (all_y_four || all_y_three) {
+            comp.ss.y = 1;
+        } else if (all_y_divisible_by_two) {
+            comp.ss.y /= 2;
+        }
+
         jpeg_stream.ss_max = {
             std::max(jpeg_stream.ss_max.x, comp.ss.x), std::max(jpeg_stream.ss_max.y, comp.ss.y)};
     }
 
     for (int c = 0; c < jpeg_stream.num_components; ++c) {
         component& comp = jpeg_stream.components[c];
-        // A.1.1
-        comp.size = {
-            get_size(jpeg_stream.size.x, comp.ss.x, jpeg_stream.ss_max.x),
-            get_size(jpeg_stream.size.y, comp.ss.y, jpeg_stream.ss_max.y)};
+
+        if (jpeg_stream.ss_max.x % comp.ss.x != 0 || jpeg_stream.ss_max.y % comp.ss.y != 0) {
+            logger.log(
+                "\tmaximum subsampling factor %dx%d not an integer multiple of component "
+                "subsampling factor %dx%d\n",
+                jpeg_stream.ss_max.x,
+                jpeg_stream.ss_max.y,
+                comp.ss.x,
+                comp.ss.y);
+            return JPEGGPU_NOT_SUPPORTED;
+        }
+
+        comp.size.x = ceiling_div(
+            jpeg_stream.size.x, static_cast<unsigned int>(jpeg_stream.ss_max.x / comp.ss.x));
+        comp.size.y = ceiling_div(
+            jpeg_stream.size.y, static_cast<unsigned int>(jpeg_stream.ss_max.y / comp.ss.y));
+
+        comp.num_blocks.x =
+            ceiling_div(
+                jpeg_stream.size.x,
+                static_cast<unsigned int>(jpeg_stream.ss_max.x * data_unit_vector_size)) *
+            comp.ss.x;
+        comp.num_blocks.y =
+            ceiling_div(
+                jpeg_stream.size.y,
+                static_cast<unsigned int>(jpeg_stream.ss_max.y * data_unit_vector_size)) *
+            comp.ss.y;
     }
 
     return JPEGGPU_SUCCESS;
@@ -242,12 +289,12 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         --remaining;
         const int table_class = index >> 4;
         const int th          = index & 0xf;
-        if (table_class != 0 && table_class != 1) {
+        if (table_class >= HUFF_COUNT) {
             logger.log("\tinvalid Huffman table class\n");
             return JPEGGPU_INVALID_JPEG;
         }
-        const bool is_dc = table_class == 0;
-        if (th > 3) {
+        const bool is_dc = table_class == HUFF_DC;
+        if (th >= num_htable_slots) {
             logger.log("\tHuffman table index must be 0, 1, 2, or 3\n");
             return JPEGGPU_NOT_SUPPORTED;
         }
@@ -259,10 +306,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
 
         logger.log("\t%s Huffman table index %d\n", is_dc ? "DC" : "AC", th);
 
-        const int scan_idx                  = jpeg_stream.num_scans;
-        const int huff_idx                  = th * HUFF_COUNT + table_class;
-        huffman_table& table                = h_huff_tables[scan_idx][huff_idx];
-        reader_state.huff_defined[huff_idx] = true;
+        huffman_table& table                       = reader_state.htables[table_class][th];
+        reader_state.huff_defined[table_class][th] = true;
 
         /// num_codes[i] is # of symbols with codes of i + 1 bits
         uint8_t num_codes[16];
@@ -329,6 +374,7 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
     }
     const int scan_idx       = jpeg_stream.num_scans++;
     scan& scan               = jpeg_stream.scans[scan_idx];
+    scan.restart_interval    = reader_state.restart_interval;
     scan.num_scan_components = num_scan_components;
 
     const uint16_t length_remaining = 2 * num_scan_components + 3;
@@ -339,7 +385,6 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         return JPEGGPU_INCOMPLETE_BITSTREAM;
     }
 
-    scan.num_data_units_in_mcu = 0;
     for (int sc = 0; sc < num_scan_components; ++sc) {
         scan_component& scan_component = scan.scan_components[sc];
 
@@ -374,15 +419,19 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             logger.log("\tHuffman table id out of bounds\n");
         }
 
-        if (!reader_state.huff_defined[id_dc * HUFF_COUNT + HUFF_DC]) {
+        if (!reader_state.huff_defined[HUFF_DC][id_dc]) {
             return JPEGGPU_INVALID_JPEG;
         }
         scan_component.dc_idx = id_dc;
+        h_huff_tables[scan_idx][HUFF_COUNT * id_dc + HUFF_DC] =
+            reader_state.htables[HUFF_DC][id_dc];
 
-        if (!reader_state.huff_defined[id_ac * HUFF_COUNT + HUFF_AC]) {
+        if (!reader_state.huff_defined[HUFF_AC][id_ac]) {
             return JPEGGPU_INVALID_JPEG;
         }
         scan_component.ac_idx = id_ac;
+        h_huff_tables[scan_idx][HUFF_COUNT * id_ac + HUFF_AC] =
+            reader_state.htables[HUFF_AC][id_ac];
 
         const component& comp = jpeg_stream.components[component_idx];
 
@@ -390,35 +439,42 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             logger.log("\tquantization table at index %d not defined\n", comp.qtable_idx);
             return JPEGGPU_INVALID_JPEG;
         }
+    }
 
-        // Calculate size properties
-        scan_component.mcu_size = {
-            is_interleaved(scan) ? data_unit_vector_size * comp.ss.x : data_unit_vector_size,
-            is_interleaved(scan) ? data_unit_vector_size * comp.ss.y : data_unit_vector_size};
+    if (num_scan_components > 1) { // interleaved
+        scan.num_mcus.x = ceiling_div(
+            jpeg_stream.size.x,
+            static_cast<unsigned int>(jpeg_stream.ss_max.x * data_unit_vector_size));
+        scan.num_mcus.y = ceiling_div(
+            jpeg_stream.size.y,
+            static_cast<unsigned int>(jpeg_stream.ss_max.y * data_unit_vector_size));
 
-        assert(scan_component.mcu_size.x > 0 && scan_component.mcu_size.y > 0);
-        scan_component.data_size.x =
-            ceiling_div(comp.size.x, static_cast<unsigned int>(scan_component.mcu_size.x)) *
-            scan_component.mcu_size.x;
-        scan_component.data_size.y =
-            ceiling_div(comp.size.y, static_cast<unsigned int>(scan_component.mcu_size.y)) *
-            scan_component.mcu_size.y;
+    } else { // non-interleaved
+        const component& comp = jpeg_stream.components[scan.scan_components[0].component_idx];
+        scan.num_mcus.x       = ceiling_div(
+            jpeg_stream.size.x * comp.ss.x,
+            static_cast<unsigned int>(jpeg_stream.ss_max.x * data_unit_vector_size));
+        scan.num_mcus.y = ceiling_div(
+            jpeg_stream.size.y * comp.ss.y,
+            static_cast<unsigned int>(jpeg_stream.ss_max.y * data_unit_vector_size));
+    }
 
-        // A.2.4 Completion of partial MCU
-        assert(scan_component.data_size.x % data_unit_vector_size == 0);
-        assert(scan_component.data_size.y % data_unit_vector_size == 0);
+    scan.num_data_units_in_mcu = 0;
+    for (int sc = 0; sc < num_scan_components; ++sc) {
+        scan_component& scan_component = scan.scan_components[sc];
+        const component& comp          = jpeg_stream.components[scan_component.component_idx];
 
-        if (is_interleaved(scan)) {
-            assert(scan_component.data_size.x % (data_unit_vector_size * comp.ss.x) == 0);
-            assert(scan_component.data_size.y % (data_unit_vector_size * comp.ss.y) == 0);
+        scan_component.data_size.x = comp.num_blocks.x * data_unit_vector_size;
+        scan_component.data_size.y = comp.num_blocks.y * data_unit_vector_size;
+
+        if (num_scan_components > 1) {
+            scan_component.num_blocks_in_mcu = comp.ss;
+        } else {
+            scan_component.num_blocks_in_mcu = {1, 1};
         }
 
-        scan.num_mcus.x = ceiling_div(
-            scan_component.data_size.x, static_cast<unsigned int>(scan_component.mcu_size.x));
-        scan.num_mcus.y = ceiling_div(
-            scan_component.data_size.y, static_cast<unsigned int>(scan_component.mcu_size.y));
-
-        scan.num_data_units_in_mcu += comp.ss.x * comp.ss.y;
+        scan.num_data_units_in_mcu +=
+            scan_component.num_blocks_in_mcu.x * scan_component.num_blocks_in_mcu.y;
     }
 
     if (10 < scan.num_data_units_in_mcu) {
@@ -559,16 +615,9 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
         return JPEGGPU_INVALID_JPEG;
     }
 
-    const uint16_t rsti         = read_uint16();
-    const bool seen_rsti_before = jpeg_stream.restart_interval != 0;
-    if (seen_rsti_before && jpeg_stream.restart_interval != rsti) {
-        // TODO is this even a problem?
-        // do not support redefinining restart interval
-        logger.log("\tredefined restart interval\n");
-        return JPEGGPU_NOT_SUPPORTED;
-    }
-    jpeg_stream.restart_interval = rsti;
-    logger.log("\trestart_interval: %" PRIu16 "\n", jpeg_stream.restart_interval);
+    const uint16_t rsti           = read_uint16();
+    reader_state.restart_interval = rsti;
+    logger.log("\trestart_interval: %" PRIu16 "\n", reader_state.restart_interval);
 
     return JPEGGPU_SUCCESS;
 }
@@ -681,12 +730,12 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
         scan& scan               = jpeg_stream.scans[s];
         scan.num_scan_components = 0;
         for (int a = 0; a < max_comp_count; ++a) {
-            scan_component& scan_component = scan.scan_components[a];
-            scan_component.dc_idx          = 0;
-            scan_component.ac_idx          = 0;
-            scan_component.component_idx   = 0;
-            scan_component.mcu_size        = {0, 0};
-            scan_component.data_size       = {0, 0};
+            scan_component& scan_component   = scan.scan_components[a];
+            scan_component.dc_idx            = 0;
+            scan_component.ac_idx            = 0;
+            scan_component.component_idx     = 0;
+            scan_component.data_size         = {0, 0};
+            scan_component.num_blocks_in_mcu = {0, 0};
         }
         scan.begin                 = 0;
         scan.end                   = 0;
@@ -694,8 +743,8 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
         scan.num_subsequences      = 0;
         scan.num_segments          = 0;
         scan.num_mcus              = {0, 0};
-        scan.num_huff_tables       = 0;
         std::memset(scan.huff_tables, 0, sizeof(scan.huff_tables));
+        scan.restart_interval = 0;
     }
     jpeg_stream.size           = ivec2{0, 0};
     jpeg_stream.ss_max         = ivec2{0, 0};
@@ -704,9 +753,9 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
         jpeg_stream.components[c].id         = 0;
         jpeg_stream.components[c].qtable_idx = 0;
         jpeg_stream.components[c].size       = ivec2{0, 0};
+        jpeg_stream.components[c].num_blocks = ivec2{0, 0};
         jpeg_stream.components[c].ss         = ivec2{0, 0};
     }
-    jpeg_stream.restart_interval = 0;
 
     // clear and reset reader state
     reader_state.image       = image;
@@ -715,8 +764,13 @@ void jpeggpu::reader::reset(const uint8_t* image, const uint8_t* image_end)
     reader_state.found_sof   = false;
     for (int i = 0; i < max_comp_count; ++i) {
         reader_state.qtable_defined[i] = false;
-        reader_state.huff_defined[i]   = false;
     }
+    for (int i = 0; i < HUFF_COUNT; ++i) {
+        for (int j = 0; j < num_htable_slots; ++j) {
+            reader_state.huff_defined[i][j] = false;
+        }
+    }
+    reader_state.restart_interval = 0;
 
     // clear remaining state
     // clearing tables is not necessary but eases debugging if no previous data remains

@@ -77,7 +77,8 @@ constexpr int max_comp_count = JPEGGPU_MAX_COMP;
 /// \brief In baseline JPEG, each scan represents one or more complete components.
 ///   TODO does the spec allow redefining/overwriting components? we do not.
 constexpr int max_baseline_scan_count = max_comp_count;
-constexpr int huffman_alphabet_size  = 256;
+constexpr int huffman_alphabet_size   = 256;
+constexpr int num_htable_slots        = 4; // Table B.5
 
 /// huffman types
 enum huff { HUFF_DC = 0, HUFF_AC = 1, HUFF_COUNT = 2 };

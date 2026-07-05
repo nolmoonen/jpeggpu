@@ -73,9 +73,9 @@ struct scan_component {
     uint8_t ac_idx; /// Index of AC Huffman table, relative to those used by the scan.
     int component_idx; /// Index in the logical component array.
 
-    ivec2 mcu_size; /// Number of pixels in one MCU.
     /// \brief Image size in pixels that are present in the scan, so rounded up to the MCU.
     ivec2 data_size;
+    ivec2 num_blocks_in_mcu;
 };
 
 struct scan {
@@ -92,10 +92,12 @@ struct scan {
 
     ivec2 num_mcus;
 
-    /// \brief Number of Huffman tables used by all the components in this scan.
-    int num_huff_tables;
     /// \brief The global indices of the Huffman tables used in the scan.
     int huff_tables[max_baseline_huff_per_scan];
+
+    /// \brief Restart interval for differential DC encoding, in number of MCUs.
+    ///   Zero if no restart interval is defined.
+    int restart_interval;
 };
 
 inline bool is_interleaved(const scan& scan) { return scan.num_scan_components > 1; }
@@ -105,7 +107,12 @@ struct component {
     uint8_t id; /// Id as defined in the start of frame header.
     uint8_t qtable_idx; /// Index of quantization table.
     /// \brief Component size taking into account subsampling.
+    /// For the purpose of understanding how large the user-provided
+    /// allocation should be.
     ivec2 size;
+    /// \brief The maximum number of blocks needed, which can be higher than the minimum
+    ///   due to rounding up to MCU size.
+    ivec2 num_blocks;
     /// \brief Subsampling factor as defined in the start of frame header,
     ///   i.e. The number of data units in the MCU (if scan is interleaved).
     ivec2 ss;
@@ -124,10 +131,6 @@ struct jpeg_stream {
 
     int num_components; ///< Number of image components.
     component components[max_comp_count];
-
-    /// \brief Restart interval for differential DC encoding, in number of MCUs.
-    ///   Zero if no restart interval is defined.
-    int restart_interval;
 };
 
 struct reader {
@@ -169,8 +172,10 @@ struct reader {
         bool found_sof; /// Whether SOF has been found, may only appear once for baseline JPEGs.
         /// \brief Whether the quantization table for each index has been found for the next scan.
         bool qtable_defined[max_comp_count];
+        huffman_table htables[HUFF_COUNT][num_htable_slots];
         /// \brief For each Huffman table slot, whether it has been defined for the next scan.
-        bool huff_defined[max_comp_count * HUFF_COUNT];
+        bool huff_defined[HUFF_COUNT][num_htable_slots];
+        int restart_interval;
     } reader_state;
 
     size_t get_file_size() const { return reader_state.image_end - reader_state.image_begin; }
@@ -185,11 +190,6 @@ struct reader {
     /// \brief Segment info in pinned host memory. One entry per scan, multiple segment infos per scan.
     std::vector<segment, pinned_allocator<segment>> h_scan_segments[max_baseline_scan_count];
 };
-
-inline int get_size(int size, int ss, int ss_max)
-{
-    return ceiling_div(size * ss, static_cast<unsigned int>(ss_max));
-}
 
 }; // namespace jpeggpu
 
