@@ -43,34 +43,34 @@
 #include <string>
 #include <vector>
 
-#define CHECK_CUDA(call)                                                                           \
-    do {                                                                                           \
-        cudaError_t err = call;                                                                    \
-        if (err != cudaSuccess) {                                                                  \
-            std::cerr << "CUDA error \"" << cudaGetErrorString(err) << "\" at: " __FILE__ ":"      \
-                      << __LINE__ << "\n";                                                         \
-            std::exit(EXIT_FAILURE);                                                               \
-        }                                                                                          \
+#define CHECK_CUDA(call)                                                                      \
+    do {                                                                                      \
+        cudaError_t err = call;                                                               \
+        if (err != cudaSuccess) {                                                             \
+            std::cerr << "CUDA error \"" << cudaGetErrorString(err) << "\" at: " __FILE__ ":" \
+                      << __LINE__ << "\n";                                                    \
+            std::exit(EXIT_FAILURE);                                                          \
+        }                                                                                     \
     } while (0)
 
-#define CHECK_JPEGGPU(call)                                                                        \
-    do {                                                                                           \
-        jpeggpu_status stat = call;                                                                \
-        if (stat != JPEGGPU_SUCCESS) {                                                             \
-            std::cerr << "jpeggpu error \"" << jpeggpu_get_status_string(stat)                     \
-                      << "\" at: " __FILE__ ":" << __LINE__ << "\n";                               \
-            std::exit(EXIT_FAILURE);                                                               \
-        }                                                                                          \
+#define CHECK_JPEGGPU(call)                                                    \
+    do {                                                                       \
+        jpeggpu_status stat = call;                                            \
+        if (stat != JPEGGPU_SUCCESS) {                                         \
+            std::cerr << "jpeggpu error \"" << jpeggpu_get_status_string(stat) \
+                      << "\" at: " __FILE__ ":" << __LINE__ << "\n";           \
+            std::exit(EXIT_FAILURE);                                           \
+        }                                                                      \
     } while (0)
 
-#define CHECK_NVJPEG(call)                                                                         \
-    do {                                                                                           \
-        nvjpegStatus_t stat = call;                                                                \
-        if (stat != NVJPEG_STATUS_SUCCESS) {                                                       \
-            std::cerr << "nvJPEG error \"" << static_cast<int>(stat) << "\" at: " __FILE__ ":"     \
-                      << __LINE__ << "\n";                                                         \
-            std::exit(EXIT_FAILURE);                                                               \
-        }                                                                                          \
+#define CHECK_NVJPEG(call)                                                                     \
+    do {                                                                                       \
+        nvjpegStatus_t stat = call;                                                            \
+        if (stat != NVJPEG_STATUS_SUCCESS) {                                                   \
+            std::cerr << "nvJPEG error \"" << static_cast<int>(stat) << "\" at: " __FILE__ ":" \
+                      << __LINE__ << "\n";                                                     \
+            std::exit(EXIT_FAILURE);                                                           \
+        }                                                                                      \
     } while (0)
 
 constexpr int max_num_comp = 4;
@@ -173,7 +173,7 @@ void decode_jpeggpu(
     jpeggpu_decoder_t decoder;
     CHECK_JPEGGPU(jpeggpu_decoder_startup(&decoder));
 
-    CHECK_JPEGGPU(jpeggpu_set_logging(decoder, true));
+    CHECK_JPEGGPU(jpeggpu_set_logging(decoder, false));
 
     jpeggpu_img_info img_info;
     CHECK_JPEGGPU(jpeggpu_decoder_parse_header(
@@ -216,157 +216,165 @@ void decode_jpeggpu(
 int main(int argc, const char* argv[])
 {
     if (argc < 2) {
-        std::cerr << "usage: jpeggpu_test <jpeg file> (optional: --write_out)\n";
+        std::cerr << "usage: jpeggpu_test <jpeg file_0> <jpeg_file_1>\n";
         return EXIT_FAILURE;
     }
 
-    const std::filesystem::path filepath(argv[1]);
-    const bool write_out = argc >= 3;
+    const bool write_out = false;
+    for (int i = 1; i < argc; ++i) {
+        std::filesystem::path file_path(argv[i]);
+        std::cout << file_path.filename().string() << "\n";
 
-    std::ifstream file(filepath);
-    file.seekg(0, std::ios_base::end);
-    const std::streampos file_size = file.tellg();
-    file.seekg(0);
-    uint8_t* file_data = nullptr;
-    CHECK_CUDA(cudaMallocHost(&file_data, file_size));
-    file.read(reinterpret_cast<char*>(file_data), file_size);
-    file.close();
-
-    int sizes_x_nvjpeg[max_num_comp] = {};
-    int sizes_y_nvjpeg[max_num_comp] = {};
-    int num_comp_nvjpeg{};
-    jpeggpu_subsampling subsampling_nvjpeg = {};
-    uint8_t* img_nvjpeg[max_num_comp]      = {};
-    decode_nvjpeg(
-        file_data,
-        file_size,
-        sizes_x_nvjpeg,
-        sizes_y_nvjpeg,
-        num_comp_nvjpeg,
-        subsampling_nvjpeg,
-        img_nvjpeg);
-
-    int sizes_x_jpeggpu[max_num_comp] = {};
-    int sizes_y_jpeggpu[max_num_comp] = {};
-    int num_comp_jpeggpu{};
-    jpeggpu_subsampling subsampling_jpeggpu = {};
-    uint8_t* img_jpeggpu[max_num_comp]      = {};
-    decode_jpeggpu(
-        file_data,
-        file_size,
-        sizes_x_jpeggpu,
-        sizes_y_jpeggpu,
-        num_comp_jpeggpu,
-        subsampling_jpeggpu,
-        img_jpeggpu);
-
-    if (num_comp_nvjpeg != num_comp_jpeggpu) {
-        std::cout << "component mismatch: " << num_comp_nvjpeg << " (nvJPEG) to "
-                  << num_comp_jpeggpu << " (jpeggpu)\n";
-        return EXIT_FAILURE;
-    }
-
-    for (int c = 0; c < num_comp_jpeggpu; ++c) {
-        if (sizes_x_nvjpeg[c] != sizes_x_jpeggpu[c]) {
-            std::cout << "component " << c << " width mismatch: " << sizes_x_nvjpeg[c]
-                      << " (nvJPEG) to " << sizes_x_jpeggpu[c] << " (jpeggpu)\n";
+        std::ifstream file(file_path);
+        if (!file.is_open()) {
+            std::cerr << "cannot open \"" << file_path << "\"\n";
             return EXIT_FAILURE;
         }
-        if (sizes_y_nvjpeg[c] != sizes_y_jpeggpu[c]) {
-            std::cout << "component " << c << " height mismatch: " << sizes_y_nvjpeg[c]
-                      << " (nvJPEG) to " << sizes_y_jpeggpu[c] << " (jpeggpu)\n";
-            return EXIT_FAILURE;
-        }
-    }
+        file.seekg(0, std::ios_base::end);
+        const std::streampos file_size = file.tellg();
+        file.seekg(0);
+        uint8_t* file_data = nullptr;
+        CHECK_CUDA(cudaMallocHost(&file_data, file_size));
+        file.read(reinterpret_cast<char*>(file_data), file_size);
+        file.close();
 
-    for (int c = 0; c < num_comp_jpeggpu; ++c) {
-        if (subsampling_nvjpeg.x[c] != subsampling_jpeggpu.x[c]) {
-            std::cout << "component " << c << " css x mismatch: " << subsampling_nvjpeg.x[c]
-                      << " (nvJPEG) to " << subsampling_jpeggpu.x[c] << " (jpeggpu)\n";
-            return EXIT_FAILURE;
-        }
-        if (subsampling_nvjpeg.y[c] != subsampling_jpeggpu.y[c]) {
-            std::cout << "component " << c << " css y mismatch: " << subsampling_nvjpeg.y[c]
-                      << " (nvJPEG) to " << subsampling_jpeggpu.y[c] << " (jpeggpu)\n";
-            return EXIT_FAILURE;
-        }
-    }
-
-    // TODO comparison can be done in kernel
-
-    // TODO MSE is a flawed comparison since differences in the individual components do
-    //   do not represent the same difference in the perceived color
-    for (int c = 0; c < num_comp_jpeggpu; ++c) {
-        size_t squared_error{};
-        for (int y = 0; y < sizes_y_jpeggpu[c]; ++y) {
-            for (int x = 0; x < sizes_x_jpeggpu[c]; ++x) {
-                const size_t idx = y * sizes_x_jpeggpu[c] + x;
-                const int16_t diff =
-                    int16_t{img_nvjpeg[c][idx]} - int16_t{img_jpeggpu[c][idx]}; // [-255, 255]
-                const uint16_t prod = diff * diff; // [0, 65025]
-                squared_error += prod;
-            }
-        }
-        const double mse =
-            static_cast<double>(squared_error) / (sizes_x_jpeggpu[c] * sizes_y_jpeggpu[c]);
-        std::cout << "component " << c << " MSE: " << mse << " ";
-    }
-    std::cout << "\n";
-
-    if (write_out) {
-        std::filesystem::path filepath_nvjpeg = filepath;
-        filepath_nvjpeg.replace_extension(std::string(filepath.extension()) + ".nvjpeg.png");
-        std::filesystem::path filepath_jpeggpu = filepath;
-        filepath_jpeggpu.replace_extension(std::string(filepath.extension()) + ".jpeggpu.png");
-
-        std::cout << "writing out to " << filepath_nvjpeg << " and " << filepath_jpeggpu << "\n";
-
-        uint8_t* img_interleaved =
-            static_cast<uint8_t*>(malloc(sizes_x_jpeggpu[0] * sizes_y_jpeggpu[0] * 3));
-
-        conv_to_rgbi(
+        int sizes_x_nvjpeg[max_num_comp] = {};
+        int sizes_y_nvjpeg[max_num_comp] = {};
+        int num_comp_nvjpeg{};
+        jpeggpu_subsampling subsampling_nvjpeg = {};
+        uint8_t* img_nvjpeg[max_num_comp]      = {};
+        decode_nvjpeg(
+            file_data,
+            file_size,
             sizes_x_nvjpeg,
             sizes_y_nvjpeg,
             num_comp_nvjpeg,
             subsampling_nvjpeg,
-            img_nvjpeg[0],
-            img_nvjpeg[1],
-            img_nvjpeg[2],
-            img_interleaved);
+            img_nvjpeg);
 
-        stbi_write_png(
-            filepath_nvjpeg.c_str(),
-            sizes_x_nvjpeg[0],
-            sizes_y_nvjpeg[0],
-            3,
-            img_interleaved,
-            sizes_x_nvjpeg[0] * 3);
-
-        conv_to_rgbi(
+        int sizes_x_jpeggpu[max_num_comp] = {};
+        int sizes_y_jpeggpu[max_num_comp] = {};
+        int num_comp_jpeggpu{};
+        jpeggpu_subsampling subsampling_jpeggpu = {};
+        uint8_t* img_jpeggpu[max_num_comp]      = {};
+        decode_jpeggpu(
+            file_data,
+            file_size,
             sizes_x_jpeggpu,
             sizes_y_jpeggpu,
             num_comp_jpeggpu,
             subsampling_jpeggpu,
-            img_jpeggpu[0],
-            img_jpeggpu[1],
-            img_jpeggpu[2],
-            img_interleaved);
+            img_jpeggpu);
 
-        stbi_write_png(
-            filepath_jpeggpu.c_str(),
-            sizes_x_jpeggpu[0],
-            sizes_y_jpeggpu[0],
-            3,
-            img_interleaved,
-            sizes_x_jpeggpu[0] * 3);
+        if (num_comp_nvjpeg != num_comp_jpeggpu) {
+            std::cout << "component mismatch: " << num_comp_nvjpeg << " (nvJPEG) to "
+                      << num_comp_jpeggpu << " (jpeggpu)\n";
+            return EXIT_FAILURE;
+        }
 
-        free(img_interleaved);
+        for (int c = 0; c < num_comp_jpeggpu; ++c) {
+            if (sizes_x_nvjpeg[c] != sizes_x_jpeggpu[c]) {
+                std::cout << "component " << c << " width mismatch: " << sizes_x_nvjpeg[c]
+                          << " (nvJPEG) to " << sizes_x_jpeggpu[c] << " (jpeggpu)\n";
+                return EXIT_FAILURE;
+            }
+            if (sizes_y_nvjpeg[c] != sizes_y_jpeggpu[c]) {
+                std::cout << "component " << c << " height mismatch: " << sizes_y_nvjpeg[c]
+                          << " (nvJPEG) to " << sizes_y_jpeggpu[c] << " (jpeggpu)\n";
+                return EXIT_FAILURE;
+            }
+        }
+
+        for (int c = 0; c < num_comp_jpeggpu; ++c) {
+            if (subsampling_nvjpeg.x[c] != subsampling_jpeggpu.x[c]) {
+                std::cout << "component " << c << " css x mismatch: " << subsampling_nvjpeg.x[c]
+                          << " (nvJPEG) to " << subsampling_jpeggpu.x[c] << " (jpeggpu)\n";
+                return EXIT_FAILURE;
+            }
+            if (subsampling_nvjpeg.y[c] != subsampling_jpeggpu.y[c]) {
+                std::cout << "component " << c << " css y mismatch: " << subsampling_nvjpeg.y[c]
+                          << " (nvJPEG) to " << subsampling_jpeggpu.y[c] << " (jpeggpu)\n";
+                return EXIT_FAILURE;
+            }
+        }
+
+        // TODO comparison can be done in kernel
+
+        // TODO MSE is a flawed comparison since differences in the individual components do
+        //   do not represent the same difference in the perceived color
+        for (int c = 0; c < num_comp_jpeggpu; ++c) {
+            size_t squared_error{};
+            for (int y = 0; y < sizes_y_jpeggpu[c]; ++y) {
+                for (int x = 0; x < sizes_x_jpeggpu[c]; ++x) {
+                    const size_t idx = y * sizes_x_jpeggpu[c] + x;
+                    const int16_t diff =
+                        int16_t{img_nvjpeg[c][idx]} - int16_t{img_jpeggpu[c][idx]}; // [-255, 255]
+                    const uint16_t prod = diff * diff; // [0, 65025]
+                    squared_error += prod;
+                }
+            }
+            const double mse =
+                static_cast<double>(squared_error) / (sizes_x_jpeggpu[c] * sizes_y_jpeggpu[c]);
+            std::cout << "component " << c << " MSE: " << mse << " ";
+        }
+        std::cout << "\n";
+
+        if (write_out) {
+            std::filesystem::path filepath_nvjpeg = file_path;
+            filepath_nvjpeg.replace_extension(std::string(file_path.extension()) + ".nvjpeg.png");
+            std::filesystem::path filepath_jpeggpu = file_path;
+            filepath_jpeggpu.replace_extension(std::string(file_path.extension()) + ".jpeggpu.png");
+
+            std::cout << "writing out to " << filepath_nvjpeg << " and " << filepath_jpeggpu
+                      << "\n";
+
+            uint8_t* img_interleaved =
+                static_cast<uint8_t*>(malloc(sizes_x_jpeggpu[0] * sizes_y_jpeggpu[0] * 3));
+
+            conv_to_rgbi(
+                sizes_x_nvjpeg,
+                sizes_y_nvjpeg,
+                num_comp_nvjpeg,
+                subsampling_nvjpeg,
+                img_nvjpeg[0],
+                img_nvjpeg[1],
+                img_nvjpeg[2],
+                img_interleaved);
+
+            stbi_write_png(
+                filepath_nvjpeg.c_str(),
+                sizes_x_nvjpeg[0],
+                sizes_y_nvjpeg[0],
+                3,
+                img_interleaved,
+                sizes_x_nvjpeg[0] * 3);
+
+            conv_to_rgbi(
+                sizes_x_jpeggpu,
+                sizes_y_jpeggpu,
+                num_comp_jpeggpu,
+                subsampling_jpeggpu,
+                img_jpeggpu[0],
+                img_jpeggpu[1],
+                img_jpeggpu[2],
+                img_interleaved);
+
+            stbi_write_png(
+                filepath_jpeggpu.c_str(),
+                sizes_x_jpeggpu[0],
+                sizes_y_jpeggpu[0],
+                3,
+                img_interleaved,
+                sizes_x_jpeggpu[0] * 3);
+
+            free(img_interleaved);
+        }
+
+        for (int c = 0; c < num_comp_jpeggpu; ++c) {
+            free(img_jpeggpu[c]);
+            free(img_nvjpeg[c]);
+        }
+
+        CHECK_CUDA(cudaFreeHost(file_data));
     }
-
-    for (int c = 0; c < num_comp_jpeggpu; ++c) {
-        free(img_jpeggpu[c]);
-        free(img_nvjpeg[c]);
-    }
-
-    CHECK_CUDA(cudaFreeHost(file_data));
 }
