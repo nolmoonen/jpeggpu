@@ -313,9 +313,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
             int bits  = br.read_bits(s);
             int coeff = huff_extend(bits, s);
 
-            // FIXME qtable in which order?
-            // coeffs[order_natural[k]] = coeff * qtable->data[k];
-            coeffs[order_natural[k]] = coeff * qtable->data[order_natural[k]];
+            coeffs[order_natural[k]] = coeff * qtable->data[k];
         } else if (r == 15) {
             k += 15;
             // TODO is multiple 15 zero allowed instead of EOB?

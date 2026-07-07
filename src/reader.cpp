@@ -589,8 +589,8 @@ void compute_huffman_table(jpeggpu::huffman_table& table, const uint8_t (&num_co
             // store only if the component has not been seen in a scan to prevent
             //   overwriting tables needed later, and to use only a constant amount of memory
             if (!comp_seen_in_scan) {
-                // store in natural order
-                h_qtables[id].data[order_natural[j]] = element;
+                // store in zig-zag order
+                h_qtables[id].data[j] = element;
             }
         }
         remaining -= 64;
