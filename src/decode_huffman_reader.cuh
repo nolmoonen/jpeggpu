@@ -113,39 +113,6 @@ __device__ void discard_bits(reader_state_thread_cache<block_size>& rstate, int 
     rstate.cache_idx += bit_count;
 }
 
-/// \brief Constructs the reader state from the start of a subsequence (fills the cache).
-///
-/// \param[in] scan
-/// \param[in] segment_info Segment info for this subsequence.
-/// \param[in] rstate_memory Pointer to shared memory cache.
-/// \param[in] subseq_idx_rel Subsequence index relative to segment.
-template <int block_size>
-__device__ reader_state_thread_cache<block_size> rstate_from_subseq_start(
-    const uint8_t* scan,
-    const segment& segment_info,
-    typename reader_state_thread_cache<block_size>::smem_type& rstate_memory,
-    int subseq_idx_rel)
-{
-    reader_state_thread_cache<block_size> rstate;
-    rstate.data = scan + (segment_info.subseq_offset + subseq_idx_rel) * subsequence_size_bytes;
-    rstate.data_end =
-        scan + (segment_info.subseq_offset + segment_info.subseq_count) * subsequence_size_bytes;
-    rstate.cache     = &(rstate_memory[2 * threadIdx.x]);
-    rstate.cache_idx = 0;
-
-    // assert aligned load is valid
-    assert((rstate.data - scan) % sizeof(uint4) == 0);
-    // there should be at least one sector
-    assert(sizeof(uint4) <= rstate.data_end - rstate.data);
-    global_load_uint4(rstate, &(rstate.cache[0]));
-
-    if (sizeof(uint4) <= rstate.data_end - rstate.data) {
-        global_load_uint4(rstate, &(rstate.cache[1]));
-    }
-
-    return rstate;
-}
-
 /// \brief Constructs the reader state from overflow, which need not be
 ///   the start of a subsequence (fills the cache).
 ///
@@ -154,7 +121,7 @@ __device__ reader_state_thread_cache<block_size> rstate_from_subseq_start(
 /// \param[in] rstate_memory Pointer to shared memory cache.
 /// \param[in] p Bit offset in segment.
 template <int block_size>
-__device__ reader_state_thread_cache<block_size> rstate_from_subseq_overflow(
+__device__ reader_state_thread_cache<block_size> make_rstate(
     const uint8_t* scan,
     const segment& segment_info,
     typename reader_state_thread_cache<block_size>::smem_type& rstate_memory,
@@ -163,7 +130,7 @@ __device__ reader_state_thread_cache<block_size> rstate_from_subseq_overflow(
     reader_state_thread_cache<block_size> rstate;
     // loaded in chunks of 128, each chunk has 16 bytes
     const int byte_offset = (p / 128) * (sizeof(uint4));
-    rstate.data = scan + segment_info.subseq_offset * subsequence_size_bytes + byte_offset;
+    rstate.data           = scan + byte_offset;
     rstate.data_end =
         scan + (segment_info.subseq_offset + segment_info.subseq_count) * subsequence_size_bytes;
     rstate.cache     = &(rstate_memory[2 * threadIdx.x]);
@@ -236,36 +203,16 @@ __device__ void discard_bits(reader_state_all_subsequences<block_size>& rstate, 
 }
 
 template <int block_size>
-__device__ reader_state_all_subsequences<block_size> rstate_from_subseq_start(
+__device__ reader_state_all_subsequences<block_size> make_rstate(
     const segment& segment_info,
     typename reader_state_all_subsequences<block_size>::smem_type& rstate_memory,
-    int subseq_idx_rel)
-{
-    constexpr int word_count_block = block_size * chunk_size;
-    const int block_word_off       = blockIdx.x * word_count_block;
-    const int thread_word_off      = (segment_info.subseq_offset + subseq_idx_rel) * chunk_size;
-    assert(block_word_off <= thread_word_off);
-
-    reader_state_all_subsequences<block_size> rstate;
-    rstate.next_word     = thread_word_off - block_word_off;
-    rstate.bits_in_cache = 0;
-    rstate.cache         = 0;
-    rstate.smem          = rstate_memory;
-
-    return rstate;
-}
-
-template <int block_size>
-__device__ reader_state_all_subsequences<block_size> rstate_from_subseq_overflow(
-    const segment& segment_info,
-    typename reader_state_all_subsequences<block_size>::smem_type& rstate_memory,
-    int subseq_idx_rel,
+    int subseq_idx,
     int p,
     uint32_t cache)
 {
     constexpr int word_count_block = block_size * chunk_size;
     const int block_word_off       = blockIdx.x * word_count_block;
-    const int thread_word_off      = (segment_info.subseq_offset + subseq_idx_rel) * chunk_size;
+    const int thread_word_off      = subseq_idx * chunk_size;
     assert(block_word_off <= thread_word_off);
 
     reader_state_all_subsequences<block_size> rstate;

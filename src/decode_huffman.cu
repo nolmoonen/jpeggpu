@@ -64,7 +64,7 @@ using namespace jpeggpu;
 namespace {
 
 /// \brief Contains all required information about the last synchronization point for the
-///   subsequence. All information is relative to the segment.
+///   subsequence.
 struct subsequence_info {
     /// \brief Bit position in scan after decoding subsequence.
     ///   If `p` is a multiple of the subsequence size in bits, it will be inside the subsequence
@@ -72,7 +72,7 @@ struct subsequence_info {
     ///   encoded symbol is at most 32 bits).
     ///   TODO size_t?
     int p;
-    /// \brief The number of decoded symbols.
+    /// \brief The number of decoded symbols relative to the segment.
     int n;
     /// \brief The data unit index in the MCU. Combined with the sampling factors, the color component
     ///   can be inferred. The paper calls this field "the current color component",
@@ -246,7 +246,7 @@ __device__ void decode_next_symbol(
 /// \tparam is_overflow Whether decoding (and decoder state) is continued from a previous subsequence.
 /// \tparam do_write Whether to write the coefficients to the output buffer.
 ///
-/// \param[in] subseq_idx_rel Subsequence index relative to segment.
+/// \param[in] subseq_idx Subsequence index.
 /// \param[out] dcs Is `nullptr` when `do_write` is false.
 /// \param[out] block_bit_offsets Is `nullptr` when `do_write` is false.
 /// \param[in] cstate
@@ -258,7 +258,7 @@ __device__ void decode_next_symbol(
 ///   will be written. Only relevant if `do_write` is true.
 template <bool do_write, typename reader_state>
 __device__ subsequence_info decode_subsequence(
-    int subseq_idx_rel,
+    int subseq_idx,
     int16_t* dcs,
     int* block_bit_offsets,
     const const_state& cstate,
@@ -268,11 +268,11 @@ __device__ subsequence_info decode_subsequence(
     subsequence_info info,
     int position_in_output = 0)
 {
-    const int end_subseq = (subseq_idx_rel + 1) * subsequence_size; // first bit in next subsequence
+    const int end_subseq = (subseq_idx + 1) * subsequence_size; // first bit in next subsequence
     while (true) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
         //   (so info.p cannot reliably be used to determine if the loop should break)
-        //   this problem is excerbated by restart intevals, where padding occurs more frequently
+        //   this problem is exacerbated by restart intervals, where padding occurs more frequently
         if (do_write && position_in_output >= (segment_idx + 1) * cstate.num_mcus_in_segment *
                                                   cstate.num_data_units_in_mcu * data_unit_size) {
             break;
@@ -409,22 +409,19 @@ __global__ void sync_intra_sequence(
         assert(subseq_idx_begin < segment_subseq_end);
         end = min(end, segment_subseq_end);
 
-        const int subeq_idx_begin_rel = subseq_idx_begin - seg_info.subseq_offset;
-
-        rstate = rstate_from_subseq_start<block_size>(
-            cstate.scan, seg_info, rstate_memory, subeq_idx_begin_rel);
-
         subsequence_info info;
         // start of i-th subsequence
-        info.p = subeq_idx_begin_rel * subsequence_size;
+        info.p = subseq_idx_begin * subsequence_size;
         info.n = 0;
         info.c = 0;
         info.z = 0;
 
+        rstate = make_rstate<block_size>(cstate.scan, seg_info, rstate_memory, info.p);
+
         // paper text does not mention `n` should be stored here, but if not storing `n`
         //   the first subsequence info's `n` will not be initialized. for simplicity, store all
         s_info_shared[threadIdx.x] = decode_subsequence<false>(
-            subeq_idx_begin_rel, nullptr, nullptr, cstate, segment_idx, rstate, tables, info);
+            subseq_idx_begin, nullptr, nullptr, cstate, segment_idx, rstate, tables, info);
     }
     __syncthreads();
 
@@ -442,8 +439,6 @@ __global__ void sync_intra_sequence(
         subsequence_info info;
         if (subseq_idx < end && !is_synced) {
             assert(seg_info.subseq_offset <= subseq_idx);
-            const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
-
             assert(block_off <= subseq_idx - 1 && subseq_idx - 1 - block_off < block_size);
             subsequence_info old_info;
             old_info.p = s_info_shared[subseq_idx - 1 - block_off].p;
@@ -454,7 +449,7 @@ __global__ void sync_intra_sequence(
             old_info.z = s_info_shared[subseq_idx - 1 - block_off].z;
 
             info = decode_subsequence<false>(
-                subseq_idx_rel, nullptr, nullptr, cstate, segment_idx, rstate, tables, old_info);
+                subseq_idx, nullptr, nullptr, cstate, segment_idx, rstate, tables, old_info);
             assert(block_off <= subseq_idx && subseq_idx - block_off < block_size);
             const subsequence_info& stored_info = s_info_shared[subseq_idx - block_off];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
@@ -532,7 +527,7 @@ __global__ void sync_subsequences(
         assert(subseq_idx_from < subseq_last_idx_segment);
         end = min(end, subseq_last_idx_segment);
 
-        rstate = rstate_from_subseq_overflow<block_size>(
+        rstate = make_rstate<block_size>(
             cstate.scan, seg_info, rstate_memory, s_info[subseq_idx_from].p);
     }
 
@@ -547,7 +542,6 @@ __global__ void sync_subsequences(
         subsequence_info info;
         if (subseq_idx < end && !is_synced) {
             assert(seg_info.subseq_offset <= subseq_idx);
-            const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
 
             subsequence_info old_info;
             old_info.p = s_info[subseq_idx - 1].p;
@@ -558,7 +552,7 @@ __global__ void sync_subsequences(
             old_info.z = s_info[subseq_idx - 1].z;
 
             info = decode_subsequence<false>(
-                subseq_idx_rel, nullptr, nullptr, cstate, segment_idx, rstate, tables, old_info);
+                subseq_idx, nullptr, nullptr, cstate, segment_idx, rstate, tables, old_info);
             const subsequence_info& stored_info = s_info[subseq_idx];
             if (info.p == stored_info.p && info.c == stored_info.c && info.z == stored_info.z) {
                 // synchronization is achieved: the decoding process of this thread has found
@@ -609,7 +603,6 @@ __global__ void decode_write(
     const int segment_idx  = cstate.segment_indices[subseq_idx];
     const segment seg_info = cstate.segments[segment_idx];
     assert(seg_info.subseq_offset <= subseq_idx);
-    const int subseq_idx_rel = subseq_idx - seg_info.subseq_offset;
 
     // offset in pixels
     const int segment_offset =
@@ -619,18 +612,19 @@ __global__ void decode_write(
 
     // only first thread does not do overflow
     constexpr bool do_write = true;
-    if (subseq_idx_rel == 0) {
-        reader_state rstate =
-            rstate_from_subseq_start<block_size>(seg_info, rstate_memory, subseq_idx_rel);
-
+    if (subseq_idx == seg_info.subseq_offset) {
         subsequence_info info;
-        info.p = 0;
+        info.p = subseq_idx * subsequence_size;
         // n is not used in writing
-        info.c = 0;
-        info.z = 0;
+        info.c     = 0;
+        info.z     = 0;
+        info.cache = 0;
+
+        reader_state rstate =
+            make_rstate<block_size>(seg_info, rstate_memory, subseq_idx, info.p, info.cache);
 
         decode_subsequence<do_write>(
-            subseq_idx_rel,
+            subseq_idx,
             dcs,
             block_bit_offsets,
             cstate,
@@ -642,11 +636,11 @@ __global__ void decode_write(
     } else {
         subsequence_info info = s_info[subseq_idx - 1];
 
-        reader_state rstate = rstate_from_subseq_overflow<block_size>(
-            seg_info, rstate_memory, subseq_idx_rel, info.p, info.cache);
+        reader_state rstate =
+            make_rstate<block_size>(seg_info, rstate_memory, subseq_idx, info.p, info.cache);
 
         decode_subsequence<do_write>(
-            subseq_idx_rel,
+            subseq_idx,
             dcs,
             block_bit_offsets,
             cstate,
