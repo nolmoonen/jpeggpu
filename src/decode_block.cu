@@ -90,22 +90,25 @@ __device__ int huff_extend(int x, int s)
     }
 }
 
-__device__ uint8_t* get_block_ptr_comp(
+__device__ void get_block_ptr_comp(
+    int& x,
+    int& y,
     uint8_t* pixels,
     int pitch,
     int num_blocks_in_mcu_x,
     int num_blocks_in_mcu_y,
     int mcu_x,
     int mcu_y,
-    int i_in_mcu,
-    int num_blocks_x)
+    int i_in_mcu)
 {
     const int y_in_mcu = i_in_mcu / num_blocks_in_mcu_x;
     const int x_in_mcu = i_in_mcu % num_blocks_in_mcu_x;
 
     const int block_y = mcu_y * num_blocks_in_mcu_y + y_in_mcu;
     const int block_x = mcu_x * num_blocks_in_mcu_x + x_in_mcu;
-    return pixels + block_y * data_unit_vector_size * pitch + block_x * data_unit_vector_size;
+
+    y = block_y * data_unit_vector_size;
+    x = block_x * data_unit_vector_size;
 }
 
 // High-Efficiency and Low-Power Architectures for 2-D DCT and IDCT Based on CORDIC Rotation, Sung et al. 2006
@@ -152,10 +155,10 @@ __device__ void idct_vector(float vals[8])
 __device__ float clampf(float x, float min, float max) { return fmaxf(min, fminf(x, max)); }
 
 __launch_bounds__(thread_block_size) __global__ void decode_sequential(
-    int num_blocks_x_0,
-    int num_blocks_x_1,
-    int num_blocks_x_2,
-    int num_blocks_x_3,
+    ivec2 size_0,
+    ivec2 size_1,
+    ivec2 size_2,
+    ivec2 size_3,
     uint8_t* pixels_0,
     uint8_t* pixels_1,
     uint8_t* pixels_2,
@@ -211,7 +214,10 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     int ac_idx     = 0;
     qtable* qtable = nullptr;
     int pitch      = 0;
-    uint8_t* block = nullptr;
+    int x          = 0;
+    int y          = 0;
+    ivec2 size{0, 0};
+    uint8_t* pixels = nullptr;
 
     const int i_in_mcu        = block_i % num_blocks_in_mcu;
     int num_blocks_in_mcu_sum = 0;
@@ -221,61 +227,78 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         ac_idx     = ac_0;
         qtable     = qtable_0;
         pitch      = pitch_0;
-        block      = get_block_ptr_comp(
+        get_block_ptr_comp(
+            x,
+            y,
             pixels_0,
             pitch_0,
             num_blocks_in_mcu_x_0,
             num_blocks_in_mcu_y_0,
             mcu_x,
             mcu_y,
-            i_in_mcu_i,
-            num_blocks_x_0);
+            i_in_mcu_i);
+        size   = size_0;
+        pixels = pixels_0;
     } else if (i_in_mcu < (num_blocks_in_mcu_sum += num_blocks_in_mcu_1)) {
         i_in_mcu_i = i_in_mcu - num_blocks_in_mcu_sum + num_blocks_in_mcu_1;
         dc_idx     = dc_1;
         ac_idx     = ac_1;
         qtable     = qtable_1;
         pitch      = pitch_1;
-        block      = get_block_ptr_comp(
+        get_block_ptr_comp(
+            x,
+            y,
             pixels_1,
             pitch_1,
             num_blocks_in_mcu_x_1,
             num_blocks_in_mcu_y_1,
             mcu_x,
             mcu_y,
-            i_in_mcu_i,
-            num_blocks_x_1);
+            i_in_mcu_i);
+        size   = size_1;
+        pixels = pixels_1;
     } else if (i_in_mcu < (num_blocks_in_mcu_sum += num_blocks_in_mcu_2)) {
         i_in_mcu_i = i_in_mcu - num_blocks_in_mcu_sum + num_blocks_in_mcu_2;
         dc_idx     = dc_2;
         ac_idx     = ac_2;
         qtable     = qtable_2;
         pitch      = pitch_2;
-        block      = get_block_ptr_comp(
+        get_block_ptr_comp(
+            x,
+            y,
             pixels_2,
             pitch_2,
             num_blocks_in_mcu_x_2,
             num_blocks_in_mcu_y_2,
             mcu_x,
             mcu_y,
-            i_in_mcu_i,
-            num_blocks_x_2);
+            i_in_mcu_i);
+        size   = size_2;
+        pixels = pixels_2;
     } else { // i_in_mcu < (num_blocks_in_mcu_sum += num_blocks_in_mcu_3)
         i_in_mcu_i = i_in_mcu - num_blocks_in_mcu_sum + num_blocks_in_mcu_3;
         dc_idx     = dc_3;
         ac_idx     = ac_3;
         qtable     = qtable_3;
         pitch      = pitch_3;
-        block      = get_block_ptr_comp(
+        get_block_ptr_comp(
+            x,
+            y,
             pixels_3,
             pitch_3,
             num_blocks_in_mcu_x_3,
             num_blocks_in_mcu_y_3,
             mcu_x,
             mcu_y,
-            i_in_mcu_i,
-            num_blocks_x_3);
+            i_in_mcu_i);
+        size   = size_3;
+        pixels = pixels_3;
     }
+
+    uint8_t* block = pixels + y * pitch + x;
+
+    // Can occur due to dummy blocks to complete MCU.
+    if (x >= size.x || y >= size.y) return;
 
     const huffman_table& huff_dc = huffman_tables[dc_idx];
     const huffman_table& huff_ac = huffman_tables[ac_idx];
@@ -345,6 +368,8 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     }
 
     for (int r = 0; r < data_unit_vector_size; ++r) {
+        if (y + r >= size.y) continue;
+
         for (int c = 0; c < data_unit_vector_size; ++c) {
             const uint8_t val =
                 clampf(128.f + std::roundf(coeffs[r * data_unit_vector_size + c]), 0.f, 255.f);
@@ -405,10 +430,10 @@ jpeggpu_status jpeggpu::decode_block(
         const int num_thread_blocks =
             ceiling_div(num_scan_blocks, static_cast<unsigned int>(thread_block_size));
         decode_sequential<<<num_thread_blocks, thread_block_size, 0, stream>>>(
-            num_comps > 0 ? comps[comp_idx_0].num_blocks.x : 0,
-            num_comps > 1 ? comps[comp_idx_1].num_blocks.x : 0,
-            num_comps > 2 ? comps[comp_idx_2].num_blocks.x : 0,
-            num_comps > 3 ? comps[comp_idx_3].num_blocks.x : 0,
+            num_comps > 0 ? comps[comp_idx_0].size : ivec2{0, 0},
+            num_comps > 1 ? comps[comp_idx_1].size : ivec2{0, 0},
+            num_comps > 2 ? comps[comp_idx_2].size : ivec2{0, 0},
+            num_comps > 3 ? comps[comp_idx_3].size : ivec2{0, 0},
             num_scan_comp > 0 ? d_image[comp_idx_0] : nullptr,
             num_scan_comp > 1 ? d_image[comp_idx_1] : nullptr,
             num_scan_comp > 2 ? d_image[comp_idx_2] : nullptr,
