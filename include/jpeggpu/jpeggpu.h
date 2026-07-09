@@ -91,6 +91,7 @@ enum jpeggpu_status jpeggpu_decoder_transfer(
 ///   Every component is a separate plane, possibly subsampled.
 struct jpeggpu_img {
     uint8_t* image[JPEGGPU_MAX_COMP];
+    // Should be a multiple of eight.
     int pitch[JPEGGPU_MAX_COMP];
 };
 

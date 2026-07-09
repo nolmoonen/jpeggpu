@@ -104,7 +104,7 @@ void decode_nvjpeg(
     int (&sizes_y)[max_num_comp],
     int& num_comp,
     jpeggpu_subsampling& subsampling,
-    uint8_t* h_img[max_num_comp])
+    uint8_t* h_image[max_num_comp])
 {
     cudaStream_t stream = 0;
 
@@ -148,8 +148,8 @@ void decode_nvjpeg(
 
     for (int c = 0; c < num_comp; ++c) {
         const size_t comp_size = sizes_x[c] * sizes_y[c];
-        h_img[c]               = static_cast<uint8_t*>(malloc(comp_size));
-        CHECK_CUDA(cudaMemcpy(h_img[c], d_img.channel[c], comp_size, cudaMemcpyDeviceToHost));
+        h_image[c]             = static_cast<uint8_t*>(malloc(comp_size));
+        CHECK_CUDA(cudaMemcpy(h_image[c], d_img.channel[c], comp_size, cudaMemcpyDeviceToHost));
         CHECK_CUDA(cudaFree(d_img.channel[c]));
     }
 }
@@ -161,7 +161,7 @@ void decode_jpeggpu(
     int (&sizes_y)[max_num_comp],
     int& num_comp,
     jpeggpu_subsampling& subsampling,
-    uint8_t* h_img[max_num_comp])
+    uint8_t* h_image[max_num_comp])
 {
     cudaStream_t stream = 0;
 
@@ -188,8 +188,10 @@ void decode_jpeggpu(
 
     jpeggpu_img d_img;
     for (int c = 0; c < num_comp; ++c) {
-        CHECK_CUDA(cudaMalloc(&(d_img.image[c]), sizes_x[c] * sizes_y[c]));
-        d_img.pitch[c] = sizes_x[c];
+        // Round up to a multiple of eight.
+        const int pitch = (sizes_x[c] + 8 - 1) / 8 * 8;
+        CHECK_CUDA(cudaMalloc(&(d_img.image[c]), sizes_y[c] * pitch));
+        d_img.pitch[c] = pitch;
     }
 
     CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &d_img, d_tmp, tmp_size, stream));
@@ -202,8 +204,15 @@ void decode_jpeggpu(
 
     for (int c = 0; c < num_comp; ++c) {
         const size_t comp_size = sizes_x[c] * sizes_y[c];
-        h_img[c]               = static_cast<uint8_t*>(malloc(comp_size));
-        CHECK_CUDA(cudaMemcpy(h_img[c], d_img.image[c], comp_size, cudaMemcpyDeviceToHost));
+        h_image[c]             = static_cast<uint8_t*>(malloc(comp_size));
+        CHECK_CUDA(cudaMemcpy2D(
+            h_image[c],
+            img_info.sizes_x[c], // dpitch
+            d_img.image[c],
+            d_img.pitch[c], // spitch
+            img_info.sizes_x[c],
+            img_info.sizes_y[c],
+            cudaMemcpyDeviceToHost));
         CHECK_CUDA(cudaFree(d_img.image[c]));
     }
 }

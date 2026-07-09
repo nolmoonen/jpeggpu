@@ -33,38 +33,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define CHECK(cond)                                                                                \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            fprintf(stderr, "failed: " #cond " at: " __FILE__ ":%d\n", __LINE__);                  \
-            exit(EXIT_FAILURE);                                                                    \
-        }                                                                                          \
+#define CHECK(cond)                                                               \
+    do {                                                                          \
+        if (!(cond)) {                                                            \
+            fprintf(stderr, "failed: " #cond " at: " __FILE__ ":%d\n", __LINE__); \
+            exit(EXIT_FAILURE);                                                   \
+        }                                                                         \
     } while (0)
 
-#define CHECK_JPEGGPU(call)                                                                        \
-    do {                                                                                           \
-        enum jpeggpu_status stat = call;                                                           \
-        if (stat != JPEGGPU_SUCCESS) {                                                             \
-            fprintf(                                                                               \
-                stderr,                                                                            \
-                "jpeggpu error \"%s\" at: " __FILE__ ":%d\n",                                      \
-                jpeggpu_get_status_string(stat),                                                   \
-                __LINE__);                                                                         \
-            exit(EXIT_FAILURE);                                                                    \
-        }                                                                                          \
+#define CHECK_JPEGGPU(call)                                   \
+    do {                                                      \
+        enum jpeggpu_status stat = call;                      \
+        if (stat != JPEGGPU_SUCCESS) {                        \
+            fprintf(                                          \
+                stderr,                                       \
+                "jpeggpu error \"%s\" at: " __FILE__ ":%d\n", \
+                jpeggpu_get_status_string(stat),              \
+                __LINE__);                                    \
+            exit(EXIT_FAILURE);                               \
+        }                                                     \
     } while (0)
 
-#define CHECK_CUDA(call)                                                                           \
-    do {                                                                                           \
-        cudaError_t err = call;                                                                    \
-        if (err != cudaSuccess) {                                                                  \
-            fprintf(                                                                               \
-                stderr,                                                                            \
-                "CUDA error \"%s\" at: " __FILE__ ":%d\n",                                         \
-                cudaGetErrorString(err),                                                           \
-                __LINE__);                                                                         \
-            exit(EXIT_FAILURE);                                                                    \
-        }                                                                                          \
+#define CHECK_CUDA(call)                                   \
+    do {                                                   \
+        cudaError_t err = call;                            \
+        if (err != cudaSuccess) {                          \
+            fprintf(                                       \
+                stderr,                                    \
+                "CUDA error \"%s\" at: " __FILE__ ":%d\n", \
+                cudaGetErrorString(err),                   \
+                __LINE__);                                 \
+            exit(EXIT_FAILURE);                            \
+        }                                                  \
     } while (0)
 
 int main(int argc, char* argv[])
@@ -108,14 +108,14 @@ int main(int argc, char* argv[])
 
     CHECK_JPEGGPU(jpeggpu_decoder_transfer(decoder, d_tmp, tmp_size, stream));
 
-    struct jpeggpu_img h_img;
+    uint8_t* h_image[JPEGGPU_MAX_COMP];
     struct jpeggpu_img d_img;
     for (int c = 0; c < img_info.num_components; ++c) {
-        const size_t comp_size = img_info.sizes_x[c] * img_info.sizes_y[c];
-        h_img.image[c]         = malloc(comp_size);
-        CHECK_CUDA(cudaMalloc((void**)&(d_img.image[c]), comp_size));
-        h_img.pitch[c] = img_info.sizes_x[c];
-        d_img.pitch[c] = img_info.sizes_x[c];
+        // Round up to a multiple of eight.
+        const int pitch = (img_info.sizes_x[c] + 8 - 1) / 8 * 8;
+        h_image[c]      = malloc(img_info.sizes_y[c] * img_info.sizes_x[c]);
+        CHECK_CUDA(cudaMalloc((void**)&(d_img.image[c]), img_info.sizes_y[c] * pitch));
+        d_img.pitch[c] = pitch;
     }
 
     CHECK_JPEGGPU(jpeggpu_decoder_decode(decoder, &d_img, d_tmp, tmp_size, stream));
@@ -127,10 +127,13 @@ int main(int argc, char* argv[])
     CHECK_CUDA(cudaFree(d_tmp));
 
     for (int c = 0; c < img_info.num_components; ++c) {
-        CHECK_CUDA(cudaMemcpy(
-            h_img.image[c],
+        CHECK_CUDA(cudaMemcpy2D(
+            h_image[c],
+            img_info.sizes_x[c], // dpitch
             d_img.image[c],
-            img_info.sizes_x[c] * img_info.sizes_y[c],
+            d_img.pitch[c], // spitch
+            img_info.sizes_x[c],
+            img_info.sizes_y[c],
             cudaMemcpyDeviceToHost));
     }
 
@@ -141,9 +144,9 @@ int main(int argc, char* argv[])
             img_info.sizes_y,
             img_info.num_components,
             img_info.subsampling,
-            h_img.image[0],
-            h_img.image[1],
-            h_img.image[2],
+            h_image[0],
+            h_image[1],
+            h_image[2],
             h_img_interleaved) != EXIT_SUCCESS) {
         printf("simple conversion code cannot handle image\n");
         goto cleanup;
@@ -165,7 +168,7 @@ cleanup:
 
     for (int c = 0; c < img_info.num_components; ++c) {
         CHECK_CUDA(cudaFree(d_img.image[c]));
-        free(h_img.image[c]);
+        free(h_image[c]);
     }
 
     CHECK_JPEGGPU(jpeggpu_decoder_cleanup(decoder));

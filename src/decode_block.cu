@@ -91,7 +91,7 @@ __device__ int huff_extend(int x, int s)
 }
 
 __device__ uint8_t* get_block_ptr_comp(
-    uint8_t* coeffs,
+    uint8_t* pixels,
     int pitch,
     int num_blocks_in_mcu_x,
     int num_blocks_in_mcu_y,
@@ -105,7 +105,7 @@ __device__ uint8_t* get_block_ptr_comp(
 
     const int block_y = mcu_y * num_blocks_in_mcu_y + y_in_mcu;
     const int block_x = mcu_x * num_blocks_in_mcu_x + x_in_mcu;
-    return coeffs + block_y * data_unit_vector_size * pitch + block_x * data_unit_vector_size;
+    return pixels + block_y * data_unit_vector_size * pitch + block_x * data_unit_vector_size;
 }
 
 // High-Efficiency and Low-Power Architectures for 2-D DCT and IDCT Based on CORDIC Rotation, Sung et al. 2006
@@ -395,7 +395,7 @@ jpeggpu_status jpeggpu::decode_block(
             const scan_component& scan_comp = scan.scan_components[sc];
             if (pitch[scan_comp.component_idx] % 8 != 0) {
                 // TODO relax constraint?
-                logger.log("pitch not multiple of eight");
+                logger.log("pitch not multiple of eight\n");
                 return JPEGGPU_INVALID_ARGUMENT;
             }
         }
