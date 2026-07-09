@@ -101,7 +101,3 @@ Compared to nvJPEG, JPEGGPU does not support progressive JPEGs but has no restri
 1. [Accelerating JPEG Decompression on GPUs](https://arxiv.org/abs/2111.09219)
 2. [T.81 - DIGITAL COMPRESSION AND CODING OF CONTINUOUS-TONE STILL IMAGES - REQUIREMENTS AND GUIDELINES (JPEG specification)](https://www.w3.org/Graphics/JPEG/itu-t81.pdf)
 3. [Progressive JPEGs in the Wild: Implications for Information Hiding and Forensics](https://informationsecurity.uibk.ac.at/pdfs/HB2023_IHMMSEC.pdf)
-
-## TODO
-- Colors are off.
-- Restarts don't seem to work (only first MCU row does).

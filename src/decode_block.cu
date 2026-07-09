@@ -448,10 +448,10 @@ jpeggpu_status jpeggpu::decode_block(
             HUFF_COUNT * scan.scan_components[3].ac_idx + HUFF_AC,
             d_dcs,
             d_block_bit_offsets,
-            num_scan_comp > 0 ? d_qtable[comp_idx_0] : nullptr,
-            num_scan_comp > 1 ? d_qtable[comp_idx_1] : nullptr,
-            num_scan_comp > 2 ? d_qtable[comp_idx_2] : nullptr,
-            num_scan_comp > 3 ? d_qtable[comp_idx_3] : nullptr);
+            num_scan_comp > 0 ? d_qtable[comps[comp_idx_0].qtable_idx] : nullptr,
+            num_scan_comp > 1 ? d_qtable[comps[comp_idx_1].qtable_idx] : nullptr,
+            num_scan_comp > 2 ? d_qtable[comps[comp_idx_2].qtable_idx] : nullptr,
+            num_scan_comp > 3 ? d_qtable[comps[comp_idx_3].qtable_idx] : nullptr);
         JPEGGPU_CHECK_CUDA(cudaGetLastError());
     }
 

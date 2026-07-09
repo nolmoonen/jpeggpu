@@ -20,7 +20,6 @@
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
-#include "idct.hpp"
 #include "marker.hpp"
 #include "reader.hpp"
 
