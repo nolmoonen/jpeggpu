@@ -19,6 +19,8 @@
 #include "util.cuh"
 
 #include <cub/device/device_scan.cuh>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 
 #include <cuda_runtime.h>
 
@@ -29,7 +31,7 @@ using namespace jpeggpu;
 
 namespace {
 
-__device__ bool is_byte_data(bool prev_is_stuffing, uint8_t byte, uint8_t& byte_write)
+__device__ __host__ bool is_byte_data(bool prev_is_stuffing, uint8_t byte, uint8_t& byte_write)
 {
     // register 0xff00 as 0xff at the position of the 0x00, do not register at the position of 0xff
     // ignore 0xff?? at the positions of both 0xff and 0x??
@@ -38,34 +40,37 @@ __device__ bool is_byte_data(bool prev_is_stuffing, uint8_t byte, uint8_t& byte_
     return is_data;
 }
 
-/// \brief Handle one byte each. Probably suboptimal, but simple.
-///   For each byte, set [0,1] in `offset_data` whether it represents encoded scan data.
-///   And [0,1] in `offset_segment` whether it is a restart marker.
-///
-/// \param[in] scan_stuffed
-/// \param[out] offset_data For each stuffed byte: one if it is encoded scan data, else zero.
-/// \param[out] offset_segment For each stuffed byte: one if it is a restart marker, else zero.
-__global__ void destuff_map_data_and_segment(
-    const uint8_t* __restrict__ scan_stuffed,
-    int scan_size,
-    int* __restrict__ offset_data,
-    int* __restrict__ offset_segment)
-{
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= scan_size) {
-        return;
+struct is_data_functor {
+    is_data_functor(const uint8_t* d_scan) : scan(d_scan) {}
+
+    // For each stuffed byte: one if it is encoded scan data, else zero.
+    __device__ __host__ int operator()(int i)
+    {
+        const bool prev_is_stuffing = i == 0 ? false : scan[i - 1] == 0xff;
+        const uint8_t byte          = scan[i];
+        uint8_t byte_write; // unused
+        const bool is_data = is_byte_data(prev_is_stuffing, byte, byte_write);
+        return is_data;
     }
 
-    const bool prev_is_stuffing = tid == 0 ? false : scan_stuffed[tid - 1] == 0xff;
-    const uint8_t byte          = scan_stuffed[tid];
-    uint8_t byte_write; // unused
-    const bool is_data = is_byte_data(prev_is_stuffing, byte, byte_write);
-    offset_data[tid]   = is_data;
-    const bool is_restart_marker =
-        prev_is_stuffing && jpeggpu::MARKER_RST0 <= byte && byte <= jpeggpu::MARKER_RST7;
-    offset_segment[tid] = is_restart_marker;
-    assert(!(is_data && is_restart_marker));
-}
+    const uint8_t* scan;
+};
+
+struct is_rst_functor {
+    is_rst_functor(const uint8_t* d_scan) : scan(d_scan) {}
+
+    // For each stuffed byte: one if it is a restart marker, else zero.
+    __device__ __host__ int operator()(int i)
+    {
+        const bool prev_is_stuffing = i == 0 ? false : scan[i - 1] == 0xff;
+        const uint8_t byte          = scan[i];
+        const bool is_restart_marker =
+            prev_is_stuffing && jpeggpu::MARKER_RST0 <= byte && byte <= jpeggpu::MARKER_RST7;
+        return is_restart_marker;
+    }
+
+    const uint8_t* scan;
+};
 
 __global__ void destuff_write_and_map_subsequence(
     const uint8_t* __restrict__ scan_stuffed,
@@ -202,12 +207,8 @@ jpeggpu_status jpeggpu::destuff_scan(
     JPEGGPU_CHECK_STAT(
         allocator.reserve<do_it>(&d_offset_segment, stuffed_scan_size * sizeof(int)));
 
-    if (do_it) {
-        // write `d_offset_data` and `d_offset_segment`
-        destuff_map_data_and_segment<<<num_blocks_destuff, block_size_destuff, 0, stream>>>(
-            d_scan, stuffed_scan_size, d_offset_data, d_offset_segment);
-        JPEGGPU_CHECK_CUDA(cudaGetLastError());
-    }
+    auto counting_iter = thrust::make_counting_iterator(int{0});
+    auto is_rst_iter   = thrust::make_transform_iterator(counting_iter, is_rst_functor(d_scan));
 
     { // scan `d_offset_segment`
         void* d_tmp_storage     = nullptr;
@@ -215,8 +216,8 @@ jpeggpu_status jpeggpu::destuff_scan(
         JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
             d_tmp_storage,
             tmp_storage_size,
-            d_offset_segment,
-            d_offset_segment,
+            is_rst_iter, // d_in
+            d_offset_segment, // d_out
             stuffed_scan_size,
             stream));
         JPEGGPU_CHECK_STAT(allocator.reserve<do_it>(&d_tmp_storage, tmp_storage_size));
@@ -224,8 +225,8 @@ jpeggpu_status jpeggpu::destuff_scan(
             JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSum(
                 d_tmp_storage,
                 tmp_storage_size,
-                d_offset_segment,
-                d_offset_segment,
+                is_rst_iter, // d_in
+                d_offset_segment, // d_out
                 stuffed_scan_size,
                 stream));
         }
@@ -247,15 +248,17 @@ jpeggpu_status jpeggpu::destuff_scan(
         }
     }
 
+    auto is_data_iter = thrust::make_transform_iterator(counting_iter, is_data_functor(d_scan));
+
     { // scan `d_offset_data` by segment index
         void* d_tmp_storage     = nullptr;
         size_t tmp_storage_size = 0;
         JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSumByKey(
             d_tmp_storage,
             tmp_storage_size,
-            d_offset_segment,
-            d_offset_data,
-            d_offset_data,
+            d_offset_segment, // d_keys_in
+            is_data_iter, // d_values_in
+            d_offset_data, // d_values_out
             stuffed_scan_size,
             dev_eq{},
             stream));
@@ -264,9 +267,9 @@ jpeggpu_status jpeggpu::destuff_scan(
             JPEGGPU_CHECK_CUDA(cub::DeviceScan::ExclusiveSumByKey(
                 d_tmp_storage,
                 tmp_storage_size,
-                d_offset_segment,
-                d_offset_data,
-                d_offset_data,
+                d_offset_segment, // d_keys_in
+                is_data_iter, // d_values_in
+                d_offset_data, // d_values_out
                 stuffed_scan_size,
                 dev_eq{},
                 stream));

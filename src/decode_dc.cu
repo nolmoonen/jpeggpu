@@ -91,6 +91,9 @@ jpeggpu_status jpeggpu::decode_dc(
 {
     int off_in_mcu = 0; // number of data units, only used for interleaved
 
+    // TODO could decode all components in a single scan using int[4] though
+    // this function already takes only about 50 us for a big image.
+
     for (int sc = 0; sc < scan.num_scan_components; ++sc) {
         const scan_component& scan_comp = scan.scan_components[sc];
         const int data_units_in_mcu_component =
