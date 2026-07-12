@@ -553,9 +553,10 @@ __global__ void decode_write(
     __shared__ huffman_tables tables;
     load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
-    using reader_state = reader_state_all_subsequences<block_size>;
+    // `reader_state_all_subsequences` works better for images with few MiB/Pixel, such as
+    // 006mp-cathedral.jpg. `reader_state_thread_cache` works better for all other images.
+    using reader_state = reader_state_thread_cache<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;
-    load_all_subsequences<block_size>(cstate.scan, num_subsequences, rstate_memory);
 
     __syncthreads();
 
@@ -584,8 +585,7 @@ __global__ void decode_write(
         info.z     = 0;
         info.cache = 0;
 
-        reader_state rstate =
-            make_rstate<block_size>(seg_info, rstate_memory, subseq_idx, info.p, info.cache);
+        reader_state rstate = make_rstate<block_size>(cstate.scan, seg_info, rstate_memory, info.p);
 
         decode_subsequence<do_write>(
             subseq_idx,
@@ -600,8 +600,7 @@ __global__ void decode_write(
     } else {
         subsequence_info info = s_info[subseq_idx - 1];
 
-        reader_state rstate =
-            make_rstate<block_size>(seg_info, rstate_memory, subseq_idx, info.p, info.cache);
+        reader_state rstate = make_rstate<block_size>(cstate.scan, seg_info, rstate_memory, info.p);
 
         decode_subsequence<do_write>(
             subseq_idx,
