@@ -32,11 +32,11 @@
 // - Have some "halo" for each intra-sequence thread block of threads that only
 //   decode subsequences for the purpose of synchronization.
 
+#include "decode_bit_reader.cuh"
 #include "decode_block.hpp"
 #include "decode_dc.hpp"
 #include "decode_destuff.hpp"
-#include "decode_huffman.hpp"
-#include "decode_huffman_reader.cuh"
+#include "decode_sync.hpp"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
@@ -641,7 +641,7 @@ __global__ void assign_sinfo_n(
 } // namespace
 
 template <bool do_it>
-jpeggpu_status jpeggpu::decode_scan(
+jpeggpu_status jpeggpu::decode_sync(
     const jpeg_stream& info,
     const uint8_t* d_scan_destuffed,
     const segment* d_segments,
@@ -814,7 +814,7 @@ jpeggpu_status jpeggpu::decode_scan(
     return JPEGGPU_SUCCESS;
 }
 
-template jpeggpu_status jpeggpu::decode_scan<false>(
+template jpeggpu_status jpeggpu::decode_sync<false>(
     const jpeg_stream&,
     const uint8_t*,
     const segment*,
@@ -827,7 +827,7 @@ template jpeggpu_status jpeggpu::decode_scan<false>(
     cudaStream_t,
     logger&);
 
-template jpeggpu_status jpeggpu::decode_scan<true>(
+template jpeggpu_status jpeggpu::decode_sync<true>(
     const jpeg_stream&,
     const uint8_t*,
     const segment*,

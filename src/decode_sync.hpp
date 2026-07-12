@@ -42,7 +42,7 @@ namespace jpeggpu {
 /// \param[inout] stream
 /// \param[inout] logger
 template <bool do_it>
-jpeggpu_status decode_scan(
+jpeggpu_status decode_sync(
     const jpeg_stream& info,
     const uint8_t* d_scan_destuffed,
     const segment* d_segments,

@@ -17,6 +17,7 @@
 #define JPEGGPU_DECODE_HUFFMAN_READER_CUH_
 
 #include "decoder_defs.hpp"
+#include "reader.hpp"
 
 #include <cuda_runtime.h>
 

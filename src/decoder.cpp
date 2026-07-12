@@ -1,4 +1,4 @@
-// Copyright (c) 2023-2024 Nol Moonen
+// Copyright (c) 2023-2026 Nol Moonen
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,7 +16,7 @@
 #include "decoder.hpp"
 #include "decode_block.hpp"
 #include "decode_dc.hpp"
-#include "decode_huffman.hpp"
+#include "decode_sync.hpp"
 #include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
@@ -272,7 +272,7 @@ jpeggpu_status jpeggpu::decoder::decode_impl([[maybe_unused]] jpeggpu_img* img, 
             logger));
 
         // TODO maybe "sync_scan"
-        JPEGGPU_CHECK_STAT(decode_scan<do_it>(
+        JPEGGPU_CHECK_STAT(decode_sync<do_it>(
             info,
             d_scan_destuffed,
             d_segments[s],
