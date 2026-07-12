@@ -121,38 +121,11 @@ struct const_state {
 // TODO not sufficient, C-style array is also trivially copyable not not supported as kernel argument
 static_assert(std::is_trivially_copyable_v<const_state>);
 
-/// \brief Typedef for the maximum amount of Huffman tables for a scan.
-using huffman_tables = huffman_table[max_baseline_huff_per_scan];
-
-/// \brief Load Huffman tables from global memory into shared.
-template <int block_size>
-__device__ void load_huffman_tables(const const_state& cstate, huffman_tables& tables_shared)
-{
-    // assert that loading a word at a time is valid
-    static_assert(sizeof(huffman_table) % 4 == 0 && sizeof(huffman_table::entry) % 4 == 0);
-    constexpr int num_words = sizeof(huffman_tables) / 4;
-    constexpr int num_words_per_thread =
-        ceiling_div(num_words, static_cast<unsigned int>(block_size));
-    for (int i = 0; i < num_words_per_thread; ++i) {
-        const int idx = block_size * i + threadIdx.x;
-        if (idx < num_words) {
-            reinterpret_cast<uint32_t*>(&tables_shared)[idx] =
-                reinterpret_cast<const uint32_t*>(cstate.huffman_tables)[idx];
-        }
-    }
-}
-
 /// \brief Discards the oldest (most significant) `num_bits` from `data`.
 __device__ uint32_t u32_discard_bits(uint32_t data, int num_bits)
 {
     assert(num_bits <= 32);
     return data << num_bits;
-}
-
-__device__ int get_value(int num_bits, int code)
-{
-    // TODO leftshift negative value is UB
-    return code < ((1 << num_bits) >> 1) ? (code + ((-1) << num_bits) + 1) : code;
 }
 
 template <bool do_write>
@@ -177,7 +150,7 @@ __device__ void decode_next_symbol_dc(
     if (do_write) {
         assert(0 < category && category <= 16);
         const int offset = u32_select_bits(data, category);
-        const int value  = get_value(category, offset);
+        const int value  = huff_extend(offset, category);
         symbol           = value;
     }
     run_length = 0;
@@ -185,7 +158,7 @@ __device__ void decode_next_symbol_dc(
 
 template <bool do_write>
 __device__ void decode_next_symbol_ac(
-    int& length, int& symbol, int& run_length, uint32_t data, const huffman_table& table, int z)
+    int& length, int& run_length, uint32_t data, const huffman_table& table, int z)
 {
     int category_length = 0;
     const uint8_t s     = get_category(data, category_length, table);
@@ -196,21 +169,12 @@ __device__ void decode_next_symbol_ac(
     if (category == 0) {
         // coeff is zero
         length = category_length;
-        symbol = 0;
         if (run == 15) run_length = 15; // ZRL
         else run_length = 63 - z; // EOB
         return;
     }
 
-    data = u32_discard_bits(data, category_length);
-
-    length = category_length + category;
-    if (do_write) {
-        assert(0 < category && category <= 16);
-        const int offset = u32_select_bits(data, category);
-        const int value  = get_value(category, offset);
-        symbol           = value;
-    }
+    length     = category_length + category;
     run_length = run;
 };
 
@@ -236,7 +200,7 @@ __device__ void decode_next_symbol(
     if (z == 0) {
         decode_next_symbol_dc<do_write>(length, symbol, run_length, data, table_dc);
     } else {
-        decode_next_symbol_ac<do_write>(length, symbol, run_length, data, table_ac, z);
+        decode_next_symbol_ac<do_write>(length, run_length, data, table_ac, z);
     }
     assert(length > 0);
 }
@@ -300,7 +264,7 @@ __device__ subsequence_info decode_subsequence(
         uint32_t data = load_32_bits(rstate);
 
         int length     = 0;
-        int symbol     = 0;
+        int symbol     = 0; // only if DC
         int run_length = 0;
         // always returns length > 0 if there are bits in `rstate` to ensure progress
         decode_next_symbol<do_write>(length, symbol, run_length, data, table_dc, table_ac, info.z);
@@ -318,7 +282,7 @@ __device__ subsequence_info decode_subsequence(
             assert(position_in_output % data_unit_size == 0);
             const int data_unit_idx          = position_in_output / data_unit_size;
             block_bit_offsets[data_unit_idx] = info.p;
-            if (symbol != 0) {
+            if (symbol != 0) { // only write non-zero
                 dcs[data_unit_idx] = symbol;
             }
         }
@@ -377,7 +341,7 @@ __global__ void sync_intra_sequence(
     __shared__ subsequence_info s_info_shared[block_size];
 
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate, tables);
+    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
     __syncthreads();
 
     // Don't load all subsequences of the block into memory at the beginning as it
@@ -491,7 +455,7 @@ __global__ void sync_subsequences(
     subsequence_info* __restrict__ s_info, int num_subsequences, const_state cstate)
 {
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate, tables);
+    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
     __syncthreads();
 
     using reader_state = reader_state_thread_cache<block_size>;
@@ -587,7 +551,7 @@ __global__ void decode_write(
     const_state cstate)
 {
     __shared__ huffman_tables tables;
-    load_huffman_tables<block_size>(cstate, tables);
+    load_huffman_tables<block_size>(cstate.huffman_tables, tables);
 
     using reader_state = reader_state_all_subsequences<block_size>;
     __shared__ typename reader_state::smem_type rstate_memory;

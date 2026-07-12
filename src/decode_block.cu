@@ -37,27 +37,24 @@ struct bit_reader {
         read_bits(bit_off);
     }
 
-    // TODO note: no need to provide zero
-    // Read bytes until a marker is hit, at which point only zero is provided.
-    __device__ uint8_t get_next_u8() { return *(data++); }
-
     __device__ void fill_bit_window()
     {
-        if (num_bits_in_buffer <= 32) {
-            while (num_bits_in_buffer <= 56) {
-                const uint8_t byte = get_next_u8();
+        while (num_bits_in_buffer <= 32) {
+            buffer <<= 8;
+            buffer |= *(data++);
 
-                buffer <<= 8;
-                buffer |= byte;
-
-                num_bits_in_buffer += 8;
-            }
+            num_bits_in_buffer += 8;
         }
+    }
+
+    __device__ void skip_bits(int num_bits)
+    {
+        assert(num_bits_in_buffer >= num_bits);
+        num_bits_in_buffer -= num_bits;
     }
 
     __device__ int read_bits(int num_bits)
     {
-        fill_bit_window();
         assert(num_bits_in_buffer >= num_bits);
         const uint64_t val =
             (buffer >> (num_bits_in_buffer - num_bits)) & ((uint64_t{1} << num_bits) - 1);
@@ -77,24 +74,10 @@ struct bit_reader {
     int num_bits_in_buffer;
 };
 
-__device__ int huff_extend(int x, int s)
-{
-    // Table F.1 and Table F.2
-    assert(s >= 1);
-    int half = 1 << (s - 1);
-    if (x >= half) {
-        assert(x < (1 << s));
-        return x;
-    } else {
-        return x - (1 << s) + 1;
-    }
-}
-
 __device__ void get_block_ptr_comp(
     int& x,
     int& y,
     uint8_t* pixels,
-    int pitch,
     int num_blocks_in_mcu_x,
     int num_blocks_in_mcu_y,
     int mcu_x,
@@ -112,7 +95,7 @@ __device__ void get_block_ptr_comp(
 }
 
 // High-Efficiency and Low-Power Architectures for 2-D DCT and IDCT Based on CORDIC Rotation, Sung et al. 2006
-__device__ void idct_vector(float vals[8])
+__device__ void idct_vector(float vals[data_unit_vector_size])
 {
     constexpr float sung_a = 1.3870398453221475; // print(f'{math.sqrt(2)*math.cos(1*math.pi/16)}')
     constexpr float sung_b = 1.3065629648763766; // print(f'{math.sqrt(2)*math.cos(2*math.pi/16)}')
@@ -152,7 +135,7 @@ __device__ void idct_vector(float vals[8])
     vals[6] = sung_t * (yk - yl);
 }
 
-__device__ float clampf(float x, float min, float max) { return fmaxf(min, fminf(x, max)); }
+__device__ int clamp(int x, int x_min, int x_max) { return max(x_min, min(x, x_max)); }
 
 __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     ivec2 size_0,
@@ -183,7 +166,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     int num_mcus_x,
     int num_blocks,
     const uint8_t* data,
-    const huffman_table* huffman_tables,
+    const huffman_table* huffman_tables_global,
     int dc_0, /// DC Huffman table index for scan component 0.
     int ac_0, /// AC Huffman table index for scan component 0.
     int dc_1, /// DC Huffman table index for scan component 1.
@@ -199,6 +182,11 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     qtable* qtable_2,
     qtable* qtable_3)
 {
+    // Load Huffman tables into shared memory. Must be done before predicating-off threads.
+    __shared__ huffman_tables tables;
+    load_huffman_tables<thread_block_size>(huffman_tables_global, tables);
+    __syncthreads();
+
     const int block_i = blockIdx.x * blockDim.x + threadIdx.x;
     if (block_i >= num_blocks) {
         return;
@@ -228,15 +216,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         qtable     = qtable_0;
         pitch      = pitch_0;
         get_block_ptr_comp(
-            x,
-            y,
-            pixels_0,
-            pitch_0,
-            num_blocks_in_mcu_x_0,
-            num_blocks_in_mcu_y_0,
-            mcu_x,
-            mcu_y,
-            i_in_mcu_i);
+            x, y, pixels_0, num_blocks_in_mcu_x_0, num_blocks_in_mcu_y_0, mcu_x, mcu_y, i_in_mcu_i);
         size   = size_0;
         pixels = pixels_0;
     } else if (i_in_mcu < (num_blocks_in_mcu_sum += num_blocks_in_mcu_1)) {
@@ -246,15 +226,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         qtable     = qtable_1;
         pitch      = pitch_1;
         get_block_ptr_comp(
-            x,
-            y,
-            pixels_1,
-            pitch_1,
-            num_blocks_in_mcu_x_1,
-            num_blocks_in_mcu_y_1,
-            mcu_x,
-            mcu_y,
-            i_in_mcu_i);
+            x, y, pixels_1, num_blocks_in_mcu_x_1, num_blocks_in_mcu_y_1, mcu_x, mcu_y, i_in_mcu_i);
         size   = size_1;
         pixels = pixels_1;
     } else if (i_in_mcu < (num_blocks_in_mcu_sum += num_blocks_in_mcu_2)) {
@@ -264,15 +236,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         qtable     = qtable_2;
         pitch      = pitch_2;
         get_block_ptr_comp(
-            x,
-            y,
-            pixels_2,
-            pitch_2,
-            num_blocks_in_mcu_x_2,
-            num_blocks_in_mcu_y_2,
-            mcu_x,
-            mcu_y,
-            i_in_mcu_i);
+            x, y, pixels_2, num_blocks_in_mcu_x_2, num_blocks_in_mcu_y_2, mcu_x, mcu_y, i_in_mcu_i);
         size   = size_2;
         pixels = pixels_2;
     } else { // i_in_mcu < (num_blocks_in_mcu_sum += num_blocks_in_mcu_3)
@@ -282,15 +246,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         qtable     = qtable_3;
         pitch      = pitch_3;
         get_block_ptr_comp(
-            x,
-            y,
-            pixels_3,
-            pitch_3,
-            num_blocks_in_mcu_x_3,
-            num_blocks_in_mcu_y_3,
-            mcu_x,
-            mcu_y,
-            i_in_mcu_i);
+            x, y, pixels_3, num_blocks_in_mcu_x_3, num_blocks_in_mcu_y_3, mcu_x, mcu_y, i_in_mcu_i);
         size   = size_3;
         pixels = pixels_3;
     }
@@ -300,8 +256,8 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     // Can occur due to dummy blocks to complete MCU.
     if (x >= size.x || y >= size.y) return;
 
-    const huffman_table& huff_dc = huffman_tables[dc_idx];
-    const huffman_table& huff_ac = huffman_tables[ac_idx];
+    const huffman_table& huff_dc = tables[dc_idx];
+    const huffman_table& huff_ac = tables[ac_idx];
 
     float coeffs[data_unit_size] = {0};
 
@@ -310,20 +266,20 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
 
     bit_reader br(data + begin_byte, begin_bit % 8);
 
-    br.fill_bit_window();
+    br.fill_bit_window(); // get at least 32 bits
     uint32_t u32 = br.peek_bits(32);
 
     // skip dc, already read
     int category_length = 0;
     int s               = get_category(u32, category_length, huff_dc);
-    br.read_bits(category_length);
+    br.skip_bits(category_length);
     if (s > 0) {
-        br.read_bits(s);
+        br.skip_bits(s);
     }
     coeffs[0] = dcs[block_i] * qtable->data[0];
 
     for (int k = 1; k <= 63; k++) {
-        br.fill_bit_window();
+        br.fill_bit_window(); // get at least 32 bits
         u32 = br.peek_bits(32);
 
         int sr = get_category(u32, category_length, huff_ac);
@@ -339,12 +295,12 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
             coeffs[order_natural[k]] = coeff * qtable->data[k];
         } else if (r == 15) {
             k += 15;
-            // TODO is multiple 15 zero allowed instead of EOB?
         } else {
             break;
         }
     }
 
+#pragma unroll
     for (int r = 0; r < data_unit_vector_size; ++r) {
         idct_vector(coeffs + r * data_unit_vector_size);
     }
@@ -356,6 +312,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         }
     }
 
+#pragma unroll
     for (int r = 0; r < data_unit_vector_size; ++r) {
         idct_vector(coeffs + r * data_unit_vector_size);
     }
@@ -370,12 +327,16 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     for (int r = 0; r < data_unit_vector_size; ++r) {
         if (y + r >= size.y) continue;
 
-        for (int c = 0; c < data_unit_vector_size; ++c) {
-            const uint8_t val =
-                clampf(128.f + std::roundf(coeffs[r * data_unit_vector_size + c]), 0.f, 255.f);
+        uint8_t out[data_unit_vector_size];
 
-            block[r * pitch + c] = val;
+#pragma unroll
+        for (int c = 0; c < data_unit_vector_size; ++c) {
+            const int ival = std::roundf(coeffs[r * data_unit_vector_size + c]);
+            out[c]         = clamp(128 + ival, 0, 255);
         }
+
+        // Write eight bytes as a time, using the assumption that the pitch is a multiple of eight bytes.
+        *reinterpret_cast<uint2*>(&(block[r * pitch])) = *reinterpret_cast<uint2*>(out);
     }
 }
 

@@ -54,8 +54,10 @@ void bench_jpeggpu(const uint8_t* file_data, size_t file_size)
 
     jpeggpu_img d_img;
     for (int c = 0; c < img_info.num_components; ++c) {
-        CHECK_CUDA(cudaMalloc(&d_img.image[c], img_info.sizes_x[c] * img_info.sizes_y[c]));
-        d_img.pitch[c] = img_info.sizes_x[c];
+        // Round up to a multiple of eight.
+        const int pitch = (img_info.sizes_x[c] + 8 - 1) / 8 * 8;
+        CHECK_CUDA(cudaMalloc(&d_img.image[c], img_info.sizes_y[c] * pitch));
+        d_img.pitch[c] = pitch;
     }
 
     void* d_tmp     = nullptr;
