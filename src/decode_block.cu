@@ -20,6 +20,8 @@
 
 #include <jpeggpu/jpeggpu.h>
 
+#include <cuda/std/bit>
+
 using namespace jpeggpu;
 
 namespace {
@@ -28,20 +30,25 @@ namespace {
 constexpr int thread_block_size = 256;
 
 struct bit_reader {
-    __device__ bit_reader(const uint8_t* data, int bit_off) : data(data)
+    __device__ bit_reader(const uint8_t* data, int bit_off)
     {
-        buffer             = 0;
-        num_bits_in_buffer = 0;
-        read_bits(bit_off);
+        const int word_idx = bit_off / 32;
+        // cast is fine since d_data_stuffed is aligned by 256 bytes
+        next_data = reinterpret_cast<const uint32_t*>(data) + word_idx;
+
+        const uint32_t word    = cuda::std::byteswap(*(next_data++));
+        const int num_consumed = bit_off % 32;
+
+        buffer             = word;
+        num_bits_in_buffer = 32 - num_consumed;
     }
 
     __device__ void fill_bit_window()
     {
-        while (num_bits_in_buffer <= 32) {
-            buffer <<= 8;
-            buffer |= *(data++);
-
-            num_bits_in_buffer += 8;
+        if (num_bits_in_buffer < 32) {
+            buffer <<= 32;
+            buffer |= cuda::std::byteswap(*(next_data++));
+            num_bits_in_buffer += 32;
         }
     }
 
@@ -62,12 +69,13 @@ struct bit_reader {
 
     __device__ int peek_bits(int num_bits)
     {
-        assert(num_bits <= num_bits_in_buffer);
+        assert(num_bits_in_buffer >= num_bits);
         return (buffer >> (num_bits_in_buffer - num_bits)) & ((uint64_t{1} << num_bits) - 1);
     }
 
-    const uint8_t* data;
+    const uint32_t* next_data;
 
+    // The lowest positions store `num_bits_in_buffer` bits.
     uint64_t buffer;
     int num_bits_in_buffer;
 };
@@ -258,10 +266,7 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
 
     float coeffs[data_unit_size] = {0};
 
-    const int begin_bit  = bit_offsets[block_i];
-    const int begin_byte = begin_bit / 8;
-
-    bit_reader br(data + begin_byte, begin_bit % 8);
+    bit_reader br(data, bit_offsets[block_i]);
 
     br.fill_bit_window(); // get at least 32 bits
     uint32_t u32 = br.peek_bits(32);
@@ -269,9 +274,9 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
     // skip dc, already read
     int category_length = 0;
     int s               = get_category(u32, category_length, huff_dc);
-    br.skip_bits(category_length);
+    br.skip_bits(category_length); // max 16 bits
     if (s > 0) {
-        br.skip_bits(s);
+        br.skip_bits(s); // max 16 bits
     }
     coeffs[0] = dcs[block_i] * qtable->data[0];
 
@@ -280,13 +285,13 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         u32 = br.peek_bits(32);
 
         int sr = get_category(u32, category_length, huff_ac);
-        br.read_bits(category_length);
+        br.read_bits(category_length); // max 16 bits
         int r = sr >> 4;
         int s = sr & 15;
         if (s > 0) {
             k += r;
 
-            int bits  = br.read_bits(s);
+            int bits  = br.read_bits(s); // max 16 bits
             int coeff = huff_extend(bits, s);
 
             coeffs[order_natural[k]] = coeff * qtable->data[k];
