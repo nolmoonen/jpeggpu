@@ -17,6 +17,7 @@
 #define JPEGGPU_DECODE_HUFFMAN_READER_CUH_
 
 #include "decoder_defs.hpp"
+#include "huffman.cuh"
 #include "reader.hpp"
 
 #include <cuda_runtime.h>
@@ -26,12 +27,6 @@
 #include <stdint.h>
 
 namespace jpeggpu {
-
-/// \brief Rearrange bytes after loading an unsigned 32-bits integer.
-inline __device__ uint32_t swap_endian(uint32_t x)
-{
-    return __byte_perm(x, uint32_t{0}, uint32_t{0x0123});
-}
 
 /// \brief Reader state where each thread as a private buffer in shared memory.
 template <int block_size>

@@ -20,8 +20,6 @@
 
 #include <jpeggpu/jpeggpu.h>
 
-#include <cuda/std/bit>
-
 using namespace jpeggpu;
 
 namespace {
@@ -36,7 +34,7 @@ struct bit_reader {
         // cast is fine since d_data_stuffed is aligned by 256 bytes
         next_data = reinterpret_cast<const uint32_t*>(data) + word_idx;
 
-        const uint32_t word    = cuda::std::byteswap(*(next_data++));
+        const uint32_t word    = swap_endian(*(next_data++));
         const int num_consumed = bit_off % 32;
 
         buffer             = word;
@@ -47,7 +45,7 @@ struct bit_reader {
     {
         if (num_bits_in_buffer < 32) {
             buffer <<= 32;
-            buffer |= cuda::std::byteswap(*(next_data++));
+            buffer |= swap_endian(*(next_data++));
             num_bits_in_buffer += 32;
         }
     }
