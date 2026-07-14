@@ -20,8 +20,6 @@
 
 #include <jpeggpu/jpeggpu.h>
 
-#include <cuda/std/utility>
-
 using namespace jpeggpu;
 
 namespace {
@@ -95,7 +93,15 @@ __device__ void get_block_ptr_comp(
 }
 
 // High-Efficiency and Low-Power Architectures for 2-D DCT and IDCT Based on CORDIC Rotation, Sung et al. 2006
-__device__ void idct_vector(float vals[data_unit_vector_size])
+__device__ void idct_vector(
+    float& val0,
+    float& val1,
+    float& val2,
+    float& val3,
+    float& val4,
+    float& val5,
+    float& val6,
+    float& val7)
 {
     constexpr float sung_a = 1.3870398453221475; // print(f'{math.sqrt(2)*math.cos(1*math.pi/16)}')
     constexpr float sung_b = 1.3065629648763766; // print(f'{math.sqrt(2)*math.cos(2*math.pi/16)}')
@@ -105,34 +111,25 @@ __device__ void idct_vector(float vals[data_unit_vector_size])
     constexpr float sung_f = 0.2758993792829431; // print(f'{math.sqrt(2)*math.cos(7*math.pi/16)}')
     constexpr float sung_t = 0.3535533905932737; // print(f'{1/math.sqrt(8)}')
 
-    const float y0 = vals[0];
-    const float y1 = vals[1];
-    const float y2 = vals[2];
-    const float y3 = vals[3];
-    const float y4 = vals[4];
-    const float y5 = vals[5];
-    const float y6 = vals[6];
-    const float y7 = vals[7];
+    const float yg = (val0 + val4) + (val2 * sung_b + val6 * sung_e);
+    const float yh = val7 * sung_f + val1 * sung_a + val3 * sung_c + val5 * sung_d;
+    const float yi = (val0 + val4) - (val2 * sung_b + val6 * sung_e);
+    const float yj = val7 * sung_a - val1 * sung_f + val3 * sung_d - val5 * sung_c;
 
-    const float yg = (y0 + y4) + (y2 * sung_b + y6 * sung_e);
-    const float yh = y7 * sung_f + y1 * sung_a + y3 * sung_c + y5 * sung_d;
-    const float yi = (y0 + y4) - (y2 * sung_b + y6 * sung_e);
-    const float yj = y7 * sung_a - y1 * sung_f + y3 * sung_d - y5 * sung_c;
+    const float yk = (val0 - val4) + (val2 * sung_e - val6 * sung_b);
+    const float yl = val1 * sung_c - val7 * sung_d - val3 * sung_f - val5 * sung_a;
+    const float ym = (val0 - val4) - (val2 * sung_e - val6 * sung_b);
+    const float yn = val1 * sung_d + val7 * sung_c - val3 * sung_a + val5 * sung_f;
 
-    const float yk = (y0 - y4) + (y2 * sung_e - y6 * sung_b);
-    const float yl = y1 * sung_c - y7 * sung_d - y3 * sung_f - y5 * sung_a;
-    const float ym = (y0 - y4) - (y2 * sung_e - y6 * sung_b);
-    const float yn = y1 * sung_d + y7 * sung_c - y3 * sung_a + y5 * sung_f;
+    val0 = sung_t * (yg + yh);
+    val7 = sung_t * (yg - yh);
+    val4 = sung_t * (yi + yj);
+    val3 = sung_t * (yi - yj);
 
-    vals[0] = sung_t * (yg + yh);
-    vals[7] = sung_t * (yg - yh);
-    vals[4] = sung_t * (yi + yj);
-    vals[3] = sung_t * (yi - yj);
-
-    vals[1] = sung_t * (yk + yl);
-    vals[5] = sung_t * (ym - yn);
-    vals[2] = sung_t * (ym + yn);
-    vals[6] = sung_t * (yk - yl);
+    val1 = sung_t * (yk + yl);
+    val5 = sung_t * (ym - yn);
+    val2 = sung_t * (ym + yn);
+    val6 = sung_t * (yk - yl);
 }
 
 __device__ int clamp(int x, int x_min, int x_max) { return max(x_min, min(x, x_max)); }
@@ -300,43 +297,44 @@ __launch_bounds__(thread_block_size) __global__ void decode_sequential(
         }
     }
 
+    // IDCT over the columns.
 #pragma unroll
-    for (int r = 0; r < data_unit_vector_size; ++r) {
-        idct_vector(coeffs + r * data_unit_vector_size);
+    for (int i = 0; i < data_unit_vector_size; ++i) {
+        idct_vector(
+            coeffs[0 * data_unit_vector_size + i],
+            coeffs[1 * data_unit_vector_size + i],
+            coeffs[2 * data_unit_vector_size + i],
+            coeffs[3 * data_unit_vector_size + i],
+            coeffs[4 * data_unit_vector_size + i],
+            coeffs[5 * data_unit_vector_size + i],
+            coeffs[6 * data_unit_vector_size + i],
+            coeffs[7 * data_unit_vector_size + i]);
     }
 
-    for (int r = 0; r < data_unit_vector_size; ++r) {
-        for (int c = r + 1; c < data_unit_vector_size; ++c) {
-            cuda::std::swap(
-                coeffs[r * data_unit_vector_size + c], coeffs[c * data_unit_vector_size + r]);
-        }
-    }
-
+    // IDCT over the rows.
 #pragma unroll
-    for (int r = 0; r < data_unit_vector_size; ++r) {
-        idct_vector(coeffs + r * data_unit_vector_size);
-    }
+    for (int i = 0; i < data_unit_vector_size; ++i) {
+        if (y + i >= size.y) continue;
 
-    for (int r = 0; r < data_unit_vector_size; ++r) {
-        for (int c = r + 1; c < data_unit_vector_size; ++c) {
-            cuda::std::swap(
-                coeffs[r * data_unit_vector_size + c], coeffs[c * data_unit_vector_size + r]);
-        }
-    }
-
-    for (int r = 0; r < data_unit_vector_size; ++r) {
-        if (y + r >= size.y) continue;
+        idct_vector(
+            coeffs[i * data_unit_vector_size + 0],
+            coeffs[i * data_unit_vector_size + 1],
+            coeffs[i * data_unit_vector_size + 2],
+            coeffs[i * data_unit_vector_size + 3],
+            coeffs[i * data_unit_vector_size + 4],
+            coeffs[i * data_unit_vector_size + 5],
+            coeffs[i * data_unit_vector_size + 6],
+            coeffs[i * data_unit_vector_size + 7]);
 
         uint8_t out[data_unit_vector_size];
-
 #pragma unroll
-        for (int c = 0; c < data_unit_vector_size; ++c) {
-            const int ival = std::roundf(coeffs[r * data_unit_vector_size + c]);
-            out[c]         = clamp(128 + ival, 0, 255);
+        for (int j = 0; j < data_unit_vector_size; ++j) {
+            const int ival = std::roundf(coeffs[i * data_unit_vector_size + j]);
+            out[j]         = clamp(128 + ival, 0, 255);
         }
 
         // Write eight bytes as a time, using the assumption that the pitch is a multiple of eight bytes.
-        *reinterpret_cast<uint2*>(&(block[r * pitch])) = *reinterpret_cast<uint2*>(out);
+        *reinterpret_cast<uint2*>(&(block[i * pitch])) = *reinterpret_cast<uint2*>(out);
     }
 }
 
