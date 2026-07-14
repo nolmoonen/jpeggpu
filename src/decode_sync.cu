@@ -72,7 +72,9 @@ struct subsequence_info {
     ///   encoded symbol is at most 32 bits).
     ///   TODO size_t?
     int p;
-    /// \brief The number of decoded symbols relative to the segment.
+    /// \brief The number of decoded symbols relative to the segment. Must be per-segment because
+    ///   a restart marker maybe read as a valid coefficient by a context-less reader.
+    ///   To prevent these from being scanned a distinction must be made between segments.
     int n;
     /// \brief The data unit index in the MCU. Combined with the sampling factors, the color component
     ///   can be inferred. The paper calls this field "the current color component",
@@ -218,8 +220,6 @@ __device__ void decode_next_symbol(
 /// \param[inout] rstate
 /// \param[in] tables
 /// \param[in] info
-/// \param[in] position_in_output Offset in `out` where the decoded coefficients of this subsequence
-///   will be written. Only relevant if `do_write` is true.
 template <bool do_write, typename reader_state>
 __device__ subsequence_info decode_subsequence(
     int subseq_idx,
@@ -229,16 +229,15 @@ __device__ subsequence_info decode_subsequence(
     int segment_idx,
     reader_state& rstate,
     const huffman_tables& tables,
-    subsequence_info info,
-    int position_in_output = 0)
+    subsequence_info info)
 {
     const int end_subseq = (subseq_idx + 1) * subsequence_size; // first bit in next subsequence
     while (true) {
         // check if we have all blocks. this is needed since the scan is padded to a 8-bit multiple
         //   (so info.p cannot reliably be used to determine if the loop should break)
         //   this problem is exacerbated by restart intervals, where padding occurs more frequently
-        if (do_write && position_in_output >= (segment_idx + 1) * cstate.num_mcus_in_segment *
-                                                  cstate.num_data_units_in_mcu * data_unit_size) {
+        if (do_write && info.n >= (segment_idx + 1) * cstate.num_mcus_in_segment *
+                                      cstate.num_data_units_in_mcu * data_unit_size) {
             break;
         }
 
@@ -279,8 +278,8 @@ __device__ subsequence_info decode_subsequence(
         // commit
 
         if (do_write && info.z == 0) {
-            assert(position_in_output % data_unit_size == 0);
-            const int data_unit_idx          = position_in_output / data_unit_size;
+            assert(info.n % data_unit_size == 0);
+            const int data_unit_idx          = info.n / data_unit_size;
             block_bit_offsets[data_unit_idx] = info.p;
             if (symbol != 0) { // only write non-zero
                 dcs[data_unit_idx] = symbol;
@@ -289,19 +288,14 @@ __device__ subsequence_info decode_subsequence(
 
         discard_bits(rstate, length);
 
-        if (do_write) {
-            // TODO why use position_in_output instead of info.n?
-            position_in_output += run_length + 1;
-        }
-
         info.p += length;
-        if (!do_write) info.n += run_length + 1;
+        info.n += run_length + 1;
         info.z += run_length + 1;
 
         if (info.z >= 64) {
             // do_write implies synced
             assert(info.z == 64 || !do_write);
-            assert(position_in_output % 64 == 0 || !do_write);
+            assert(info.n % 64 == 0 || !do_write);
 
             // the data unit is complete
             info.z = 0;
@@ -579,8 +573,8 @@ __global__ void decode_write(
     constexpr bool do_write = true;
     if (subseq_idx == seg_info.subseq_offset) {
         subsequence_info info;
-        info.p = subseq_idx * subsequence_size;
-        // n is not used in writing
+        info.p     = subseq_idx * subsequence_size;
+        info.n     = position_in_output;
         info.c     = 0;
         info.z     = 0;
         info.cache = 0;
@@ -588,30 +582,15 @@ __global__ void decode_write(
         reader_state rstate = make_rstate<block_size>(cstate.scan, seg_info, rstate_memory, info.p);
 
         decode_subsequence<do_write>(
-            subseq_idx,
-            dcs,
-            block_bit_offsets,
-            cstate,
-            segment_idx,
-            rstate,
-            tables,
-            info,
-            position_in_output);
+            subseq_idx, dcs, block_bit_offsets, cstate, segment_idx, rstate, tables, info);
     } else {
         subsequence_info info = s_info[subseq_idx - 1];
+        info.n                = position_in_output;
 
         reader_state rstate = make_rstate<block_size>(cstate.scan, seg_info, rstate_memory, info.p);
 
         decode_subsequence<do_write>(
-            subseq_idx,
-            dcs,
-            block_bit_offsets,
-            cstate,
-            segment_idx,
-            rstate,
-            tables,
-            info,
-            position_in_output);
+            subseq_idx, dcs, block_bit_offsets, cstate, segment_idx, rstate, tables, info);
     }
 }
 
