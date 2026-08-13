@@ -17,7 +17,6 @@
 #include "decode_block.hpp"
 #include "decode_dc.hpp"
 #include "decode_sync.hpp"
-#include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
 #include "marker.hpp"

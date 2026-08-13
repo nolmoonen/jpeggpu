@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2024 Nol Moonen
+# Copyright (c) 2023-2026 Nol Moonen
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -37,7 +37,6 @@ add_library(jpeggpu STATIC
     "${SOURCE_DIR}/decode_dc.cu"
     "${SOURCE_DIR}/decode_destuff.cu"
     "${SOURCE_DIR}/decode_sync.cu"
-    "${SOURCE_DIR}/decode_transpose.cu"
     "${SOURCE_DIR}/decoder.cpp"
     "${SOURCE_DIR}/defs.cpp"
     "${SOURCE_DIR}/reader.cpp")

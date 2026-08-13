@@ -37,7 +37,6 @@
 #include "decode_dc.hpp"
 #include "decode_destuff.hpp"
 #include "decode_sync.hpp"
-#include "decode_transpose.hpp"
 #include "decoder_defs.hpp"
 #include "defs.hpp"
 #include "huffman.cuh"
